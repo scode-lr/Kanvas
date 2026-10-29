@@ -156,7 +156,13 @@
       "state": "todo",
       "group": "FE",
       "deps": ["FE-01"],
-      "desc": "Follow the system setting, with a toggle in the header."
+      "desc": "Follow the system setting, with a toggle in the header.",
+      "definition": {
+        "approved": true,
+        "outcome": "The forecast UI follows the user's preferred theme.",
+        "needs": "System preference plus a persistent header override.",
+        "acceptance": "Light and dark modes switch without a reload and meet contrast requirements."
+      }
     },
     {
       "id": "FE-05",

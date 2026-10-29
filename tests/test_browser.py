@@ -318,7 +318,7 @@ class BrowserSmokeTests(unittest.TestCase):
                                                   f" && {NOTE_BOX}.value === ''")
 
         self.cli("note", "BE-03", "Agent note from the CLI")
-        self.cli("start", "FE-04")
+        self.cli("start", "FE-04", "-m", "Implement theme tokens, persistence and contrast tests")
         self.until("the agent's note and start", "document.querySelector('#panel').innerText.includes('Agent note from the CLI')"
                                                  " && document.querySelector('[data-id=\"FE-04\"]').classList.contains('s-doing')",
                    timeout=5)

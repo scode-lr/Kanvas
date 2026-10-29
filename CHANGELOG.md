@@ -1,4 +1,14 @@
 # Changelog
+## v0.5.0 — 2026-10-29
+Kanvas models delivery evidence instead of treating “done” as a manual label.
+
+- Add the Production state: Done means merged to `dev`; Production means merged to `main`/`master` and deployed
+- Gate Proposed → To do with a PO/TL product definition and To do → Doing with an architect/senior construction plan
+- Record Git worktree, branch, commit and dirty state when agents start code work
+- Split Review into independent agent and manual approvals; an implementer cannot approve their own work
+- Require dev merge evidence before Done and production evidence before Production
+- Keep YOLO for autonomous task selection without allowing it to bypass definitions, reviews or delivery gates
+
 ## v0.4.0 — 2026-10-27
 Kanvas runs without Obsidian. The board is a JSON file, agents use a new CLI, and you plan and review in an interactive HTML page.
 

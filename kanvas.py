@@ -34,7 +34,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote, urlparse
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 FORMAT = 1
 INSTALLED = __name__ == "kanvas_board"
 BOARD_FILE = "kanvas.json"
@@ -42,11 +42,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HTML_FILE = os.path.join(HERE, "kanvas.html")
 SNAPSHOT_TAG = '<script id="kanvas-snapshot" type="application/json"></script>'
 
-STATES = ("proposed", "todo", "doing", "review", "done")
+STATES = ("proposed", "todo", "doing", "review", "done", "production")
 ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
 PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}$")
 UNGROUPED_PREFIX = "G"
-TASK_KEYS = ("id", "title", "state", "group", "deps", "yolo", "at", "by", "desc", "notes")
+TASK_KEYS = ("id", "title", "state", "group", "deps", "yolo", "at", "by", "desc",
+             "definition", "work", "review", "delivery", "notes")
 REQUIRED_TASK_KEYS = ("id", "title", "state")
 GROUP_KEYS = ("id", "name")
 NOTE_KEYS = ("at", "by", "edited", "text")
@@ -125,6 +126,9 @@ def parse_board(text):
             t.pop("yolo", None)
         notes = t.get("notes")
         t["notes"] = [n for n in notes if isinstance(n, dict)] if isinstance(notes, list) else []
+        for key in ("definition", "work", "review", "delivery"):
+            if key in t and not isinstance(t[key], dict):
+                t.pop(key, None)
     return board
 
 
@@ -367,31 +371,32 @@ def group_label(board, gid):
     return "Ungrouped" if not gid else f"{gid} (unknown group)"
 
 
+def is_complete(task):
+    """A dependency is complete once merged to dev, whether or not it is in production."""
+    return bool(task) and task.get("state") in ("done", "production")
+
+
 def unmet_deps(task, tasks):
-    """Dependency IDs that are not done yet. Missing tasks count as unmet."""
+    """Dependency IDs that are not merged to dev yet. Missing tasks count as unmet."""
     out = []
     for dep in task.get("deps", []):
         d = tasks.get(dep.upper())
-        if d is None or d.get("state") != "done":
+        if not is_complete(d):
             out.append(dep)
     return out
 
 
 def yolo_active(task):
     """A YOLO mark counts until its task goes to review: the chain is finished then."""
-    return bool(task.get("yolo")) and task.get("state") not in ("review", "done")
+    return bool(task.get("yolo")) and task.get("state") not in ("review", "done", "production")
 
 
 def yolo_cover(board):
     """Map task ID (upper case) -> ID of the YOLO task covering it.
 
-    A human sets `yolo` on a task; until that task goes to review, it covers
-    itself and everything it transitively depends on, and finishing a covered
-    task marks it done without review. Setting YOLO approves the chain's
-    proposals (yoloOn in kanvas.html); a proposal linked into the chain later
-    stays a proposal until a human approves it.
-    Only the last YOLO task of a chain goes to review: a YOLO task that another
-    one depends on is covered by it like the rest of the chain.
+    Until the marked task goes to review, done or production, it selects itself
+    and everything it transitively depends on for autonomous attention. It does
+    not bypass definitions, review gates or delivery evidence.
     """
     tasks = task_map(board)
     active = [t for t in board["tasks"] if yolo_active(t)]
@@ -648,7 +653,7 @@ def problems(board):
                 errors.append(f"{tid} depends on itself")
             elif dep.upper() not in tasks:
                 errors.append(f"{tid} depends on missing task {dep}")
-        if t.get("state") in ("doing", "review", "done"):
+        if t.get("state") in ("doing", "review", "done", "production"):
             pending = [d for d in unmet_deps(t, tasks) if d.upper() in tasks]
             if pending:
                 warnings.append(f"{tid} is {t['state']} but depends on unfinished {', '.join(pending)}")
@@ -696,6 +701,51 @@ def actor(args):
     return getattr(args, "as_name", None) or os.environ.get("KANVAS_AGENT") or "agent"
 
 
+def git_snapshot(path, required=False):
+    """Describe the Git worktree containing path, without changing it."""
+    path = os.path.abspath(path)
+
+    def git(*parts):
+        proc = subprocess.run(
+            ["git", "-C", path, *parts], capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+    code, root, error = git("rev-parse", "--show-toplevel")
+    if code:
+        if required:
+            raise KanvasError(f"Not a Git worktree: {path}" + (f" ({error})" if error else ""))
+        return None
+    code, commit, error = git("rev-parse", "HEAD")
+    if code:
+        raise KanvasError(f"Cannot read the Git commit in {path}: {error or 'unknown Git error'}")
+    _, branch, _ = git("branch", "--show-current")
+    _, common, _ = git("rev-parse", "--path-format=absolute", "--git-common-dir")
+    repo = os.path.dirname(common) if os.path.basename(common).lower() == ".git" else os.path.abspath(root)
+    code, changes, error = git("status", "--porcelain")
+    if code:
+        raise KanvasError(f"Cannot read Git status in {path}: {error or 'unknown Git error'}")
+    return {
+        "repo": repo,
+        "worktree": os.path.abspath(root),
+        "branch": branch or "(detached)",
+        "commit": commit,
+        "dirty": bool(changes),
+    }
+
+
+def worktree_snapshots(paths):
+    explicit = bool(paths)
+    snapshots, seen = [], set()
+    for path in paths or [os.getcwd()]:
+        snap = git_snapshot(path, required=explicit)
+        if snap and snap["worktree"].lower() not in seen:
+            seen.add(snap["worktree"].lower())
+            snapshots.append(snap)
+    return snapshots
+
+
 def read_input(value, use_stdin=False, file_path=None, what="text"):
     """Text from an argument, stdin, or a file.
 
@@ -729,7 +779,7 @@ def id_width(tasks):
 
 
 def yolo_mark(task, cover):
-    return "  (YOLO)" if cover and task["state"] in ("todo", "doing") and task["id"].upper() in cover else ""
+    return "  (YOLO)" if cover and task["state"] in ("proposed", "todo", "doing") and task["id"].upper() in cover else ""
 
 
 def _gist(text):
@@ -770,11 +820,11 @@ def print_task(board, task):
     via = cover.get(task["id"].upper())
     if via and task["state"] == "proposed":
         print(f"YOLO:   joins the chain of {via} once a human approves it")
-    elif via and task["state"] not in ("review", "done"):
+    elif via and task["state"] not in ("review", "done", "production"):
         if via == task["id"]:
-            print("YOLO:   set on this task; you may start it without approval, and finishing sends it to review")
+            print("YOLO:   set on this task; all workflow gates still apply")
         else:
-            print(f"YOLO:   through {via}; you may start it without approval, and finishing marks it done (no review)")
+            print(f"YOLO:   through {via}; all workflow gates still apply")
     if task.get("deps"):
         print("Depends on:")
         for dep in task["deps"]:
@@ -782,7 +832,7 @@ def print_task(board, task):
             if d is None:
                 print(f"  [?] {dep}  (missing)")
             else:
-                mark = "x" if d["state"] == "done" else " "
+                mark = "x" if is_complete(d) else " "
                 print(f"  [{mark}] {d['id']}  {d['title']}  ({view_state(d, tasks)}){yolo_mark(d, cover)}")
     blocks = [t for t in board["tasks"] if task["id"].upper() in (d.upper() for d in t.get("deps", []))]
     if blocks:
@@ -791,6 +841,29 @@ def print_task(board, task):
             print(f"  {t['id']}  {t['title']}  ({view_state(t, tasks)}){yolo_mark(t, cover)}")
     print("\nDescription:")
     print(_indent(task.get("desc") or "(none)"))
+    if task.get("definition"):
+        print("\nProduct definition:")
+        for key in ("outcome", "needs", "acceptance", "non_goals"):
+            if task["definition"].get(key):
+                print(f"  {key.replace('_', ' ').title()}: {task['definition'][key]}")
+    if task.get("work"):
+        print("\nConstruction:")
+        print(f"  {task['work'].get('by', '?')} · {task['work'].get('at', '')}")
+        print(_indent(task["work"].get("plan", ""), "  "))
+        for git in task["work"].get("git", []):
+            dirty = " + uncommitted changes" if git.get("dirty") else ""
+            print(f"  Git: {git.get('branch', '?')} @ {str(git.get('commit', ''))[:12]}{dirty}")
+            print(f"       {git.get('worktree') or git.get('repo', '')}")
+    if task.get("review"):
+        agent = task["review"].get("agent") or {}
+        manual = task["review"].get("manual") or {}
+        print(f"\nReview: agent={agent.get('status', 'pending')}, manual={manual.get('status', 'pending')}")
+    if task.get("delivery"):
+        print("\nDelivery:")
+        for stage in ("dev", "production"):
+            evidence = task["delivery"].get(stage)
+            if evidence:
+                print(f"  {stage}: {evidence.get('evidence', '')}")
     if task.get("notes"):
         print("\nNotes:")
         for n in task["notes"]:
@@ -810,8 +883,9 @@ def _indent(text, prefix="  "):
 STATE_HINTS = {
     "proposed": "it is a proposal; a human must approve it first",
     "doing": "it is already in progress",
-    "review": "it is waiting for human review",
-    "done": "it is done",
+    "review": "it is waiting for agent and manual review",
+    "done": "it is merged to dev",
+    "production": "it is in production",
     "blocked": "it is blocked",
 }
 
@@ -883,7 +957,7 @@ def cmd_status(args):
     board = load_board(path)
     tasks = task_map(board)
     cover = yolo_cover(board)
-    buckets = {k: [] for k in ("doing", "review", "todo", "blocked", "proposed", "done")}
+    buckets = {k: [] for k in ("doing", "review", "todo", "blocked", "proposed", "done", "production")}
     for t in board["tasks"]:
         buckets.setdefault(view_state(t, tasks), []).append(t)
     total = len(board["tasks"])
@@ -898,17 +972,17 @@ def cmd_status(args):
         parts = []
         for g in board["groups"]:
             members = [t for t in board["tasks"] if t.get("group") == g["id"]]
-            done = sum(1 for t in members if t["state"] == "done")
+            done = sum(1 for t in members if is_complete(t))
             parts.append(f"{g['name']} [{g['id']}] {done}/{len(members)}")
         print("Groups: " + ", ".join(parts))
     yolo = [t["id"] for t in board["tasks"] if cover.get(t["id"].upper()) == t["id"]]
     if yolo:
         names = ", ".join(yolo)
-        print(f"YOLO on {names}: tasks marked (YOLO) need no approval and finishing them marks them done; "
-              f"{names} {'itself goes' if len(yolo) == 1 else 'themselves go'} to review.")
+        print(f"YOLO on {names}: tasks marked (YOLO) still require definition and review gates; "
+              "YOLO only keeps the chain selected for autonomous work.")
     sections = (
         ("doing", "Doing"),
-        ("review", "Waiting for human review"),
+        ("review", "Waiting for agent/manual review"),
         ("todo", "Ready to start"),
         ("blocked", "Blocked"),
         ("proposed", "Proposed, awaiting human approval"),
@@ -1024,7 +1098,24 @@ def cmd_check(args):
 
 def cmd_start(args):
     path = board_path(args)
-    note = read_input(args.message, args.stdin, args.file, "note")
+    preview = load_board(path)
+    preview_tasks = task_map(preview)
+    preview_task = find_task(preview, args.id)
+    preview_state = view_state(preview_task, preview_tasks)
+    if preview_state == "blocked":
+        raise KanvasError(f"{preview_task['id']} is blocked by unfinished {', '.join(unmet_deps(preview_task, preview_tasks))}")
+    if preview_state != "todo":
+        raise KanvasError(f"{preview_task['id']} cannot be started: {STATE_HINTS[preview_state]}")
+    if not isinstance(preview_task.get("definition"), dict) or not preview_task["definition"].get("approved"):
+        raise KanvasError(f"{preview_task['id']} has no approved product definition; complete the PO/TL grill in the board first")
+    note = read_input(args.message, args.stdin, args.file, "technical plan")
+    if not note:
+        raise KanvasError(
+            "start needs the architecture/senior construction plan after the technical grill, e.g. "
+            f'`{command_line("start " + args.id)} -m "Plan: API, data, tests and rollout"`'
+        )
+
+    git = worktree_snapshots(args.worktree)
 
     def op(board):
         tasks = task_map(board)
@@ -1034,13 +1125,20 @@ def cmd_start(args):
             raise KanvasError(f"{t['id']} is blocked by unfinished {', '.join(unmet_deps(t, tasks))}")
         if vs != "todo":
             raise KanvasError(f"{t['id']} cannot be started: {STATE_HINTS[vs]}")
+        if not isinstance(t.get("definition"), dict) or not t["definition"].get("approved"):
+            raise KanvasError(f"{t['id']} has no approved product definition; complete the PO/TL grill in the board first")
         t["state"] = "doing"
-        if note:
-            add_note(t, note, actor(args))
+        t["work"] = {"by": actor(args), "at": now_iso(), "plan": note}
+        if git:
+            t["work"]["git"] = git
+        t.pop("review", None)
+        add_note(t, note, actor(args))
         return board, t
 
     board, t = mutate(path, op)
     print(f"Started {t['id']} (todo -> doing)\n")
+    if not git:
+        print("Warning: no Git worktree was detected; use --worktree PATH for code work.\n")
     print_task(board, t)
 
 
@@ -1058,17 +1156,46 @@ def cmd_finish(args):
         if t["state"] != "doing":
             raise KanvasError(f"{t['id']} is {view_state(t, task_map(board))}; only tasks in progress can be finished")
         add_note(t, summary, actor(args))
-        via = yolo_cover(board).get(t["id"].upper())
-        t["state"] = "done" if via and via.upper() != t["id"].upper() else "review"
-        return t, via
+        t["state"] = "review"
+        t["review"] = {
+            "agent": {"status": "pending"},
+            "manual": {"status": "pending"},
+        }
+        return t
 
-    t, via = mutate(path, op)
-    if t["state"] == "done":
-        print(f"Finished {t['id']} (doing -> done). YOLO covers it through {via}, so it skips review.")
-    elif via:
-        print(f"Finished {t['id']} (doing -> review). YOLO is set on it, so a human reviews it; its YOLO chain is complete.")
+    t = mutate(path, op)
+    print(f"Finished {t['id']} (doing -> review). It now needs an independent agent review and manual review.")
+
+
+def cmd_agent_review(args):
+    path = board_path(args)
+    summary = read_input(args.message, args.stdin, args.file, "review summary")
+    if not summary:
+        raise KanvasError("agent-review needs findings or an approval summary")
+
+    def op(board):
+        t = find_task(board, args.id)
+        if t["state"] != "review":
+            raise KanvasError(f"{t['id']} is {view_state(t, task_map(board))}; only tasks in review can be reviewed")
+        reviewer = actor(args)
+        implementer = (t.get("work") or {}).get("by")
+        if args.approve and implementer and reviewer == implementer:
+            raise KanvasError(f"{t['id']} was implemented by {implementer}; independent agent review needs another identity")
+        status = "approved" if args.approve else "changes_requested"
+        review = t.setdefault("review", {})
+        review["agent"] = {"status": status, "by": reviewer, "at": now_iso(), "summary": summary}
+        review.setdefault("manual", {"status": "pending"})
+        add_note(t, f"Agent review {status.replace('_', ' ')}: {summary}", reviewer)
+        if not args.approve:
+            t["state"] = "doing"
+            review["manual"] = {"status": "pending"}
+        return t, status
+
+    t, status = mutate(path, op)
+    if status == "approved":
+        print(f"Agent review approved for {t['id']}. It still needs manual review and merge evidence for dev.")
     else:
-        print(f"Finished {t['id']} (doing -> review). A human will review it.")
+        print(f"Agent review requested changes on {t['id']} (review -> doing).")
 
 
 def cmd_pause(args):
@@ -1096,8 +1223,8 @@ def cmd_note(args):
 
     def op(board):
         t = find_task(board, args.id)
-        if t["state"] == "done":
-            raise KanvasError(f"{t['id']} is done; propose a follow-up task instead")
+        if t["state"] in ("done", "production"):
+            raise KanvasError(f"{t['id']} is {t['state']}; propose a follow-up task instead")
         waited, requested = open_question(t), change_request(t)
         add_note(t, text, actor(args))
         return t, waited, requested
@@ -1260,8 +1387,8 @@ def cmd_depend(args):
 
     def op(board):
         t = find_task(board, args.id)
-        if t["state"] == "done":
-            raise KanvasError(f"{t['id']} is done; dependencies can no longer change")
+        if is_complete(t):
+            raise KanvasError(f"{t['id']} is {t['state']}; dependencies can no longer change")
         before = yolo_cover(board)
         added = []
         for ref in args.on:
@@ -2655,22 +2782,19 @@ def cmd_service(args):
 # ---------------------------------------------------------------------------
 
 EPILOG = """\
-workflow:  proposed -> todo -> doing -> review -> done
-  Agents propose, start, pause, finish, note and add dependencies, and may
-  edit, withdraw or rewire proposals until a human approves them.
-  Humans approve proposals and mark work done in the board (`serve`).
+workflow:  proposed -> todo -> doing -> review -> done -> production
+  Product definition (PO/TL) gates todo; a technical plan (Architect/Senior)
+  gates doing. Independent agent and manual reviews gate the dev merge (done),
+  and main/deployment evidence gates production.
   A todo task with unfinished dependencies shows as blocked.
   An agent that needs the human's reply in the conversation runs `ask`
   first, so the board shows the task waiting for them until the next note.
-  YOLO on a task: turning it on approves it and everything it depends on;
-  finishing them marks them done, and the YOLO task itself goes to review.
-  A proposal linked into the chain later still needs a human's approval.
-  When YOLO tasks follow one another in a chain, only the last one goes to
-  review. YOLO ends once its task is in review.
+  YOLO selects a dependency chain for autonomous attention; it never bypasses
+  definitions, plans, reviews, merges or production evidence.
 
 examples:
   %(prog)s status
-  %(prog)s start DV-02
+  %(prog)s start DV-02 -m "Plan: API, data, tests and rollout" --worktree .
   %(prog)s finish DV-02 -m "Implemented the parser; 14 tests pass"
   %(prog)s propose Development "Add retries" "Retry failed uploads" --deps DV-02
 """
@@ -2703,22 +2827,30 @@ def build_parser():
 
     add("status", cmd_status, "board overview (default command)")
     p = add("list", cmd_list, "list tasks, optionally filtered by state or group")
-    p.add_argument("filter", nargs="?", help="proposed, todo/ready, blocked, doing, review, done, or a group")
+    p.add_argument("filter", nargs="?", help="proposed, todo/ready, blocked, doing, review, done, production, or a group")
     p = add("show", cmd_show, "task details, dependencies and notes")
     p.add_argument("id")
     add("ready", cmd_ready, "tasks that can be started now")
     add("blocked", cmd_blocked, "blocked tasks and what they wait on")
     add("check", cmd_check, "validate the board (exit code 1 on errors)")
 
-    p = add("start", cmd_start, "start a ready task (todo -> doing)")
+    p = add("start", cmd_start, "start a ready task with a technical construction plan (todo -> doing)")
     p.add_argument("id")
-    p.add_argument("-m", "--message", help="optional note, e.g. your plan")
-    text_sources(p, "note")
-    p = add("finish", cmd_finish, "hand a task over for review (doing -> review; done when a YOLO task depends on it); "
-                                  "needs a summary")
+    p.add_argument("-m", "--message", help="required architecture/senior construction plan")
+    p.add_argument("--worktree", action="append", metavar="PATH",
+                   help="Git worktree used for the task (repeatable; defaults to the current directory when it is in Git)")
+    text_sources(p, "technical plan")
+    p = add("finish", cmd_finish, "hand a task over for independent agent and manual review (doing -> review); needs a summary")
     p.add_argument("id")
     p.add_argument("-m", "--message", help="summary of what you did")
     text_sources(p, "summary")
+    p = add("agent-review", cmd_agent_review, "independently approve a reviewed task or request changes")
+    p.add_argument("id")
+    verdict = p.add_mutually_exclusive_group(required=True)
+    verdict.add_argument("--approve", action="store_true", help="approve the implementation")
+    verdict.add_argument("--changes", action="store_true", help="request changes and return it to doing")
+    p.add_argument("-m", "--message", help="review findings or approval summary")
+    text_sources(p, "review summary")
     p = add("pause", cmd_pause, "stop working on a task (doing -> todo)")
     p.add_argument("id")
     p.add_argument("-m", "--message", help="optional note on why")

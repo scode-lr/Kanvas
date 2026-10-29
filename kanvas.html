@@ -13,9 +13,9 @@
   --text: #151a25; --muted: #5a6577; --faint: #656d7b; --accent: #4f46e5; --accent-text: #fff; --raise: #fff;
   --shadow: 0 1px 2px rgb(16 24 40 / .05), 0 1px 3px rgb(16 24 40 / .07);
   --shadow-lg: 0 14px 34px rgb(16 24 40 / .14), 0 3px 8px rgb(16 24 40 / .07);
-  --proposed: #9b51e0; --todo: #0b94d8; --blocked: #8d97a7; --doing: #f5650f; --review: #e03a85; --done: #16a34a;
+  --proposed: #9b51e0; --todo: #0b94d8; --blocked: #8d97a7; --doing: #f5650f; --review: #e03a85; --done: #16a34a; --production: #087f8c;
   /* Fills keep 4.5:1 with --fill-text, also when a button brightens on hover. */
-  --todo-fill: #0073b5; --doing-fill: #bd4900; --review-fill: #ce2576; --done-fill: #008027; --fill-text: #fff;
+  --todo-fill: #0073b5; --doing-fill: #bd4900; --review-fill: #ce2576; --done-fill: #008027; --production-fill: #066773; --fill-text: #fff;
   --badge-mix: 60%; --toast-mix: 66%; --mark-mix: 80%; --danger: #dc2626; --yolo-mark: #c47b00;
   --yolo: #eda200; --y1: #fff1a8; --y2: #ffc61a; --y3: #ff9500; --y4: #ff6200; --yolo-ink: #3a2000;
   --yolo-fill: linear-gradient(100deg, var(--y1), var(--y2) 30%, var(--y3) 70%, var(--y4));
@@ -28,8 +28,8 @@
   --bg: #0d0f14; --surface: #161920; --surface-2: #1c2028; --border: #282d38; --border-strong: #3a4150;
   --text: #e6e8ec; --muted: #a0a8b6; --faint: #7f8799; --accent: #8b93ff; --accent-text: #0d0f14; --raise: #2a2f3a;
   --shadow: 0 1px 2px rgb(0 0 0 / .45); --shadow-lg: 0 14px 34px rgb(0 0 0 / .55);
-  --proposed: #b98af5; --todo: #3bb4f0; --blocked: #7a8597; --doing: #ff8a3d; --review: #f06aa8; --done: #3fcf78; --yolo: #ffc53d;
-  --todo-fill: var(--todo); --doing-fill: var(--doing); --review-fill: var(--review); --done-fill: var(--done); --fill-text: #0d0f14;
+  --proposed: #b98af5; --todo: #3bb4f0; --blocked: #7a8597; --doing: #ff8a3d; --review: #f06aa8; --done: #3fcf78; --production: #39c4d2; --yolo: #ffc53d;
+  --todo-fill: var(--todo); --doing-fill: var(--doing); --review-fill: var(--review); --done-fill: var(--done); --production-fill: var(--production); --fill-text: #0d0f14;
   --badge-mix: 76%; --toast-mix: 45%; --mark-mix: 90%; --danger: #f6443d; --yolo-mark: var(--yolo);
   --edge: #343a47; --edge-open: #7a8496; --lane: rgb(255 255 255 / .022); --grid: #1f232c;
 }
@@ -56,7 +56,7 @@ kbd { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--border);
 .icon svg { width: 16px; height: 16px; }
 .s-proposed { --c: var(--proposed); } .s-todo { --c: var(--todo); --c-fill: var(--todo-fill); } .s-blocked { --c: var(--blocked); }
 .s-doing { --c: var(--doing); --c-fill: var(--doing-fill); } .s-review { --c: var(--review); --c-fill: var(--review-fill); }
-.s-done { --c: var(--done); --c-fill: var(--done-fill); } .s-ask { --c: var(--accent); }
+.s-done { --c: var(--done); --c-fill: var(--done-fill); } .s-production { --c: var(--production); --c-fill: var(--production-fill); } .s-ask { --c: var(--accent); }
 /* Each state's mark has a shape of its own, so the states read apart without their colors. */
 .s-proposed { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6' stroke-dasharray='2.6 2.112' stroke-dashoffset='1.3'/%3E%3C/svg%3E"); }
 .s-blocked { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M4 4l8 8'/%3E%3C/svg%3E"); }
@@ -64,9 +64,10 @@ kbd { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--border);
 .s-doing { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 3a5 5 0 0 1 0 10z' fill='black' stroke='none'/%3E%3C/svg%3E"); }
 .s-review { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 3a5 5 0 1 1-5 5h5z' fill='black' stroke='none'/%3E%3C/svg%3E"); }
 .s-done { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Cmask id='m'%3E%3Crect width='16' height='16' fill='white' stroke='none'/%3E%3Cpath d='M5 8.3l2 2 4-4.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/mask%3E%3Ccircle cx='8' cy='8' r='7' mask='url(%23m)' fill='black' stroke='none'/%3E%3C/svg%3E"); }
+.s-production { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8'%3E%3Cpath d='M8 1.5l2 4 4.5.7-3.3 3.2.8 4.6L8 11.9 4 14l.8-4.6-3.3-3.2L6 5.5z' fill='black'/%3E%3C/svg%3E"); }
 .dot { width: 12px; height: 12px; background: color-mix(in srgb, var(--c) var(--mark-mix), var(--text)); flex: none; -webkit-mask: var(--mark) center / contain no-repeat; mask: var(--mark) center / contain no-repeat; }
 .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 650; padding: 1px 6px; border-radius: 4px; color: color-mix(in srgb, var(--c) var(--badge-mix), var(--text)); background: color-mix(in srgb, var(--c) 16%, transparent); white-space: nowrap; }
-:is(.card, .kcard):is(.s-doing, .s-review) .badge { background: var(--c-fill); color: var(--fill-text); }
+:is(.card, .kcard):is(.s-doing, .s-review, .s-production) .badge { background: var(--c-fill); color: var(--fill-text); }
 :is(.card, .kcard).asking .badge { background: var(--c); color: var(--accent-text); }
 .readonly .edit-only { display: none !important; }
 
@@ -826,9 +827,9 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 // Constants and small helpers
 // ---------------------------------------------------------------------------
 
-const STATES = ["proposed", "todo", "doing", "review", "done"];
-const VIEW_STATES = ["proposed", "blocked", "todo", "doing", "review", "done"];
-const LABEL = { proposed: "Proposed", blocked: "Blocked", todo: "To do", doing: "Doing", review: "Review", done: "Done", ask: "Question" };
+const STATES = ["proposed", "todo", "doing", "review", "done", "production"];
+const VIEW_STATES = ["proposed", "blocked", "todo", "doing", "review", "done", "production"];
+const LABEL = { proposed: "Proposed", blocked: "Blocked", todo: "To do", doing: "Doing", review: "Review", done: "Done", production: "Production", ask: "Question" };
 const ID_RE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 const PREFIX_RE = /^[A-Z][A-Z0-9]{0,5}$/;
 const UNGROUPED = "G";
@@ -1014,7 +1015,7 @@ function canonical(b) {
   const out = { kanvas: 1, title: b.title || "" };
   out.groups = b.groups.map((g) => ordered(g, ["id", "name"], ["id", "name"]));
   out.tasks = b.tasks.map((t) => {
-    const o = ordered(t, ["id", "title", "state", "group", "deps", "yolo", "at", "by", "desc", "notes"], ["id", "title", "state"]);
+    const o = ordered(t, ["id", "title", "state", "group", "deps", "yolo", "at", "by", "desc", "definition", "work", "review", "delivery", "notes"], ["id", "title", "state"]);
     if (o.notes) o.notes = o.notes.map((n) => ordered(n, ["at", "by", "edited", "text"], ["at", "by", "text"]));
     return o;
   });
@@ -1029,7 +1030,8 @@ function serialize(b) {
 }
 
 const indexOf = (b) => new Map(b.tasks.map((t) => [key(t.id), t]));
-const unmetIn = (ix, t) => t.deps.filter((d) => { const x = ix.get(key(d)); return !x || x.state !== "done"; });
+const complete = (t) => !!t && ["done", "production"].includes(t.state);
+const unmetIn = (ix, t) => t.deps.filter((d) => !complete(ix.get(key(d))));
 const vstateIn = (ix, t) => (t.state === "todo" && unmetIn(ix, t).length ? "blocked" : t.state);
 
 // The task and everything it transitively depends on, as upper-case keys.
@@ -1046,7 +1048,7 @@ function upstreamOf(b, id) {
 }
 
 // A YOLO mark counts until its task goes to review (mirrors yolo_active in kanvas.py).
-const yoloActive = (t) => !!t.yolo && t.state !== "review" && t.state !== "done";
+const yoloActive = (t) => !!t.yolo && !["review", "done", "production"].includes(t.state);
 
 // Task key -> ID of the YOLO task covering it (mirrors yolo_cover in kanvas.py). Only the last YOLO task of a chain
 // covers it: a YOLO task that another one depends on is covered by that one.
@@ -1073,27 +1075,14 @@ function yoloCoverIn(b) {
   return cover;
 }
 
-// Turning YOLO on approves the chain's proposals and accepts what waits for review. The chain keeps one YOLO mark,
-// so the marks of tasks inside it go.
+// YOLO keeps a chain selected for autonomous work, but never bypasses definition or review gates.
 function yoloOn(b, id) {
   const ix = indexOf(b), t = ix.get(key(id));
   t.yolo = true;
   for (const k of upstreamOf(b, t.id)) {
     const x = ix.get(k);
-    if (!x || x.state === "done") continue;
+    if (!x || complete(x)) continue;
     if (x !== t) delete x.yolo;
-    if (x.state === "proposed") x.state = "todo";
-    else if (x.state === "review" && x !== t) x.state = "done";
-  }
-}
-
-// A link the human makes approves the proposals it brings into a YOLO chain, as turning YOLO on does. Proposals
-// that agents link into a chain stay proposals until the human approves them. `before` is yoloCoverIn before the link.
-function approveJoining(b, before) {
-  const ix = indexOf(b);
-  for (const k of yoloCoverIn(b).keys()) {
-    const x = ix.get(k);
-    if (x && x.state === "proposed" && !before.has(k)) x.state = "todo";
   }
 }
 
@@ -1231,7 +1220,7 @@ function problemsOf(b) {
       if (same(d, t.id)) errors.push(`${t.id} depends on itself`);
       else if (!ix.has(key(d))) errors.push(`${t.id} depends on missing task ${d}`);
     }
-    if (["doing", "review", "done"].includes(t.state)) {
+    if (["doing", "review", "done", "production"].includes(t.state)) {
       const pending = unmetIn(ix, t).filter((d) => ix.has(key(d)));
       if (pending.length) warnings.push(`${t.id} is ${t.state} but depends on unfinished ${pending.join(", ")}`);
     }
@@ -1431,7 +1420,7 @@ function foldDone(tasks, b, open, keep = null) {
   const known = new Set(b.groups.map((g) => g.id)), done = new Map();
   for (const t of tasks) {
     const g = known.has(t.group) ? t.group : null;
-    if (t.state === "done") done.set(g, [...(done.get(g) || []), t.id]);
+    if (complete(t)) done.set(g, [...(done.get(g) || []), t.id]);
   }
   const stubs = [], gone = new Set();
   for (const [group, ids] of done) {
@@ -1822,7 +1811,7 @@ function layoutIn(tasks, b, { vertical, levelGap, manual = false, emptyLanes = t
   }
   for (const l of lanes) {
     l.total = b.tasks.filter((t) => (l.id ? t.group === l.id : !knownGroups.has(t.group))).length;
-    l.done = b.tasks.filter((t) => t.state === "done" && (l.id ? t.group === l.id : !knownGroups.has(t.group))).length;
+    l.done = b.tasks.filter((t) => complete(t) && (l.id ? t.group === l.id : !knownGroups.has(t.group))).length;
     l.empty = !tasks.some((t) => laneOfTask(t) === l) && !stubs.some((s) => s.group === l.id);
   }
   const width = vertical ? stacked : LANE_PAD * 2 + depthSpan;
@@ -1995,7 +1984,7 @@ let fitted = false;
 const get = (id) => IX.get(key(id));
 const unmet = (t) => unmetIn(IX, t);
 const vstate = (t) => vstateIn(IX, t);
-const yoloVia = (t) => (t.state === "done" ? null : COVER.get(key(t.id)) || null);
+const yoloVia = (t) => (complete(t) ? null : COVER.get(key(t.id)) || null);
 const groupOf = (t) => board.groups.find((g) => g.id === t.group) || null;
 const laneId = (t) => (groupOf(t) ? t.group : null); // tasks of unknown groups share the Ungrouped lane
 const dependents = (t) => board.tasks.filter((x) => x.deps.some((d) => same(d, t.id)));
@@ -2272,13 +2261,15 @@ function forget(entry) {
 
 // How a move reads, as [done, doing] with % for the task: "Approved %", "approving %".
 const MOVE_WORDS = {
-  "proposed>todo": ["Approved %", "approving %"],
+  "proposed>todo": ["Approved the definition of %", "approving the definition of %"],
   "doing>todo": ["Paused %", "pausing %"],
-  "review>todo": ["Sent % back", "sending % back"],
+  "review>doing": ["Sent % back", "sending % back"],
   "done>todo": ["Reopened %", "reopening %"],
+  "production>done": ["Rolled % back to Done", "rolling % back to Done"],
   ">doing": ["Started %", "starting %"],
   ">review": ["Sent % to review", "sending % to review"],
-  ">done": ["Marked % done", "marking % done"],
+  ">done": ["Recorded the dev merge of %", "recording the dev merge of %"],
+  ">production": ["Promoted % to production", "promoting % to production"],
 };
 const moveWords = (from, to) => MOVE_WORDS[`${from}>${to}`] || MOVE_WORDS[`>${to}`] || [`Moved % to ${LABEL[to] || to}`, `moving % to ${LABEL[to] || to}`];
 const andList = (items) => (items.length > 1 ? `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}` : items.join(""));
@@ -2453,16 +2444,68 @@ const ops = {
     if (from === "proposed" && t.state === "proposed" && state !== "proposed" && revisedSince(t, seen)) {
       throw new Error(`${t.id} was revised since you opened it; read the new version first`);
     }
+    if (from === "proposed" && state === "todo") throw new Error(`${t.id} needs its PO/TL product definition first`);
+    if (from === "todo" && state === "doing") throw new Error(`${t.id} needs its Architect/Senior construction plan first`);
+    if (state === "done" && from !== "production") throw new Error(`${t.id} needs both reviews and dev merge evidence first`);
+    if (state === "production") throw new Error(`${t.id} needs main/master deployment evidence first`);
     t.state = state;
+    if (from === "doing" && state === "review") {
+      t.review = { agent: { status: "pending" }, manual: { status: "pending" } };
+    } else if (from === "review" && state === "doing") {
+      const review = t.review ||= {};
+      review.manual = { status: "pending" };
+    }
     if (text) addNote(t, text, at);
+  },
+  define: (id, seen, definition, at = nowIso()) => (b) => {
+    const t = mustFind(b, id);
+    if (t.state !== "proposed") throw new Error(`${t.id} is no longer proposed`);
+    if (revisedSince(t, seen)) throw new Error(`${t.id} was revised since you opened it; read the new version first`);
+    t.definition = { ...definition, approved: true, by: "human", at };
+    t.state = "todo";
+    addNote(t, "PO/TL product definition approved after Grill me.", at);
+  },
+  startWork: (id, plan, at = nowIso()) => (b) => {
+    const t = mustFind(b, id);
+    if (vstateIn(indexOf(b), t) !== "todo") throw new Error(`${t.id} is not ready to start`);
+    if (!t.definition?.approved) throw new Error(`${t.id} has no approved product definition`);
+    t.work = { by: "human", at, plan };
+    delete t.review;
+    t.state = "doing";
+    addNote(t, plan, at);
+  },
+  manualReview: (id, summary, at = nowIso()) => (b) => {
+    const t = mustFind(b, id);
+    if (t.state !== "review") throw new Error(`${t.id} is no longer in review`);
+    const review = t.review ||= {};
+    review.manual = { status: "approved", by: "human", at, summary };
+    addNote(t, `Manual review approved: ${summary}`, at);
+  },
+  mergeDev: (id, evidence, at = nowIso()) => (b) => {
+    const t = mustFind(b, id), review = t.review || {};
+    if (t.state !== "review") throw new Error(`${t.id} is no longer in review`);
+    if (review.agent?.status !== "approved" || review.manual?.status !== "approved") {
+      throw new Error(`${t.id} needs approved agent and manual reviews before merge to dev`);
+    }
+    const delivery = t.delivery ||= {};
+    delivery.dev = { by: "human", at, evidence };
+    t.state = "done";
+    addNote(t, `Merged to dev: ${evidence}`, at);
+  },
+  promote: (id, evidence, at = nowIso()) => (b) => {
+    const t = mustFind(b, id);
+    if (t.state !== "done") throw new Error(`${t.id} is not merged to dev`);
+    const delivery = t.delivery ||= {};
+    delivery.production = { by: "human", at, evidence };
+    t.state = "production";
+    addNote(t, `Production verified: ${evidence}`, at);
   },
   note: (id, text, at = nowIso()) => (b) => addNote(mustFind(b, id), text, at),
   // Notes are found by author, time and text, so an edit still finds its note after agents add more.
   editNote: (id, n, rank, text, edited = nowIso()) => (b) => { const t = mustFind(b, id), i = noteIndex(t, n, rank); t.notes[i] = { ...t.notes[i], text, edited }; },
   removeNote: (id, n, rank) => (b) => { const t = mustFind(b, id); t.notes.splice(noteIndex(t, n, rank), 1); },
   addTask: (f, out) => (b) => {
-    const t = { id: nextId(b, f.group || UNGROUPED), title: f.title, state: "todo", group: f.group || null, deps: [], at: nowIso(), by: "human", desc: f.desc || "", notes: [] };
-    const cover = yoloCoverIn(b);
+    const t = { id: nextId(b, f.group || UNGROUPED), title: f.title, state: "proposed", group: f.group || null, deps: [], at: nowIso(), by: "human", desc: f.desc || "", notes: [] };
     for (const ref of f.deps || []) t.deps.push(mustFind(b, ref).id);
     b.tasks.push(t);
     for (const ref of f.blocks || []) {
@@ -2470,7 +2513,6 @@ const ops = {
       if (reaches(b, t.id, x.id)) throw new Error(`${x.id} cannot wait for the new task: that would create a cycle`);
       x.deps.push(t.id);
     }
-    approveJoining(b, cover);
     out.id = t.id;
   },
   remove: (id) => (b) => {
@@ -2492,16 +2534,16 @@ const ops = {
     if (t === d) throw new Error("A task cannot depend on itself");
     if (t.deps.some((x) => same(x, d.id))) return;
     if (reaches(b, d.id, t.id)) throw new Error(`${t.id} cannot depend on ${d.id}: that would create a cycle`);
-    const cover = yoloCoverIn(b);
     t.deps.push(d.id);
-    approveJoining(b, cover);
   },
   removeDep: (id, dep) => (b) => { const t = mustFind(b, id); t.deps = t.deps.filter((x) => !same(x, dep)); },
-  // Withdrawn proposals are skipped; a revised one stops the whole approval, so the human reads it first.
+  // Legacy multi-approval remains readable but may only approve proposals that already carry a structured definition.
   approve: (seen) => (b) => {
     const now = seen.map((s) => [b.tasks.find((t) => same(t.id, s.id)), s]).filter(([t]) => t && t.state === "proposed");
     const revised = now.filter(([t, s]) => revisedSince(t, s)).map(([t]) => t.id);
     if (revised.length) throw new Error(`${revised.join(", ")} ${revised.length > 1 ? "were" : "was"} revised since you looked; read the new version first`);
+    const undefinedTasks = now.filter(([t]) => !t.definition?.approved).map(([t]) => t.id);
+    if (undefinedTasks.length) throw new Error(`${undefinedTasks.join(", ")} need their PO/TL product definition first`);
     for (const [t] of now) t.state = "todo";
   },
   yolo: (id, on) => (b) => {
@@ -2595,7 +2637,7 @@ function renderHeader() {
   const counts = Object.fromEntries(VIEW_STATES.map((s) => [s, 0]));
   for (const t of board.tasks) counts[vstate(t)] = (counts[vstate(t)] || 0) + 1;
   $("#chips").replaceChildren(...VIEW_STATES.map((s) => {
-    const hidden = s === "done" && prefs.hideDone;
+    const hidden = ["done", "production"].includes(s) && prefs.hideDone;
     const on = ui.states.has(s);
     return h("button", {
       class: `schip s-${s}${on ? " on" : ""}${counts[s] ? "" : " zero"}${hidden ? " off" : ""}`,
@@ -2633,12 +2675,13 @@ function renderHeader() {
   const hd = $("#hide-done");
   hd.classList.toggle("on", !!prefs.hideDone);
   hd.setAttribute("aria-pressed", String(!!prefs.hideDone));
-  hd.dataset.tip = prefs.hideDone ? `${counts.done} finished task${counts.done === 1 ? " is" : "s are"} hidden. Click to show them.` : "Hide finished tasks";
+  const finished = counts.done + counts.production;
+  hd.dataset.tip = prefs.hideDone ? `${finished} finished task${finished === 1 ? " is" : "s are"} hidden. Click to show them.` : "Hide finished tasks";
   hd.setAttribute("aria-label", "Hide finished tasks");
   hd.replaceChildren(icon(prefs.hideDone ? "eye-off" : "eye"));
 
   const total = board.tasks.length || 1;
-  $("#progress").replaceChildren(...["done", "review", "doing", "todo", "blocked", "proposed"].map((s) =>
+  $("#progress").replaceChildren(...["production", "done", "review", "doing", "todo", "blocked", "proposed"].map((s) =>
     h("span", { class: `s-${s}`, style: `flex-grow:${counts[s] / total}` })));
   $("#meter").dataset.tip = `${counts.done} of ${board.tasks.length} tasks done`;
   $("#meter").setAttribute("aria-label", $("#meter").dataset.tip);
@@ -2721,11 +2764,11 @@ function cardFoot(t) {
 const isYoloTarget = (t) => yoloActive(t) && same(yoloVia(t), t.id);
 
 function yoloTag(t) {
-  if (t.yolo && t.state !== "done" && (!yoloActive(t) || isYoloTarget(t))) {
-    return h("span", { class: "yolo-tag", title: yoloActive(t) ? "YOLO: agents finish everything this task depends on without approval or review, then this task, which comes to you for review" : "YOLO chain complete: this task waits for your review" }, icon("zap"), "YOLO");
+  if (t.yolo && !complete(t) && (!yoloActive(t) || isYoloTarget(t))) {
+    return h("span", { class: "yolo-tag", title: yoloActive(t) ? "YOLO keeps this chain selected for autonomous work but does not bypass definition or review gates" : "YOLO chain paused at a required gate" }, icon("zap"), "YOLO");
   }
   const via = yoloVia(t);
-  return via ? h("span", { class: "yolo-mark", title: t.state === "proposed" ? `In the YOLO chain of ${via}: once you approve it, no review needed` : `Covered by YOLO on ${via}: no approval or review needed` }, icon("zap")) : null;
+  return via ? h("span", { class: "yolo-mark", title: `In the YOLO chain of ${via}; required gates still apply` }, icon("zap")) : null;
 }
 
 function fillCard(el, t) {
@@ -2767,7 +2810,7 @@ function toggleFold(group) {
 let layoutKey = "";
 const inPickedGroups = (t) => !ui.groups.size || ui.groups.has(laneId(t) || "");
 // The graph leaves out finished tasks while they are hidden, and the groups the filter leaves out.
-const graphTasks = () => board.tasks.filter((t) => !(prefs.hideDone && t.state === "done") && inPickedGroups(t));
+const graphTasks = () => board.tasks.filter((t) => !(prefs.hideDone && complete(t)) && inPickedGroups(t));
 // Lanes whose finished tasks the human opened, for this visit: group ids, "" for Ungrouped.
 const unfolded = new Set();
 const stubEls = new Map();
@@ -2980,7 +3023,7 @@ function home() {
     keys((t) => vstate(t) === "review" || !!openQuestion(t)),
     keys((t) => vstate(t) === "doing"),
     keys((t) => vstate(t) === "proposed"),
-    keys((t) => t.state !== "done"),
+    keys((t) => !complete(t)),
   ], READABLE_ZOOM));
   applyView(false);
 }
@@ -3419,14 +3462,12 @@ function setupGraphInput() {
 // Board view ---------------------------------------------------------------
 
 function renderKanban() {
-  const columns = VIEW_STATES.filter((s) => !(prefs.hideDone && s === "done") && (!ui.states.size || ui.states.has(s)));
+  const columns = VIEW_STATES.filter((s) => !(prefs.hideDone && ["done", "production"].includes(s)) && (!ui.states.size || ui.states.has(s)));
   const tasks = boardOrder(board).filter(matches);
   $("#kanban").replaceChildren(...columns.map((s) => {
     const items = tasks.filter((t) => vstate(t) === s);
     const head = h("div", { class: "col-head" }, h("span", { class: "dot" }), LABEL[s], h("span", { class: "count" }, items.length));
-    if (s === "proposed" && items.length && !store.readOnly) {
-      head.append(h("button", { title: "Approve every proposal in this column", onclick: () => approveAll(items) }, icon("check"), "Approve all"));
-    }
+    if (s === "proposed" && items.length && !store.readOnly) head.title = "Each proposal needs its own PO/TL Grill me definition";
     const body = h("div", { class: "col-body", role: items.length ? "listbox" : null, "aria-label": items.length ? LABEL[s] : null },
       items.length ? items.map(kanbanCard) : h("div", { class: "col-empty" }, s === "blocked" ? "Nothing is blocked" : "Empty"));
     return acceptDrops(h("div", { class: `col s-${s}`, "data-state": s }, head, body), s);
@@ -3697,24 +3738,88 @@ function depRow(d, onRemove) {
 const moveTo = (t, state) => undoable(ops.state(t.id, seenOf(t), state), moveWords(t.state, state)[0].replace("%", t.id));
 const unlink = (id, dep) => undoable(ops.removeDep(id, dep), `${id} no longer waits for ${dep}`);
 
+async function approveDefinition(t) {
+  const d = t.definition || {};
+  const data = await modal(`PO + TL Grill me · ${t.id}`, [
+    h("p", {}, "Define the product need before making this task available for development."),
+    h("label", { class: "field" }, "Outcome", h("textarea", { name: "outcome", rows: 3, required: true, value: d.outcome || "", placeholder: "What changes for the user or the business?" })),
+    h("label", { class: "field" }, "Needs and constraints", h("textarea", { name: "needs", rows: 4, required: true, value: d.needs || "", placeholder: "Business rules, dependencies, platforms, privacy, operational constraints…" })),
+    h("label", { class: "field" }, "Acceptance criteria", h("textarea", { name: "acceptance", rows: 4, required: true, value: d.acceptance || "", placeholder: "Observable conditions that prove the task is complete." })),
+    h("label", { class: "field" }, "Non-goals", h("textarea", { name: "non_goals", rows: 2, value: d.non_goals || "", placeholder: "What is explicitly outside this task?" })),
+  ], { ok: "Approve definition" });
+  if (!data) return;
+  const definition = Object.fromEntries(["outcome", "needs", "acceptance", "non_goals"].map((k) => [k, data.get(k).trim()]));
+  undoable(ops.define(t.id, seenOf(t), definition), `Approved the product definition of ${t.id}`, { onFail: () => approveDefinition(t) });
+}
+
+async function startWorkDialog(t) {
+  const data = await modal(`Architect + Senior Grill me · ${t.id}`, [
+    h("p", {}, "Record the construction plan before a worktree or implementation starts."),
+    h("label", { class: "field" }, "Technical construction plan", h("textarea", { name: "plan", rows: 8, required: true,
+      placeholder: "Architecture, repositories, API/data changes, security, tests, observability, rollout and rollback…" })),
+  ], { ok: "Start construction" });
+  if (!data) return;
+  const plan = data.get("plan").trim();
+  undoable(ops.startWork(t.id, plan), `Started ${t.id} with a technical plan`, { onFail: () => startWorkDialog(t) });
+}
+
+async function approveManualReview(t) {
+  const data = await modal(`Manual review · ${t.id}`, [
+    h("p", {}, "Confirm the product behaviour and acceptance criteria manually. This does not merge the pull request."),
+    h("label", { class: "field" }, "Evidence", h("textarea", { name: "summary", rows: 5, required: true,
+      placeholder: "What was exercised, on which environment/device, and what passed?" })),
+  ], { ok: "Approve manual review" });
+  if (!data) return;
+  undoable(ops.manualReview(t.id, data.get("summary").trim()), `Manual review approved for ${t.id}`,
+    { onFail: () => approveManualReview(t) });
+}
+
+async function recordDevMerge(t) {
+  const data = await modal(`Merge to dev · ${t.id}`, [
+    h("p", {}, "Both reviews passed. Record the pull request and commit evidence merged into every affected dev branch."),
+    h("label", { class: "field" }, "PR / dev commit evidence", h("textarea", { name: "evidence", rows: 5, required: true,
+      placeholder: "Repository, pull request URL and merge commit SHA for frontend/API…" })),
+  ], { ok: "Record merge to dev" });
+  if (!data) return;
+  review(t, "done", "", () => recordDevMerge(t), ops.mergeDev(t.id, data.get("evidence").trim()));
+}
+
+async function recordProduction(t) {
+  const data = await modal(`Promote to production · ${t.id}`, [
+    h("p", {}, "Record the main/master merge, deployment and smoke-test evidence."),
+    h("label", { class: "field" }, "Production evidence", h("textarea", { name: "evidence", rows: 5, required: true,
+      placeholder: "Repository/main commit, deployment/run and smoke-test result…" })),
+  ], { ok: "Mark Production" });
+  if (!data) return;
+  undoable(ops.promote(t.id, data.get("evidence").trim()), `Promoted ${t.id} to production`, { onFail: () => recordProduction(t) });
+}
+
 // `asks` marks moves that open a dialog first.
 function stateMoves(t) {
   const to = (state) => () => moveTo(t, state);
   switch (vstate(t)) {
-    case "proposed": return [{ label: "Approve", icon: "check", run: to("todo"), to: "todo", primary: true },
+    case "proposed": return [{ label: "PO/TL Grill me", icon: "check", run: () => approveDefinition(t), to: "todo", primary: true, asks: true },
       ...(changeRequest(t) ? [] : [{ label: "Ask for changes", icon: "edit", run: () => askChanges(t), asks: true }]),
       { label: "Reject", icon: "trash", run: () => removeTask(t), danger: true, asks: true }];
-    case "todo": return [{ label: "Start", icon: "play", run: to("doing"), to: "doing", primary: true }];
-    case "doing": return [{ label: "Send to review", icon: "check", run: to("review"), to: "review", primary: true }, { label: "Mark done", icon: "check", run: to("done"), to: "done" }, { label: "Pause", icon: "pause", run: to("todo"), to: "todo" }];
-    case "review": return [{ label: "Mark done", icon: "check", run: () => review(t, "done"), to: "done", primary: true }, { label: "Send back", icon: "back", run: () => sendBack(t), to: "todo", asks: true }];
-    case "done": return [{ label: "Reopen", icon: "back", run: to("todo"), to: "todo" }];
+    case "todo": return [{ label: "Architect/Senior Grill me", icon: "play", run: () => startWorkDialog(t), to: "doing", primary: true, asks: true }];
+    case "doing": return [{ label: "Send to review", icon: "check", run: to("review"), to: "review", primary: true }, { label: "Pause", icon: "pause", run: to("todo"), to: "todo" }];
+    case "review": {
+      const agent = t.review?.agent?.status === "approved", manual = t.review?.manual?.status === "approved";
+      return [
+        !manual ? { label: "Approve manual review", icon: "eye", run: () => approveManualReview(t), primary: agent, asks: true } : null,
+        agent && manual ? { label: "Record merge to dev", icon: "check", run: () => recordDevMerge(t), to: "done", primary: true, asks: true } : null,
+        { label: "Send back", icon: "back", run: () => sendBack(t), to: "doing", asks: true },
+      ].filter(Boolean);
+    }
+    case "done": return [{ label: "Promote to Production", icon: "up", run: () => recordProduction(t), to: "production", primary: true, asks: true }, { label: "Reopen", icon: "back", run: to("todo"), to: "todo" }];
+    case "production": return [{ label: "Roll back to Done", icon: "back", run: to("done"), to: "done" }];
     default: return [];
   }
 }
 
 function yoloAction(t) {
   if (t.yolo) return { label: "Turn off YOLO", icon: "zap", run: () => toggleYolo(t) };
-  if (t.state === "review" || t.state === "done") return null;
+  if (["review", "done", "production"].includes(t.state)) return null;
   const via = yoloVia(t);
   if (via) return { head: `${t.state === "proposed" ? "In the YOLO chain of" : "Covered by YOLO on"} ${via}` };
   return { label: "YOLO up to here…", icon: "zap", run: () => toggleYolo(t) };
@@ -3726,15 +3831,13 @@ async function toggleYolo(t) {
     return;
   }
   if (!prefs.skipYoloWarning) {
-    const chain = [...upstreamOf(board, t.id)].map(get).filter((x) => x && x.state !== "done");
+    const chain = [...upstreamOf(board, t.id)].map(get).filter((x) => x && !complete(x));
     const before = chain.filter((x) => !same(x.id, t.id));
     const inner = before.filter((x) => x.yolo).map((x) => x.id);
     const count = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
     const names = (ids) => (ids.length > 1 ? `${ids.slice(0, -1).join(", ")} and ${ids[ids.length - 1]}` : ids[0]);
-    const proposals = chain.filter((x) => x.state === "proposed").length, reviews = before.filter((x) => x.state === "review").length;
-    const effects = [proposals ? `approves ${count(proposals, "proposal")}` : null, reviews ? `marks ${count(reviews, "review")} done` : null].filter(Boolean);
     const data = await modal(`YOLO up to ${t.id}?`, [
-      h("p", {}, `${before.length ? `Agents finish the ${count(before.length, "unfinished task")} ${t.id} depends on without approval or review, then do ${t.id} and send it to you for review.` : `Agents may start ${t.id} without approval and send it to you for review.`}${inner.length ? ` This takes over the YOLO on ${names(inner)}, so only ${t.id} comes to you for review.` : ""}${effects.length ? ` This ${effects.join(" and ")} now.` : ""}`),
+      h("p", {}, `${before.length ? `Agents keep working through the ${count(before.length, "unfinished task")} ${t.id} depends on, then ${t.id}.` : `Agents keep ${t.id} selected for autonomous work.`} Product definition, independent agent review, manual review and delivery evidence still apply.${inner.length ? ` This takes over the YOLO on ${names(inner)}.` : ""}`),
       h("label", { class: "check" }, h("input", { type: "checkbox", name: "skip" }), "Don't ask again"),
     ], { ok: [icon("zap"), "YOLO"], okClass: "yolo-go" });
     if (!data) return;
@@ -3745,7 +3848,7 @@ async function toggleYolo(t) {
 
 function zap(id) {
   if (!lastLayout) return;
-  const chain = [...upstreamOf(board, id)].filter((k) => cardEls.has(k) && lastLayout.pos.has(k) && IX.get(k).state !== "done");
+  const chain = [...upstreamOf(board, id)].filter((k) => cardEls.has(k) && lastLayout.pos.has(k) && !complete(IX.get(k)));
   const along = (k) => (lastLayout.vertical ? lastLayout.pos.get(k).y : lastLayout.pos.get(k).x);
   const start = Math.min(...chain.map(along));
   for (const k of chain) {
@@ -3808,7 +3911,7 @@ function fillPanel(panel, t) {
   const kids = dependents(t);
   const last = t.notes[t.notes.length - 1];
   // The block under the title shows the latest note of work under way or finished, and a proposal's open request for changes.
-  const top = (["doing", "review", "done"].includes(vs) ? last : vs === "proposed" ? changeRequest(t) : null) || null;
+  const top = (["doing", "review", "done", "production"].includes(vs) ? last : vs === "proposed" ? changeRequest(t) : null) || null;
 
   const title = h("textarea", { class: "p-title", rows: 1, value: drafts.title ?? t.title, "aria-label": "Title", readonly: ro, spellcheck: "false" });
   title.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); focusPanel(); } if (e.key === "Escape") { title.value = t.title; focusPanel(); } });
@@ -3869,6 +3972,32 @@ function fillPanel(panel, t) {
   }
   const checks = taskItems(t.desc).map((x) => x.checked);
   const done = checks.filter(Boolean).length;
+  const workflow = [];
+  if (t.definition) workflow.push(h("section", { class: "p-sec" },
+    h("div", { class: "section-head" }, "Product definition", h("span", { class: "count" }, t.definition.approved ? "approved" : "draft")),
+    h("div", { class: "md" },
+      h("p", {}, h("b", {}, "Outcome: "), t.definition.outcome || "—"),
+      h("p", {}, h("b", {}, "Needs: "), t.definition.needs || "—"),
+      h("p", {}, h("b", {}, "Acceptance: "), t.definition.acceptance || "—"),
+      t.definition.non_goals ? h("p", {}, h("b", {}, "Non-goals: "), t.definition.non_goals) : null)));
+  if (t.work) workflow.push(h("section", { class: "p-sec" },
+    h("div", { class: "section-head" }, "Construction plan", h("span", { class: "count" }, t.work.by || "?")),
+    h("div", { class: "md" },
+      h("p", {}, t.work.plan || "—"),
+      ...(t.work.git || []).map((g) => h("p", {}, h("b", {}, "Git: "),
+        `${g.branch || "?"} @ ${(g.commit || "").slice(0, 12)}${g.dirty ? " + uncommitted changes" : ""}`,
+        h("br"), h("span", { class: "muted" }, g.worktree || g.repo || ""))))));
+  if (t.review) {
+    const agent = t.review.agent || { status: "pending" }, manual = t.review.manual || { status: "pending" };
+    workflow.push(h("section", { class: "p-sec" }, h("div", { class: "section-head" }, "Review gates"),
+      h("div", { class: "rel" },
+        h("div", { class: "dep" }, h("span", { class: `dot s-${agent.status === "approved" ? "done" : "review"}` }), h("span", { class: "t" }, "Independent agent review"), h("span", { class: "st" }, agent.status || "pending")),
+        h("div", { class: "dep" }, h("span", { class: `dot s-${manual.status === "approved" ? "done" : "review"}` }), h("span", { class: "t" }, "Manual review"), h("span", { class: "st" }, manual.status || "pending")))));
+  }
+  if (t.delivery) workflow.push(h("section", { class: "p-sec" }, h("div", { class: "section-head" }, "Delivery evidence"),
+    h("div", { class: "md" },
+      t.delivery.dev ? h("p", {}, h("b", {}, "Dev: "), t.delivery.dev.evidence) : null,
+      t.delivery.production ? h("p", {}, h("b", {}, "Production: "), t.delivery.production.evidence) : null)));
 
   const noteBox = h("textarea", { rows: 1, value: drafts.note.get(t.id) || "", placeholder: "Add a note for your agent or yourself", "aria-label": "New note" });
   const form = ro ? null : h("div", { class: `note-form${noteBox.value ? " filled" : ""}` }, noteBox,
@@ -3887,6 +4016,7 @@ function fillPanel(panel, t) {
           checks.length ? [h("span", { class: "lane-bar", title: `${done} of ${checks.length} checked` }, h("i", { style: `width:${(100 * done) / checks.length}%` })), h("span", { class: "count" }, `${done}/${checks.length}`)] : null,
           ro || ui.editingDesc ? null : h("button", { class: "ghost", title: "Edit the description (or double-click it)", onclick: editDesc }, icon("edit"), "Edit")) : null,
         desc) : null,
+      workflow,
       ro && !t.deps.length && !kids.length ? null : h("section", { class: "p-sec" },
         h("div", { class: "section-head" }, "Dependencies",
           ro ? null : h("button", { class: "ghost", title: "Add tasks that block this one", onclick: () => addDepDialog(t) }, icon("plus"), "Add")),
@@ -3940,19 +4070,19 @@ function nowCard(t, vs, ro, note) {
   const cr = note && note === changeRequest(t) ? note : null, author = t.by && t.by !== "human" ? t.by : "the agent";
   const dismiss = () => undoable(ops.note(t.id, "Dismissed the question: no reply is coming in the chat."), "Question dismissed");
   const [mark, headline, body] = q ? [icon("ask"), "Waiting for your reply", null] : cr ? [icon("edit"), "Changes requested", null] : {
-    proposed: [icon("spark"), "Proposed", h("p", {}, "Approve it to make it available for work, ask for changes, or reject it.")],
+    proposed: [icon("spark"), "Needs product definition", h("p", {}, "Run the PO + TL Grill me, then approve its outcome, needs and acceptance criteria.")],
     blocked: [icon("lock"), "Blocked", h("p", {}, "Starts when ", list(waits), waits.length > 1 ? " are done." : " is done.")],
-    todo: [icon("play"), "Ready to start", ro ? null : h("p", {}, "Start it yourself, or tell an agent ", h("button", { class: "say", title: "Copy", onclick: () => copy(`work on ${t.id}`) }, `work on ${t.id}`, icon("copy")))],
+    todo: [icon("play"), "Ready for technical planning", ro ? null : h("p", {}, "Run the Architect + Senior Grill me before construction starts.")],
     doing: [h("i", { class: "live" }), "In progress", null],
-    review: [icon("check"), "Ready for your review", null],
-    done: [icon("check"), "Done", null],
+    review: [icon("check"), "Agent and manual review", h("p", {}, `Agent: ${t.review?.agent?.status || "pending"} · Manual: ${t.review?.manual?.status || "pending"}`)],
+    done: [icon("check"), "Merged to dev", null],
+    production: [icon("up"), "Production", null],
   }[vs];
-  const via = yoloVia(t), complete = t.yolo && t.state === "review";
-  const yolo = via || complete ? h("div", { class: "now-yolo" }, icon("zap"),
-    h("span", {}, complete ? ["YOLO chain complete.", via ? [" The YOLO chain of ", ref(via), " waits for your review."] : null]
-      : !same(via, t.id) && t.state === "proposed" ? ["In the YOLO chain of ", ref(via), ": once you approve it, agents finish it without review."]
-      : !same(via, t.id) ? ["Covered by YOLO on ", ref(via), ": no approval or review needed."]
-      : "YOLO: agents finish everything it needs, then send it to you for review."),
+  const via = yoloVia(t), yoloComplete = t.yolo && t.state === "review";
+  const yolo = via || yoloComplete ? h("div", { class: "now-yolo" }, icon("zap"),
+    h("span", {}, yoloComplete ? ["YOLO paused at review.", via ? [" The YOLO chain of ", ref(via), " also waits on its gates."] : null]
+      : !same(via, t.id) ? ["In the YOLO chain of ", ref(via), "; all definition and review gates still apply."]
+      : "YOLO keeps this chain selected for autonomous work; it does not bypass gates."),
     t.yolo && !ro ? h("button", { onclick: () => toggleYolo(t) }, "Turn off") : null) : null;
   const ya = ro || editing || t.yolo || via || !["proposed", "todo", "blocked"].includes(vs) ? null : yoloAction(t);
   const moves = ro || editing ? [] : stateMoves(t);
@@ -3966,15 +4096,15 @@ function nowCard(t, vs, ro, note) {
     cr && !editing ? h("div", { class: "now-hint" }, h("span", {}, `Waiting for ${author} to revise it. The next note from an agent clears the request.`)) : null,
     yolo,
     moves.length || ya ? h("div", { class: "now-actions" },
-      moves.map((m) => h("button", { class: m.primary ? `primary to s-${m.to}` : m.danger ? "danger" : "", title: m.to && !m.primary ? `Moves it to ${LABEL[m.to]}` : null, onclick: m.run }, icon(m.icon), m.label)),
+      moves.map((m) => h("button", { class: m.primary ? (m.to ? `primary to s-${m.to}` : "primary") : m.danger ? "danger" : "", title: m.to && !m.primary ? `Moves it to ${LABEL[m.to]}` : null, onclick: m.run }, icon(m.icon), m.label)),
       ya ? h("button", { class: "yolo-btn", onclick: ya.run }, icon(ya.icon), ya.label) : null) : null);
 }
 
 function stateMenu(t) {
-  return [{ head: "Move to" }, ...STATES.map((s) => ({
-    label: [h("span", { class: `dot s-${s}` }), LABEL[s]], icon: s === t.state ? "check" : null, checked: s === t.state,
-    run: () => { if (s !== t.state) moveTo(t, s); },
-  }))];
+  const moves = stateMoves(t);
+  return [{ head: "Workflow" },
+    { label: [h("span", { class: `dot s-${t.state}` }), LABEL[t.state]], icon: "check", checked: true },
+    ...moves.map((m) => ({ ...m, label: [h("span", { class: `dot s-${m.to || t.state}` }), m.label] }))];
 }
 
 function groupMenu(t) {
@@ -4063,21 +4193,21 @@ async function removeTask(t) {
 
 async function sendBack(t, text = "") {
   const data = await modal(`Send ${t.id} back`, [
-    h("p", {}, "The task returns to To do. Your feedback is added as a note, so the agent sees it when it starts again."),
+    h("p", {}, "The task returns to Doing. Your feedback is added as a note for the implementation agent."),
     h("label", { class: "field" }, "What needs to change?", h("textarea", { name: "text", rows: 4, required: true, value: text, placeholder: "e.g. The retry loop never gives up; cap it at 5 attempts." })),
   ], { ok: "Send back" });
   if (!data) return;
   const feedback = data.get("text").trim();
-  review(t, "todo", `Sent back: ${feedback}`, () => sendBack(t, feedback));
+  review(t, "doing", `Sent back: ${feedback}`, () => sendBack(t, feedback));
 }
 
 // Marking the open task done or sending it back in the board view opens the next task in review once the change is
 // saved, so the human goes through the Review column one task after another. Undoing it comes back to the task.
-async function review(t, state, note = "", onFail = null) {
+async function review(t, state, note = "", onFail = null, change = null) {
   const flow = ui.view === "board" && same(ui.selected, t.id), before = edits.undo[edits.undo.length - 1];
   const said = document.createTextNode(moveWords(t.state, state)[0].replace("%", t.id));
   let failed = false;
-  const ok = await undoable(ops.state(t.id, seenOf(t), state, note), said, { onFail: (e) => { failed = true; if (onFail) onFail(e); } });
+  const ok = await undoable(change || ops.state(t.id, seenOf(t), state, note), said, { onFail: (e) => { failed = true; if (onFail) onFail(e); } });
   const entry = edits.undo[edits.undo.length - 1];
   if (!ok || !flow) return ok;
   await saveQueue;
@@ -4368,13 +4498,12 @@ function applyMulti() {
 // What the selected tasks can have done to them together, for the bar under them and their menu.
 function multiActions() {
   const tasks = board.tasks.filter((t) => multi.has(key(t.id)));
-  const proposals = tasks.filter((t) => vstate(t) === "proposed"), reviews = tasks.filter((t) => t.state === "review");
   // An action leaves the tasks it did not apply to selected, for the next one.
   const run = (fn, done) => () => fn(done).then((ok) => { if (ok) { for (const t of done) multi.delete(key(t.id)); applyMulti(); } });
   return {
     tasks,
-    approve: proposals.length ? { label: `Approve ${proposals.length}`, icon: "check", run: run(approveMany, proposals) } : null,
-    done: reviews.length ? { label: `Mark ${reviews.length} done`, icon: "check", run: run(doneMany, reviews) } : null,
+    approve: null,
+    done: null,
     remove: { label: `Delete ${tasks.length}`, icon: "trash", danger: true, run: run(removeMany, tasks) },
   };
 }
@@ -4850,7 +4979,7 @@ function filterMenu() {
     const counts = Object.fromEntries(VIEW_STATES.map((s) => [s, 0]));
     for (const t of board.tasks) counts[vstate(t)]++;
     const row = (s) => {
-      const hidden = s === "done" && prefs.hideDone, on = ui.states.has(s);
+      const hidden = ["done", "production"].includes(s) && prefs.hideDone, on = ui.states.has(s);
       return h("button", { type: "button", class: hidden ? "off" : null, "aria-pressed": String(on),
         onclick: pick(() => (hidden ? toggleDone() : on ? ui.states.delete(s) : ui.states.add(s))) },
         icon(on ? "check" : hidden ? "eye-off" : null), h("span", { class: `dot s-${s}` }), h("span", { class: "lbl" }, LABEL[s]), h("span", { class: "count" }, hidden ? "hidden" : counts[s]));
@@ -5463,7 +5592,7 @@ function toggleOrient() {
 
 // Task ids in an order that makes the manual layout show what the automatic one shows now.
 function automaticOrder() {
-  const tasks = board.tasks.filter((t) => !(prefs.hideDone && t.state === "done"));
+  const tasks = board.tasks.filter((t) => !(prefs.hideDone && complete(t)));
   const L = layout(tasks, board, { vertical: prefs.orient === "vertical", levelGap: prefs.levelGap });
   const across = (t) => (L.vertical ? L.pos.get(key(t.id)).x : L.pos.get(key(t.id)).y);
   const cellOf = (t) => `${laneId(t)}|${L.vertical ? L.pos.get(key(t.id)).y : L.pos.get(key(t.id)).x}`;

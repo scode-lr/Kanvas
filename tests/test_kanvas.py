@@ -85,8 +85,8 @@ class TempBoard(unittest.TestCase):
             "groups": [{"id": "DV", "name": "Development"}],
             "tasks": [
                 task("DV-01", "done", "DV"),
-                task("DV-02", "todo", "DV", ["DV-01"]),
-                task("DV-03", "todo", "DV", ["DV-02"]),
+                task("DV-02", "todo", "DV", ["DV-01"], definition={"approved": True, "outcome": "Task DV-02"}),
+                task("DV-03", "todo", "DV", ["DV-02"], definition={"approved": True, "outcome": "Task DV-03"}),
                 task("DV-04", "proposed", "DV"),
             ],
         }
@@ -312,12 +312,12 @@ class UndoTests(unittest.TestCase):
                 t["deps"] = [d for d in t["deps"] if d not in ids]
 
         cases = {
-            "approving A-01": lambda b, t: t["A-01"].update(state="todo"),
+            "approving the definition of A-01": lambda b, t: t["A-01"].update(state="todo"),
             "pausing A-02": lambda b, t: t["A-02"].update(state="todo"),
-            "sending A-03 back": lambda b, t: t["A-03"].update(state="todo", notes=[self.NOTE]),
+            "moving A-03 to To do": lambda b, t: t["A-03"].update(state="todo", notes=[self.NOTE]),
             "reopening A-04": lambda b, t: t["A-04"].update(state="todo"),
             "starting A-01": lambda b, t: t["A-01"].update(state="doing"),
-            "marking A-02 and A-03 done": lambda b, t: [t[i].update(state="done") for i in ("A-02", "A-03")],
+            "recording the dev merge of A-02 and A-03": lambda b, t: [t[i].update(state="done") for i in ("A-02", "A-03")],
             "moving A-04 to Proposed": lambda b, t: t["A-04"].update(state="proposed"),
             "rejecting A-01": lambda b, t: drop(b, {"A-01"}),
             "deleting A-02": lambda b, t: drop(b, {"A-02"}),
@@ -342,7 +342,7 @@ class UndoTests(unittest.TestCase):
         many = [board(*(task(f"A-0{i}", "proposed") for i in range(1, 6))), board(*(task(f"A-0{i}") for i in range(1, 6)))]
         code = "process.stdout.write(JSON.stringify(input.map(([a, z]) => describeChange(normalize(a), normalize(z)))));"
         out = run_html_js(self, code, json.dumps(pairs + [yolo_off, many]), [("const MOVE_WORDS =", "\n// Undoes or redoes")])
-        self.assertEqual(json.loads(out), list(cases) + ["turning off YOLO on A-03", "approving 5 tasks"])
+        self.assertEqual(json.loads(out), list(cases) + ["turning off YOLO on A-03", "approving the definition of 5 tasks"])
 
 
 class FailedSaveTests(unittest.TestCase):
@@ -907,11 +907,33 @@ class BoardViewTests(unittest.TestCase):
         sections = [("function mustFind(", "\n// ----"), ("function dropCard(", "\n// The column that takes up most")]
         out = json.loads(run_html_js(self, code, json.dumps({"page": page, "latest": latest, "drops": drops}), sections))
         self.assertEqual(out, [
-            "todo", None, "done", "todo", None,  # Blocked stands for To do, and a card dropped where it is stays
+            "P-01 needs its PO/TL product definition first", None,
+            "D-01 needs both reviews and dev merge evidence first", "todo", None,
             "T-01 is in Doing now, not To do",  # an agent started it meanwhile
             "P-02 was revised since you opened it; read the new version first",
             None,
         ])
+
+    def test_delivery_gates_reach_done_and_production_only_with_evidence(self):
+        board = {"kanvas": 1, "title": "", "groups": [], "tasks": [task("A-01", "proposed")]}
+        code = (
+            "const b = normalize(input), apply = (op) => op(b), errors = [];\n"
+            "apply(ops.define('A-01', seenOf(b.tasks[0]), { approved: true, outcome: 'Ship', needs: 'API', acceptance: 'Tests pass' }));\n"
+            "apply(ops.startWork('A-01', 'Implement API and tests'));\n"
+            "apply(ops.state('A-01', seenOf(b.tasks[0]), 'review'));\n"
+            "try { apply(ops.mergeDev('A-01', 'PR #1')); } catch (e) { errors.push(e.message); }\n"
+            "b.tasks[0].review.agent = { status: 'approved', by: 'reviewer' };\n"
+            "apply(ops.manualReview('A-01', 'Checked manually'));\n"
+            "apply(ops.mergeDev('A-01', 'PR #1 merged at abc123'));\n"
+            "apply(ops.promote('A-01', 'main abc123; smoke test passed'));\n"
+            "const t = b.tasks[0]; process.stdout.write(JSON.stringify([errors, t.state, t.review, t.delivery]));")
+        errors, state, review, delivery = json.loads(run_html_js(
+            self, code, json.dumps(board), [("function mustFind(", "\n// ----")]))
+        self.assertEqual(errors, ["A-01 needs approved agent and manual reviews before merge to dev"])
+        self.assertEqual(state, "production")
+        self.assertEqual((review["agent"]["status"], review["manual"]["status"]), ("approved", "approved"))
+        self.assertEqual(delivery["dev"]["evidence"], "PR #1 merged at abc123")
+        self.assertEqual(delivery["production"]["evidence"], "main abc123; smoke test passed")
 
 
 class ReviewFlowTests(unittest.TestCase):
@@ -986,7 +1008,7 @@ class ReviewFlowTests(unittest.TestCase):
             {"id": "BE-03", "view": "graph"},
             {"id": "BE-03", "open": "FE-01"},  # from the card menu, with another task open
             {"id": "BE-03", "open": None},     # with no task open
-            {"id": "BE-03", "state": "todo", "note": "Sent back: Cap the retries"},
+            {"id": "BE-03", "state": "doing", "note": "Sent back: Cap the retries"},
             {"id": "BE-03", "agent": {"BE-04": "done", "FE-01": "done", "FE-02": "done"}},
             {"id": "FE-02", "groups": ["FE"], "agent": {"FE-01": "done"}},
             {"id": "FE-02", "groups": ["FE"], "agent": {"FE-01": "done", "BE-04": "done"}},
@@ -1018,7 +1040,9 @@ class ReviewFlowTests(unittest.TestCase):
             "      if (c.fail) throw new Error(c.fail);\n"
             "      const b = clone(latest); fn(b); return { board: b, base: latest };\n"
             "    } };\n"
-            "    await review(get(c.id), c.state || 'done', c.note || '');\n"
+            "    const target = c.state || 'done', direct = (b) => { const x = mustFind(b, c.id); x.state = target;"
+            "      if (c.note) (x.notes ||= []).push({ at: '2026-10-29T10:00:00Z', by: 'human', text: c.note }); };\n"
+            "    await review(get(c.id), target, c.note || '', null, direct);\n"
             "    await saveQueue;\n"
             "    const t = get(c.id), r = { open: ui.selected, toasts: toasts.map(text), saved: [t.state, t.notes.map((n) => n.text)] };\n"
             "    if (c.undo) { if (c.undo !== true) ui.selected = c.undo; const e = edits.undo[edits.undo.length - 1]; if (e.onUndo) e.onUndo(); r.afterUndo = ui.selected; }\n"
@@ -1032,23 +1056,23 @@ class ReviewFlowTests(unittest.TestCase):
         out = json.loads(run_html_js(self, code, json.dumps({"board": board, "cases": cases}), sections))
         done, kept = ["done", []], ["review", []]
         self.assertEqual(out, [
-            {"open": "BE-04", "toasts": ["Marked BE-03 done. Next to review: BE-04."], "saved": done, "afterUndo": "BE-03"},
-            {"open": "BE-04", "toasts": ["Marked BE-03 done. Next to review: BE-04."], "saved": done, "afterUndo": "FE-02"},
+            {"open": "BE-04", "toasts": ["Recorded the dev merge of BE-03. Next to review: BE-04."], "saved": done, "afterUndo": "BE-03"},
+            {"open": "BE-04", "toasts": ["Recorded the dev merge of BE-03. Next to review: BE-04."], "saved": done, "afterUndo": "FE-02"},
             # The next task comes from the board as saved, with the agents' changes
-            {"open": "FE-01", "toasts": ["Marked BE-03 done. Next to review: FE-01."], "saved": done},
+            {"open": "FE-01", "toasts": ["Recorded the dev merge of BE-03. Next to review: FE-01."], "saved": done},
             # A failed save takes the toast away, and one refused at once never shows it
-            {"open": "BE-03", "toasts": ["Marked BE-03 done (taken away)", "Not saved: server answered 500"], "saved": kept},
+            {"open": "BE-03", "toasts": ["Recorded the dev merge of BE-03 (taken away)", "Not saved: server answered 500"], "saved": kept},
             {"open": "BE-03", "toasts": [f"Not saved: {lost}"], "saved": kept},
-            {"open": "BE-03", "toasts": ["Marked BE-03 done"], "saved": done},
-            {"open": "FE-01", "toasts": ["Marked BE-03 done"], "saved": done},
-            {"open": None, "toasts": ["Marked BE-03 done"], "saved": done},
-            {"open": "BE-04", "toasts": ["Sent BE-03 back. Next to review: BE-04."], "saved": ["todo", ["Sent back: Cap the retries"]]},
-            {"open": "BE-03", "toasts": ["Marked BE-03 done. No more tasks to review."], "saved": done},
-            {"open": "FE-02", "toasts": ["Marked FE-02 done. No more tasks to review in this view; 2 more are filtered out."], "saved": done},
-            {"open": "FE-02", "toasts": ["Marked FE-02 done. No more tasks to review in this view; 1 more is filtered out."], "saved": done},
+            {"open": "BE-03", "toasts": ["Recorded the dev merge of BE-03"], "saved": done},
+            {"open": "FE-01", "toasts": ["Recorded the dev merge of BE-03"], "saved": done},
+            {"open": None, "toasts": ["Recorded the dev merge of BE-03"], "saved": done},
+            {"open": "BE-04", "toasts": ["Sent BE-03 back. Next to review: BE-04."], "saved": ["doing", ["Sent back: Cap the retries"]]},
+            {"open": "BE-03", "toasts": ["Recorded the dev merge of BE-03. No more tasks to review."], "saved": done},
+            {"open": "FE-02", "toasts": ["Recorded the dev merge of FE-02. No more tasks to review in this view; 2 more are filtered out."], "saved": done},
+            {"open": "FE-02", "toasts": ["Recorded the dev merge of FE-02. No more tasks to review in this view; 1 more is filtered out."], "saved": done},
             # The human went on meanwhile: to another task, or to editing this one
-            {"open": "FE-02", "toasts": ["Marked BE-03 done"], "saved": done},
-            {"open": "BE-03", "toasts": ["Marked BE-03 done"], "saved": done},
+            {"open": "FE-02", "toasts": ["Recorded the dev merge of BE-03"], "saved": done},
+            {"open": "BE-03", "toasts": ["Recorded the dev merge of BE-03"], "saved": done},
         ])
 
 
@@ -1167,14 +1191,14 @@ class WorkflowTests(TempBoard):
         self.assertEqual(out.splitlines()[0], f"{kanvas.board_name(self.path)}  (kanvas.json)")
 
     def test_agents_cannot_start_blocked_proposed_or_running_tasks(self):
-        self.assertIn("blocked by unfinished DV-02", self.fails("start", "DV-03"))
-        self.assertIn("a human must approve it", self.fails("start", "DV-04"))
-        self.run_cli("start", "DV-02")
+        self.assertIn("blocked by unfinished DV-02", self.fails("start", "DV-03", "-m", "Plan"))
+        self.assertIn("a human must approve it", self.fails("start", "DV-04", "-m", "Plan"))
+        self.run_cli("start", "DV-02", "-m", "Plan")
         self.assertEqual(self.get("DV-02")["state"], "doing")
-        self.assertIn("already in progress", self.fails("start", "DV-02"))
+        self.assertIn("already in progress", self.fails("start", "DV-02", "-m", "Plan"))
 
     def test_finish_requires_a_summary(self):
-        self.run_cli("start", "DV-02")
+        self.run_cli("start", "DV-02", "-m", "Plan")
         self.assertIn("needs a summary", self.fails("finish", "DV-02"))
         self.assertEqual(self.get("DV-02")["state"], "doing")
         self.run_cli("finish", "DV-02", "--as", "claude", "-m", "Parser done; 12 tests pass")
@@ -1182,6 +1206,34 @@ class WorkflowTests(TempBoard):
         self.assertEqual(t["state"], "review")
         self.assertEqual((t["notes"][-1]["by"], t["notes"][-1]["text"]), ("claude", "Parser done; 12 tests pass"))
         self.assertIn("only tasks in progress", self.fails("finish", "DV-02", "-m", "again"))
+
+    def test_start_requires_an_approved_definition_and_records_git_worktrees(self):
+        board = self.board()
+        kanvas.find_task(board, "DV-02").pop("definition")
+        write_board(self.path, board)
+        self.assertIn("no approved product definition", self.fails("start", "DV-02", "-m", "Plan"))
+        board = self.board()
+        kanvas.find_task(board, "DV-02")["definition"] = {"approved": True, "outcome": "Ship it"}
+        write_board(self.path, board)
+        self.run_cli("start", "DV-02", "--as", "codex", "-m", "Plan", "--worktree", ROOT)
+        work = self.get("DV-02")["work"]
+        self.assertEqual((work["by"], work["plan"]), ("codex", "Plan"))
+        self.assertEqual(len(work["git"]), 1)
+        self.assertEqual(os.path.normcase(work["git"][0]["worktree"]), os.path.normcase(ROOT))
+        self.assertRegex(work["git"][0]["commit"], r"^[0-9a-f]{40}$")
+
+    def test_agent_review_is_independent_and_changes_return_to_doing(self):
+        self.run_cli("start", "DV-02", "--as", "codex", "-m", "Plan")
+        self.run_cli("finish", "DV-02", "--as", "codex", "-m", "Implemented and tested")
+        self.assertIn("needs another identity", self.fails(
+            "agent-review", "DV-02", "--as", "codex", "--approve", "-m", "Looks good"))
+        self.run_cli("agent-review", "DV-02", "--as", "claude", "--approve", "-m", "Reviewed tests and diff")
+        t = self.get("DV-02")
+        self.assertEqual(t["state"], "review")
+        self.assertEqual(t["review"]["agent"]["status"], "approved")
+        self.assertEqual(t["review"]["manual"]["status"], "pending")
+        self.run_cli("agent-review", "DV-02", "--as", "claude", "--changes", "-m", "Add the missing rollback test")
+        self.assertEqual(self.get("DV-02")["state"], "doing")
 
     def test_pause_returns_the_task_with_a_note(self):
         self.run_cli("start", "DV-02", "-m", "Plan: write the parser first")
@@ -1228,7 +1280,7 @@ class WorkflowTests(TempBoard):
         notes = os.path.join(self.dir, "summary.md")
         with open(notes, "wb") as f:
             f.write("\ufeffDone:\r\n- parser\r\n- tests\r\n".encode("utf-8"))
-        self.run_cli("start", "DV-02")
+        self.run_cli("start", "DV-02", "-m", "Plan")
         self.run_cli("finish", "DV-02", "--file", notes)
         self.assertEqual(self.get("DV-02")["notes"][-1]["text"], "Done:\n- parser\n- tests")
 
@@ -1286,7 +1338,7 @@ class WorkflowTests(TempBoard):
 
 class QuestionTests(TempBoard):
     def test_ask_shows_the_wait_until_the_next_note(self):
-        self.run_cli("start", "DV-02", "--as", "claude")
+        self.run_cli("start", "DV-02", "--as", "claude", "-m", "Plan")
         _, out, _ = self.run_cli("ask", "DV-02", "--as", "claude", "Question: SQLite or Postgres?")
         self.assertIn("DV-02 now shows the human that you wait for their reply", out)
         last = self.get("DV-02")["notes"][-1]
@@ -1302,13 +1354,13 @@ class QuestionTests(TempBoard):
     def test_ask_needs_a_question_on_a_task_in_progress(self):
         self.assertIn("DV-02 is todo; ask on a task you are working on", self.fails("ask", "DV-02", "Which one?"))
         self.assertIn("DV-03 is blocked", self.fails("ask", "DV-03", "Which one?"))
-        self.run_cli("start", "DV-02")
+        self.run_cli("start", "DV-02", "-m", "Plan")
         before = self.raw()
         self.assertIn("The question is empty", self.fails("ask", "DV-02", "Question:"))
         self.assertEqual(self.raw(), before)
 
     def test_leaving_doing_ends_the_wait(self):
-        self.run_cli("start", "DV-02")
+        self.run_cli("start", "DV-02", "-m", "Plan")
         self.run_cli("ask", "DV-02", "Which one?")
         t = self.get("DV-02")
         self.assertEqual(kanvas.open_question(t)["text"], "Question: Which one?")
@@ -1389,30 +1441,26 @@ class YoloTests(TempBoard):
     def initial_board(self):
         board = super().initial_board()
         board["tasks"][2]["yolo"] = True  # DV-03, which depends on DV-02
-        board["tasks"].append(task("DV-05", "todo", "DV", ["DV-01"]))
+        board["tasks"].append(task("DV-05", "todo", "DV", ["DV-01"], definition={"approved": True, "outcome": "Task DV-05"}))
         return board
 
     def test_yolo_is_stored_after_deps(self):
         t = json.loads(self.raw())["tasks"][2]
-        self.assertEqual(list(t), ["id", "title", "state", "group", "deps", "yolo"])
+        self.assertEqual(list(t), ["id", "title", "state", "group", "deps", "yolo", "definition"])
 
-    def test_covered_tasks_skip_review_and_the_yolo_task_does_not(self):
+    def test_yolo_never_skips_review(self):
         _, out, _ = self.run_cli("ready")
         self.assertEqual(out.splitlines(), ["DV-02  Task DV-02  (YOLO)", "DV-05  Task DV-05"])
-        self.run_cli("start", "DV-02")
+        self.run_cli("start", "DV-02", "-m", "Plan")
         _, out, _ = self.run_cli("finish", "DV-02", "-m", "Parser done")
-        self.assertIn("doing -> done", out)
-        self.assertEqual(self.get("DV-02")["state"], "done")
-        self.run_cli("start", "DV-03")
-        _, out, _ = self.run_cli("finish", "DV-03", "-m", "Feature done")
         self.assertIn("doing -> review", out)
-        self.assertIn("YOLO is set on it", out)
-        self.assertEqual(self.get("DV-03")["state"], "review")
-        self.run_cli("start", "DV-05")
+        self.assertEqual(self.get("DV-02")["state"], "review")
+        self.assertIn("blocked by unfinished DV-02", self.fails("start", "DV-03", "-m", "Plan"))
+        self.run_cli("start", "DV-05", "-m", "Plan")
         self.run_cli("finish", "DV-05", "-m", "Outside the chain")
         self.assertEqual(self.get("DV-05")["state"], "review")
 
-    def test_only_the_last_yolo_task_of_a_chain_goes_to_review(self):
+    def test_nested_yolo_still_requires_review_for_each_task(self):
         board = self.board()
         kanvas.find_task(board, "DV-02")["yolo"] = True
         board["tasks"].append(board["tasks"].pop(1))  # DV-03's YOLO comes first in the file
@@ -1421,13 +1469,11 @@ class YoloTests(TempBoard):
         self.assertIn("YOLO on DV-03:", out)
         _, out, _ = self.run_cli("show", "DV-02")
         self.assertIn("YOLO:   through DV-03", out)
-        self.run_cli("start", "DV-02")
+        self.run_cli("start", "DV-02", "-m", "Plan")
         _, out, _ = self.run_cli("finish", "DV-02", "-m", "Parser done")
-        self.assertIn("YOLO covers it through DV-03", out)
-        self.assertEqual(self.get("DV-02")["state"], "done")
-        self.run_cli("start", "DV-03")
-        self.run_cli("finish", "DV-03", "-m", "Feature done")
-        self.assertEqual(self.get("DV-03")["state"], "review")
+        self.assertIn("doing -> review", out)
+        self.assertEqual(self.get("DV-02")["state"], "review")
+        self.assertIn("blocked by unfinished DV-02", self.fails("start", "DV-03", "-m", "Plan"))
 
     def test_html_yolo_cover_matches_python(self):
         board = kanvas.new_board()
@@ -1446,8 +1492,8 @@ class YoloTests(TempBoard):
                           task("Y-05", "done", yolo=True), task("Y-06", "review", yolo=True)]
         out = run_html_js(self, "const b = normalize(input); yoloOn(b, 'y-04');"
                                 "process.stdout.write(JSON.stringify(b.tasks.map((t) => [t.id, t.state, !!t.yolo])));", json.dumps(board))
-        self.assertEqual(json.loads(out), [["Y-01", "done", False], ["Y-02", "todo", False], ["Y-03", "todo", False],
-                                           ["Y-04", "todo", True], ["Y-05", "done", True], ["Y-06", "review", True]])
+        self.assertEqual(json.loads(out), [["Y-01", "review", False], ["Y-02", "proposed", False], ["Y-03", "todo", False],
+                                           ["Y-04", "proposed", True], ["Y-05", "done", True], ["Y-06", "review", True]])
 
     def test_yolo_ends_when_its_task_reaches_review(self):
         board = self.board()
@@ -1457,7 +1503,7 @@ class YoloTests(TempBoard):
         self.assertNotIn("YOLO on", out)
         _, out, _ = self.run_cli("ready")
         self.assertNotIn("(YOLO)", out)
-        self.run_cli("start", "DV-02")
+        self.run_cli("start", "DV-02", "-m", "Plan")
         self.run_cli("finish", "DV-02", "-m", "Parser done")
         self.assertEqual(self.get("DV-02")["state"], "review")
 
@@ -1472,19 +1518,21 @@ class YoloTests(TempBoard):
             self.assertIn("a human must approve it", self.fails("start", tid))
         self.assertEqual(self.raw(), before)
         out = self.run_cli("status")[1].replace("\r\n", "\n")
-        self.assertIn("Proposed, awaiting human approval (2)\n  DV-04  Task DV-04\n  DV-06  Delete the production database\n", out)
+        self.assertIn("Proposed, awaiting human approval (2)\n  DV-04  Task DV-04  (YOLO)\n  DV-06  Delete the production database  (YOLO)\n", out)
         self.assertIn("DV-02  Task DV-02  (waiting on DV-04, DV-06)  (YOLO)", out)
         self.assertIn("YOLO:   joins the chain of DV-03 once a human approves it", self.run_cli("show", "DV-06")[1])
         self.assertNotIn("ask the human", self.run_cli("depend", "DV-03", "DV-04")[1])
         board = self.board()
-        kanvas.find_task(board, "DV-06")["state"] = "todo"  # the human approves it in the board
+        approved = kanvas.find_task(board, "DV-06")
+        approved["state"] = "todo"
+        approved["definition"] = {"approved": True, "outcome": "Delete the production database"}
         write_board(self.path, board)
         self.assertIn("DV-06  Delete the production database  (YOLO)", self.run_cli("ready")[1])
-        self.run_cli("start", "DV-06")
+        self.run_cli("start", "DV-06", "-m", "Plan")
         self.run_cli("finish", "DV-06", "-m", "Done")
-        self.assertEqual(self.get("DV-06")["state"], "done")
+        self.assertEqual(self.get("DV-06")["state"], "review")
 
-    def test_html_a_link_the_human_makes_approves_the_proposals_it_brings_into_the_chain(self):
+    def test_html_links_never_approve_proposals_in_a_yolo_chain(self):
         board = kanvas.new_board()
         board["tasks"] = [task("Y-01", "proposed"), task("Y-02", deps=["Y-01"]), task("Y-03", deps=["Y-02"], yolo=True),
                           task("Y-04", "proposed", deps=["Y-05"]), task("Y-05", "proposed"), task("Y-06", "proposed"), task("Y-07", "proposed")]
@@ -1496,8 +1544,7 @@ class YoloTests(TempBoard):
         tasks = kanvas.task_map(board)
         self.assertEqual(seen, [kanvas.view_state(t, tasks) for t in board["tasks"]])
         self.assertEqual(seen, ["proposed", "blocked", "blocked", "proposed", "proposed", "proposed", "proposed"])
-        # Y-01 was linked in before (by an agent) and stays proposed; Y-07 is outside the chain.
-        self.assertEqual(after, ["proposed", "todo", "todo", "todo", "todo", "todo", "proposed", "todo"])
+        self.assertEqual(after, ["proposed", "todo", "todo", "proposed", "proposed", "proposed", "proposed", "proposed"])
 
 
 class ProposalTests(TempBoard):
@@ -1869,7 +1916,7 @@ class InstalledCommandTests(TempBoard):
         with self.running(argv0=os.path.join("tools", "kanvas.py")):
             text = kanvas.build_parser().format_help()
         self.assertTrue(text.startswith("usage: kanvas.py [-h]"), text[:40])
-        self.assertIn("\n  kanvas.py start DV-02\n", text)
+        self.assertIn("\n  kanvas.py start DV-02 -m \"Plan: API, data, tests and rollout\" --worktree .\n", text)
         with self.running(argv0=""):
             self.assertTrue(kanvas.build_parser().format_help().startswith("usage: kanvas.py [-h]"))
 
@@ -2544,10 +2591,11 @@ class ServerTests(TempBoard):
 
     def browser_move_after_agent(self, state, *agent_args):
         """The page loads the board, an agent runs a command, then the human moves DV-02 to `state`."""
-        return self.browser_after_agent(f"ops.state('DV-02', seenOf(seen('DV-02')), {json.dumps(state)})", *agent_args)
+        op = "ops.startWork('DV-02', 'Plan')" if state == "doing" else f"ops.state('DV-02', seenOf(seen('DV-02')), {json.dumps(state)})"
+        return self.browser_after_agent(op, *agent_args)
 
     def test_a_browser_move_does_not_overwrite_an_agent_move(self):
-        self.run_cli("start", "DV-02")
+        self.run_cli("start", "DV-02", "-m", "Plan")
         out = self.browser_move_after_agent("todo", "finish", "DV-02", "-m", "Done; tests pass")
         self.assertEqual(out, "refused: DV-02 is in Review now, not Doing")
         self.assertEqual(self.get("DV-02")["state"], "review")
@@ -2559,7 +2607,7 @@ class ServerTests(TempBoard):
         self.assertEqual(self.get("DV-03")["notes"][0]["text"], "agent wrote first")
 
     def test_approving_refuses_a_proposal_an_agent_revised(self):
-        approve = "ops.state('DV-04', seenOf(seen('DV-04')), 'todo')"
+        approve = "ops.define('DV-04', seenOf(seen('DV-04')), { approved: true, outcome: 'Ship it', needs: 'Safe', acceptance: 'Tests pass' })"
         out = self.browser_after_agent(approve, "edit", "DV-04", "--desc", "Now it also rewrites the parser")
         self.assertEqual(out, "refused: DV-04 was revised since you opened it; read the new version first")
         self.assertEqual(self.get("DV-04")["state"], "proposed")
@@ -2568,15 +2616,13 @@ class ServerTests(TempBoard):
         self.assertEqual(self.browser_after_agent(approve, "note", "DV-04", "Only a note"), "saved")
         self.assertEqual(self.get("DV-04")["state"], "todo")
 
-    def test_approving_several_stops_at_a_revised_one(self):
+    def test_bulk_approval_cannot_bypass_product_definitions(self):
         self.run_cli("propose", "Development", "Second")
         self.run_cli("propose", "Development", "Third")
         approve = "ops.approve(['DV-04', 'DV-05', 'DV-06'].map((id) => seenOf(seen(id))))"
         out = self.browser_after_agent(approve, "edit", "DV-05", "--title", "Second, reworded")
-        self.assertEqual(out, "refused: DV-05 was revised since you looked; read the new version first")
+        self.assertEqual(out, "refused: DV-04, DV-05, DV-06 need their PO/TL product definition first")
         self.assertEqual([self.get(i)["state"] for i in ("DV-04", "DV-05", "DV-06")], ["proposed"] * 3)
-        self.assertEqual(self.browser_after_agent(approve, "withdraw", "DV-06"), "saved")
-        self.assertEqual([self.get(i)["state"] for i in ("DV-04", "DV-05")], ["todo", "todo"])
 
     def test_a_browser_edit_does_not_overwrite_an_agent_edit(self):
         edit = "ops.set('DV-04', { title: 'Mine' }, { title: seen('DV-04').title })"
@@ -3199,7 +3245,7 @@ class StyleTests(unittest.TestCase):
                     check(f"{selector} on hover", color(rule(selector)["color"]), brighter(fill))
             asking = rule(":is(.card, .kcard).asking .badge")
             check("waiting for you", color(asking["color"], **{"--c": "var(--accent)"}), color(asking["background"], **{"--c": "var(--accent)"}))
-            badge, toast_badge, filled, button = rule(".badge"), rule(".toast .badge"), rule(":is(.card, .kcard):is(.s-doing, .s-review) .badge"), rule("button.primary.to")
+            badge, toast_badge, filled, button = rule(".badge"), rule(".toast .badge"), rule(":is(.card, .kcard):is(.s-doing, .s-review, .s-production) .badge"), rule("button.primary.to")
             for state, own in states.items():
                 cards = [color(rule(".card")["background"], **own)]
                 if state == "blocked":

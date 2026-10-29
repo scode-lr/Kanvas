@@ -15,7 +15,7 @@ One JSON file, one Python script, one HTML page. No accounts, no build step, no 
 
 AI agents do their best work in a terminal, but a project needs a plan that outlives a single chat: what is left, what depends on what, what was decided and why. Kanvas keeps that plan in `kanvas.json` next to your code, where you and any number of agents work on it together.
 
-- **You stay in control.** Agents propose tasks and you approve them. Agents finish tasks and you review them. Only you mark work done, unless you hand a chain of tasks over with YOLO, and even then the task at its end comes back to you for review.
+- **Delivery, not wishful statuses.** A task needs a product definition before To do, a technical plan before Doing, two review gates before Done, and deployment evidence before Production. YOLO automates attention, never those gates.
 - **Agents cannot break the board.** They change it through `kanvas.py`, which enforces the workflow and rejects invalid moves with a clear message.
 - **Live.** Agent changes appear in the browser within a second, and your edits are on disk immediately for the agent's next command.
 - **Agent-agnostic.** Claude Code, Codex, Cursor, Gemini CLI, OpenCode, GitHub Copilot, or anything that runs shell commands. Use several at once; notes record who did what.
@@ -121,30 +121,31 @@ flowchart LR
     page <-- "kanvas serve" --> board
 ```
 
-Every task moves through five states. A to-do task whose dependencies are unfinished shows as blocked, and becomes ready by itself once they are done.
+Every task moves through six states. A to-do task whose dependencies are unfinished shows as blocked, and becomes ready by itself once they are done.
 
 | State | Color and mark | Who moves it there |
 |-------|----------------|--------------------|
 | Proposed | purple, dashed circle | An agent proposes it |
-| To do | blue, empty circle (gray and struck through while blocked) | You approve it |
-| Doing | orange, half-filled circle | An agent starts it |
-| Review | pink, three-quarters-filled circle | The agent finishes it, with a summary of what it did |
-| Done | green, filled circle with a check | You accept it, or send it back with feedback |
+| To do | blue, empty circle (gray and struck through while blocked) | PO + TL complete the product Grill me |
+| Doing | orange, half-filled circle | Architect + senior complete the technical Grill me and start a worktree |
+| Review | pink, three-quarters-filled circle | The implementer finishes; an independent agent and a human review it |
+| Done | green, filled circle with a check | The reviewed change is merged to `dev` |
+| Production | teal, filled star | The change is merged to `main`/`master` and deployed |
 
-Agents may propose tasks and groups, start ready tasks, finish or pause tasks in progress, add notes and add dependencies. Until you approve a proposal, they may also revise, withdraw or rewire it, so you can reshape a plan together in the conversation and the board follows. **Ask for changes** on a proposal leaves your request as a note: agents see it in `status`, revise the proposal, and their next note answers it. Everything else belongs to you: approving, changing approved tasks, marking done. Feedback you leave when sending a task back becomes a note the agent reads when it picks the task up again.
+The first Grill me records the outcome, needs and constraints, acceptance criteria and non-goals. The second records the architecture, implementation, tests and rollout plan. `start` also snapshots each supplied Git worktree—repository, path, branch, commit and uncommitted-change flag. Review then has two explicit, independent gates: an agent PR review and a manual review. A dev merge and a production promotion each require their own evidence.
 
 ## The board
 
 ![Reviewing a finished task](img/review.png)
 
 - **Graph view.** One swimlane per group, laid out by dependency depth, flowing left to right or top to bottom (switch under Display, or press `L`). The automatic layout orders the cards for fewer crossings and straighter arrows, and arrows that skip levels run between cards. A swimlane with three or more finished tasks folds them into one stub, such as "8 done": click it to show them, and again to fold them. Arrows from folded tasks are left out, since a finished dependency holds nothing up, and a task you open from a link, the bell or search shows even when its swimlane is folded. Set the card order to Manual under Display (or press `M`) to order the cards yourself: drag a card up or down within its level, or into another swimlane to change its group, and drag a swimlane by its name to reorder the groups. Your order is saved in `kanvas.json`, and right-clicking empty space offers to start from the automatic order. The spacing slider under Display, or `[` and `]`, compresses or extends the space between dependency levels. Hover or select a task to highlight everything it depends on and everything waiting for it. A dependency that another dependency already implies (C needs A and B, and B needs A) stays in the file but is drawn only while A or C is selected, as a dashed arrow. Each card has a dot on its incoming and outgoing side: drag one onto another card to add a dependency in that direction (cycles are refused). Click an arrow to open or remove the dependency.
-- **Board view.** Kanban columns by state. Drag cards between columns, or approve every proposal at once. Marking the open task done or sending it back opens the next task in the Review column, within the current filters, so you can go through everything waiting for review one task after another; Undo comes back to it. On a phone, one column fills the screen, and a row above the columns gives every state with its count; tap one to go to its column. On a touch screen, hold a card until it lifts, then drag it to a column or to a state in that row; let go without moving to open its menu.
+- **Board view.** Kanban columns by state. Forward transitions open the required Grill me, review or delivery-evidence dialog; dragging cannot bypass a gate. On a phone, one column fills the screen, and a row above the columns gives every state with its count; tap one to go to its column.
 - **New tasks.** Choose what a new task depends on and what it blocks by searching, or with **Pick on graph**: click cards to add or remove them, then press Done (or Enter), or Cancel (or Escape) to keep the earlier choice. Choices that would create a cycle are dimmed, with the reason on hover.
-- **Task panel.** Title, Markdown description, state, group, dependencies and the notes timeline. Approve or ask for changes, start, send to review, mark done, or send back with feedback.
+- **Task panel.** Alongside the task and notes, it shows the approved product definition, construction plan and Git worktrees, both review gates, and dev/production delivery evidence.
 - **Questions from agents.** When an agent needs your answer to go on, it runs `ask` and asks in its chat. Its card turns from Doing to **Waiting for you** and shows the question, a toast announces it, the bell lists it above the work to review, across every open board, and the browser tab's title counts the agents waiting, as in `(1) My project · Kanvas`. You reply in the agent's chat, and the card goes back to Doing with the agent's next note. If that chat is gone, Dismiss in the task panel clears the question.
 - **Right-click menus.** On a card: state actions, a new task that depends on it or blocks it, adding and removing dependencies, copying the ID, deleting. On an arrow (left or right click): the two tasks it connects are highlighted and shown in the menu; click either one to open it, or remove the connection. On empty space: a new task in that group, a new group, or deleting that group (its tasks stay without a group unless you choose to delete them too).
 - **Undo and redo.** Ctrl+Z undoes your last change in the browser, Ctrl+Shift+Z or Ctrl+Y redoes it, and the arrows next to New task do the same. On a Mac, these and the page's other Ctrl shortcuts use ⌘, as the page shows. The toast that confirms a change has an Undo button for that change. Changes agents made in the meantime are kept: an undo only touches what your change touched, and refuses if an agent has changed that since. Inside a text field, Ctrl+Z undoes typing as usual.
-- **YOLO.** "YOLO up to here…" on a card (right-click menu or task panel) hands that task and everything it depends on to the agents: the tasks they finish on the way are done without review. The YOLO task itself comes back to you for review, so a YOLO run ends with one review of the result, and YOLO stops applying once that task is in review. YOLO on a task further along takes over the chain: the YOLO marks inside it go, so only the last task comes back for review. Turning it on approves the chain's current proposals and marks the other tasks waiting for review as done. A proposal an agent links into the chain later waits for your approval; one you link yourself is approved with the link. The task carries a YOLO tag and the tasks it covers a lightning icon; the same menu turns it off.
+- **YOLO.** "YOLO up to here…" selects a dependency chain for autonomous attention. It never creates product definitions, approves reviews, merges to dev or promotes to production. The task carries a YOLO tag and covered work a lightning icon; the same menu turns it off.
 - **Everything else.** Filter by state, search (press `/`), hide finished work, groups with their own ID prefixes (from the menu on the board name), light, dark or system theme, keyboard shortcuts (press `?`), arrow keys to move from card to card and Enter to move into its panel (Tab goes round the panel, Escape comes back out), and links: `#TR-02` in the URL opens that task.
 
 ![The board view in dark mode](img/board-dark.png)
@@ -213,8 +214,9 @@ You type `kanvas <command>`; `kanvas -h` lists the commands and `kanvas <command
 | `ready` / `blocked` | What can start now / what waits on what |
 | `show ID` | Details, dependencies and notes |
 | `list [STATE or GROUP]` | Tasks by group, optionally filtered |
-| `start ID [-m NOTE]` | To do to doing |
-| `finish ID -m SUMMARY` | Doing to review, or to done for tasks a YOLO task depends on; the summary is required and kept as a note |
+| `start ID -m PLAN [--worktree PATH ...]` | To do to doing after the technical Grill me; records the plan and Git snapshots |
+| `finish ID -m SUMMARY` | Doing to review; creates pending agent and manual review gates |
+| `agent-review ID (--approve\|--changes) -m FINDINGS` | Independent implementation/PR review; changes return the task to Doing |
 | `pause ID [-m NOTE]` | Doing back to to do |
 | `note ID TEXT` | Append a note; descriptions stay as the human wrote them |
 | `ask ID QUESTION` | Show that the agent waits for your reply in its conversation, until its next note |
@@ -275,7 +277,7 @@ Writes take a short lock and replace the file atomically, so several agents and 
 }
 ```
 
-States are `proposed`, `todo`, `doing`, `review` and `done`; blocked is computed. `"yolo": true` on a task puts it and everything it depends on under YOLO. `"at"` and `"by"` on a task say when it was created and by whom: the agent that proposed it, or `"human"` for tasks made in the browser. A note edited in the browser gets an `"edited"` time next to its original `"at"`. A new task takes the highest number in its group plus one, so when the last task of a group is deleted or rejected, the next new task gets its ID. The CLI and the browser write the same canonical formatting, so diffs show only real changes. Unknown fields are preserved. See [`examples/drone.json`](examples/drone.json) for a complete board.
+States are `proposed`, `todo`, `doing`, `review`, `done` and `production`; blocked is computed. Optional `definition`, `work`, `review` and `delivery` objects contain the gate evidence. `"yolo": true` selects the task and its dependencies for autonomous attention but does not bypass gates. The CLI and browser preserve unknown fields and write the same canonical formatting, so diffs show only real changes. See [`examples/drone.json`](examples/drone.json) for a complete board.
 
 ## Migrating from Kanvas 0.x (Obsidian)
 
