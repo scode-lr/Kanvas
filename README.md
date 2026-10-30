@@ -146,6 +146,7 @@ The first Grill me records the outcome, needs and constraints, acceptance criter
 - **Right-click menus.** On a card: state actions, a new task that depends on it or blocks it, adding and removing dependencies, copying the ID, deleting. On an arrow (left or right click): the two tasks it connects are highlighted and shown in the menu; click either one to open it, or remove the connection. On empty space: a new task in that group, a new group, or deleting that group (its tasks stay without a group unless you choose to delete them too).
 - **Undo and redo.** Ctrl+Z undoes your last change in the browser, Ctrl+Shift+Z or Ctrl+Y redoes it, and the arrows next to New task do the same. On a Mac, these and the page's other Ctrl shortcuts use ⌘, as the page shows. The toast that confirms a change has an Undo button for that change. Changes agents made in the meantime are kept: an undo only touches what your change touched, and refuses if an agent has changed that since. Inside a text field, Ctrl+Z undoes typing as usual.
 - **YOLO.** "YOLO up to here…" selects a dependency chain for autonomous attention. It never creates product definitions, approves reviews, merges to dev or promotes to production. The task carries a YOLO tag and covered work a lightning icon; the same menu turns it off.
+- **Execution automation.** A board may opt into a local Codex runner by declaring its repositories under `automation`. The product Grill me then selects Front, API or any other configured repository. Moving the task to Doing creates isolated branches and worktrees, launches `codex exec` with the root documentation and repository instructions, records its live status/log paths, and moves a successful implementation to Review. Original checkouts are never used as workspaces. Kanvas never merges or deploys automatically.
 - **Everything else.** Filter by state, search (press `/`), hide finished work, groups with their own ID prefixes (from the menu on the board name), light, dark or system theme, keyboard shortcuts (press `?`), arrow keys to move from card to card and Enter to move into its panel (Tab goes round the panel, Escape comes back out), and links: `#TR-02` in the URL opens that task.
 
 ![The board view in dark mode](img/board-dark.png)
@@ -244,6 +245,26 @@ One Kanvas serves the boards of all your projects. The first `serve` starts it a
 Text arguments also accept `--stdin` and `--file PATH`, read as UTF-8 on every platform, which is the reliable way to pass multi-line or non-ASCII text from any shell. Notes and proposals are signed with `--as NAME` or the `KANVAS_AGENT` environment variable. The CLI finds `kanvas.json` in the current directory or any parent; `--board PATH` or `KANVAS_BOARD` point elsewhere.
 
 Writes take a short lock and replace the file atomically, so several agents and the browser can work at the same time without losing changes.
+
+### Automated project execution
+
+Automation is opt-in and runs only while `kanvas serve` (or the login service) is running. Add project-relative repositories to the board:
+
+```json
+"automation": {
+  "enabled": true,
+  "executor": "codex",
+  "project_root": ".",
+  "worktrees_root": ".kanvas/worktrees",
+  "runs_root": ".kanvas/runs",
+  "repositories": [
+    { "id": "front", "name": "Frontend", "path": "Frontend", "base": "origin/dev" },
+    { "id": "api", "name": "API", "path": "Api", "base": "origin/dev" }
+  ]
+}
+```
+
+The PO/TL Grill me requires at least one repository. After the Architect/Senior plan starts the task, Kanvas creates `kanvas/<task-id>-<title>` in each selected repository under `.kanvas/worktrees/<task-id>/`, launches Codex with `workspace-write` and automatic approval review, and stores JSONL logs under `.kanvas/runs/`. Add `.kanvas/` to the project root's `.gitignore`. Successful runs enter Review; push or PR authentication failures are reported without losing the local commits.
 
 ## File format
 

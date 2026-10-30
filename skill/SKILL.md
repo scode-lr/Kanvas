@@ -32,6 +32,8 @@ proposed -> todo -> doing -> review -> done -> production
 
 The product Grill me records outcome, needs/constraints, acceptance criteria and non-goals. Before Doing, `start` requires an architecture/senior construction plan and accepts repeatable `--worktree PATH`; it snapshots worktree, branch, commit and dirty state. `finish` always opens both review gates. A different agent identity must run `agent-review --approve`; the human completes manual review and records dev/production evidence in the board.
 
+When the board has `automation.enabled`, the product Grill me also selects the repositories the task may change. Starting it from the board creates isolated worktrees and launches a separate Codex implementation session automatically. Do not work in the original checkout. Kanvas records the run under `work.automation` and moves a successful run to Review; inspect its summary, commits and PR links before reviewing.
+
 The human can also ask for changes to a proposal in the board. `status` then marks it `(changes requested: ...)`, and `show ID` has the request in its notes. Revise the proposal with `edit ID`, passing `-m` with what you changed; that note answers the request, and the mark goes.
 
 ### YOLO

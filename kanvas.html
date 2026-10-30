@@ -2469,7 +2469,7 @@ const ops = {
     const t = mustFind(b, id);
     if (vstateIn(indexOf(b), t) !== "todo") throw new Error(`${t.id} is not ready to start`);
     if (!t.definition?.approved) throw new Error(`${t.id} has no approved product definition`);
-    t.work = { by: "human", at, plan };
+    t.work = { by: "human", at, plan, repositories: [...(t.definition.repositories || [])] };
     delete t.review;
     t.state = "doing";
     addNote(t, plan, at);
@@ -3740,15 +3740,22 @@ const unlink = (id, dep) => undoable(ops.removeDep(id, dep), `${id} no longer wa
 
 async function approveDefinition(t) {
   const d = t.definition || {};
+  const repositories = Array.isArray(board.automation?.repositories) ? board.automation.repositories : [];
+  const selected = new Set(d.repositories || []);
   const data = await modal(`PO + TL Grill me · ${t.id}`, [
     h("p", {}, "Define the product need before making this task available for development."),
     h("label", { class: "field" }, "Outcome", h("textarea", { name: "outcome", rows: 3, required: true, value: d.outcome || "", placeholder: "What changes for the user or the business?" })),
     h("label", { class: "field" }, "Needs and constraints", h("textarea", { name: "needs", rows: 4, required: true, value: d.needs || "", placeholder: "Business rules, dependencies, platforms, privacy, operational constraints…" })),
     h("label", { class: "field" }, "Acceptance criteria", h("textarea", { name: "acceptance", rows: 4, required: true, value: d.acceptance || "", placeholder: "Observable conditions that prove the task is complete." })),
     h("label", { class: "field" }, "Non-goals", h("textarea", { name: "non_goals", rows: 2, value: d.non_goals || "", placeholder: "What is explicitly outside this task?" })),
+    repositories.length ? h("label", { class: "field" }, "Repositories",
+      h("select", { name: "repositories", multiple: true, size: Math.min(6, repositories.length), required: true },
+        ...repositories.map((r) => h("option", { value: r.id, selected: selected.has(r.id) }, r.name || r.id))),
+      h("span", { class: "hint" }, "Select every repository the implementation may change.")) : null,
   ], { ok: "Approve definition" });
   if (!data) return;
   const definition = Object.fromEntries(["outcome", "needs", "acceptance", "non_goals"].map((k) => [k, data.get(k).trim()]));
+  if (repositories.length) definition.repositories = data.getAll("repositories").map(String);
   undoable(ops.define(t.id, seenOf(t), definition), `Approved the product definition of ${t.id}`, { onFail: () => approveDefinition(t) });
 }
 
@@ -3979,14 +3986,17 @@ function fillPanel(panel, t) {
       h("p", {}, h("b", {}, "Outcome: "), t.definition.outcome || "—"),
       h("p", {}, h("b", {}, "Needs: "), t.definition.needs || "—"),
       h("p", {}, h("b", {}, "Acceptance: "), t.definition.acceptance || "—"),
-      t.definition.non_goals ? h("p", {}, h("b", {}, "Non-goals: "), t.definition.non_goals) : null)));
+      t.definition.non_goals ? h("p", {}, h("b", {}, "Non-goals: "), t.definition.non_goals) : null,
+      t.definition.repositories?.length ? h("p", {}, h("b", {}, "Repositories: "), t.definition.repositories.join(", ")) : null)));
   if (t.work) workflow.push(h("section", { class: "p-sec" },
     h("div", { class: "section-head" }, "Construction plan", h("span", { class: "count" }, t.work.by || "?")),
     h("div", { class: "md" },
       h("p", {}, t.work.plan || "—"),
       ...(t.work.git || []).map((g) => h("p", {}, h("b", {}, "Git: "),
         `${g.branch || "?"} @ ${(g.commit || "").slice(0, 12)}${g.dirty ? " + uncommitted changes" : ""}`,
-        h("br"), h("span", { class: "muted" }, g.worktree || g.repo || ""))))));
+        h("br"), h("span", { class: "muted" }, g.worktree || g.repo || ""))),
+      t.work.automation ? h("p", {}, h("b", {}, "Automation: "), t.work.automation.status || "unknown",
+        t.work.automation.summary ? ` · ${t.work.automation.summary}` : "") : null)));
   if (t.review) {
     const agent = t.review.agent || { status: "pending" }, manual = t.review.manual || { status: "pending" };
     workflow.push(h("section", { class: "p-sec" }, h("div", { class: "section-head" }, "Review gates"),

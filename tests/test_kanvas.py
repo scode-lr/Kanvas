@@ -1336,6 +1336,64 @@ class WorkflowTests(TempBoard):
         self.assertNotEqual(self.run_cli("check", check=False)[0], 0)
 
 
+class AutomationTests(TempBoard):
+    def automated_board(self, repo):
+        board = self.board()
+        board["automation"] = {
+            "enabled": True,
+            "executor": "codex",
+            "project_root": self.dir,
+            "worktrees_root": ".kanvas/worktrees",
+            "runs_root": ".kanvas/runs",
+            "repositories": [{"id": "front", "name": "Frontend", "path": repo, "base": "HEAD"}],
+        }
+        t = kanvas.find_task(board, "DV-02")
+        t["state"] = "doing"
+        t["definition"]["repositories"] = ["front"]
+        t["work"] = {"by": "human", "at": kanvas.now_iso(), "plan": "Implement and test", "repositories": ["front"]}
+        return board
+
+    def test_prepares_an_isolated_worktree_for_each_selected_repository(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", repo], check=True, capture_output=True)
+        subprocess.run(["git", "-C", repo, "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", repo, "config", "user.name", "Test"], check=True)
+        with open(os.path.join(repo, "README.md"), "w", encoding="utf-8") as f:
+            f.write("front\n")
+        subprocess.run(["git", "-C", repo, "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", repo, "commit", "-m", "init"], check=True, capture_output=True)
+        board = self.automated_board(repo)
+        config = kanvas.automation_config(board, self.path)
+        worktrees = kanvas.prepare_automation_worktrees(kanvas.find_task(board, "DV-02"), config)
+        self.assertEqual(len(worktrees), 1)
+        self.assertTrue(os.path.isfile(os.path.join(worktrees[0]["worktree"], "README.md")))
+        self.assertEqual(subprocess.run(["git", "-C", worktrees[0]["worktree"], "branch", "--show-current"],
+                                        capture_output=True, text=True, check=True).stdout.strip(), worktrees[0]["branch"])
+
+    def test_successful_codex_run_moves_the_task_to_review(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        write_board(self.path, self.automated_board(repo))
+        fake_worktrees = [{"id": "front", "name": "Frontend", "path": repo, "base": "HEAD",
+                           "branch": "kanvas/dv-02-task", "worktree": repo, "commit": "a" * 40}]
+
+        def completed(command, **kwargs):
+            last = os.path.join(self.dir, ".kanvas", "runs", "dv-02-last.txt")
+            with open(last, "w", encoding="utf-8") as f:
+                f.write("Implemented the task; tests pass; PR unavailable in the test.")
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=fake_worktrees), \
+             mock.patch.object(kanvas.subprocess, "run", side_effect=completed) as run:
+            kanvas.run_automation(self.path, "DV-02")
+        task = self.get("DV-02")
+        self.assertEqual(task["state"], "review")
+        self.assertEqual(task["work"]["automation"]["status"], "completed")
+        self.assertEqual(task["review"]["agent"]["status"], "pending")
+        self.assertEqual(run.call_args.args[0][:3], ["codex", "exec", "-C"])
+
+
 class QuestionTests(TempBoard):
     def test_ask_shows_the_wait_until_the_next_note(self):
         self.run_cli("start", "DV-02", "--as", "claude", "-m", "Plan")

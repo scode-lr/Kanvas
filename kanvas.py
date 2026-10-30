@@ -34,7 +34,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote, urlparse
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 FORMAT = 1
 INSTALLED = __name__ == "kanvas_board"
 BOARD_FILE = "kanvas.json"
@@ -746,6 +746,184 @@ def worktree_snapshots(paths):
     return snapshots
 
 
+def automation_config(board, path):
+    """Validated project automation config, or None when this board is passive."""
+    config = board.get("automation")
+    if not isinstance(config, dict) or config.get("enabled") is not True:
+        return None
+    if config.get("executor", "codex") != "codex":
+        raise KanvasError("automation.executor must be 'codex'")
+    root = os.path.abspath(os.path.join(os.path.dirname(path), config.get("project_root") or "."))
+    repositories = {}
+    for item in config.get("repositories") or []:
+        if not isinstance(item, dict) or not item.get("id") or not item.get("path"):
+            raise KanvasError("Each automated repository needs id and path")
+        repo = os.path.abspath(os.path.join(root, item["path"]))
+        if not os.path.isdir(repo):
+            raise KanvasError(f"Configured repository does not exist: {repo}")
+        repositories[str(item["id"])] = {
+            "id": str(item["id"]),
+            "name": str(item.get("name") or item["id"]),
+            "path": repo,
+            "base": str(item.get("base") or "origin/dev"),
+        }
+    if not repositories:
+        raise KanvasError("Automation needs at least one configured repository")
+    worktrees = os.path.abspath(os.path.join(root, config.get("worktrees_root") or ".kanvas/worktrees"))
+    runs = os.path.abspath(os.path.join(root, config.get("runs_root") or ".kanvas/runs"))
+    return {
+        "root": root,
+        "repositories": repositories,
+        "worktrees": worktrees,
+        "runs": runs,
+        "model": config.get("model"),
+        "reasoning": config.get("reasoning"),
+    }
+
+
+def task_repository_ids(task):
+    """Repositories selected in the product definition and copied into the construction plan."""
+    work = task.get("work") if isinstance(task.get("work"), dict) else {}
+    definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
+    values = work.get("repositories") or definition.get("repositories") or task.get("repositories") or []
+    return [str(x) for x in values if str(x).strip()]
+
+
+def _git(path, *args):
+    proc = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    if proc.returncode:
+        raise KanvasError(proc.stderr.strip() or proc.stdout.strip() or f"git {' '.join(args)} failed")
+    return proc.stdout.strip()
+
+
+def automation_slug(text):
+    slug = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+    return slug[:36] or "task"
+
+
+def automation_prompt(board, task, config, worktrees):
+    repos = "\n".join(f"- {x['id']} ({x['name']}): {x['worktree']} on {x['branch']}" for x in worktrees)
+    definition = task.get("definition") or {}
+    work = task.get("work") or {}
+    return f"""You are the implementation agent for Kanvas task {task['id']}: {task['title']}.
+
+Project root: {config['root']}
+Repositories and isolated worktrees:
+{repos}
+
+Product outcome:
+{definition.get('outcome') or task.get('desc') or '(not supplied)'}
+
+Needs and constraints:
+{definition.get('needs') or task.get('desc') or '(not supplied)'}
+
+Acceptance criteria:
+{definition.get('acceptance') or '(not supplied)'}
+
+Non-goals:
+{definition.get('non_goals') or '(none)'}
+
+Technical plan:
+{work.get('plan') or '(not supplied)'}
+
+Read the root AGENTS.md and relevant files under docs/, then each repository's AGENTS.md. Work only in the
+isolated worktrees listed above; never modify the original checkouts. Implement the complete task across every
+selected repository, run proportionate tests, commit each repository with a conventional commit, push each branch
+when authentication is available, and open a pull request targeting dev. Do not merge or deploy. If GitHub access
+prevents push or PR creation, keep the local commits and report the exact blocker. End with a concise summary of
+changes, tests, commits and PR URLs (or blockers). Do not edit kanvas.json; Kanvas records your result itself.
+"""
+
+
+def prepare_automation_worktrees(task, config):
+    selected = task_repository_ids(task)
+    if not selected:
+        raise KanvasError(f"{task['id']} has no repositories selected in its product definition")
+    unknown = [x for x in selected if x not in config["repositories"]]
+    if unknown:
+        raise KanvasError(f"{task['id']} names unknown repositories: {', '.join(unknown)}")
+    task_folder = os.path.join(config["worktrees"], automation_slug(task["id"]))
+    os.makedirs(task_folder, exist_ok=True)
+    out = []
+    for repo_id in selected:
+        repo = config["repositories"][repo_id]
+        branch = f"kanvas/{task['id'].lower()}-{automation_slug(task['title'])}"
+        target = os.path.join(task_folder, repo_id)
+        if os.path.exists(target):
+            raise KanvasError(f"Automation worktree already exists: {target}")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        _git(repo["path"], "worktree", "add", "-b", branch, target, repo["base"])
+        out.append({**repo, "branch": branch, "worktree": target, "commit": _git(target, "rev-parse", "HEAD")})
+    return out
+
+
+def update_automation(path, task_id, status, **fields):
+    def op(board):
+        task = find_task(board, task_id)
+        work = task.setdefault("work", {})
+        run = work.setdefault("automation", {})
+        run.update({"status": status, "updated": now_iso(), **fields})
+        return task
+    return mutate(path, op)
+
+
+def finish_automation(path, task_id, success, summary):
+    def op(board):
+        task = find_task(board, task_id)
+        work = task.setdefault("work", {})
+        run = work.setdefault("automation", {})
+        run.update({"status": "completed" if success else "failed", "updated": now_iso(), "summary": summary})
+        add_note(task, ("Automation completed: " if success else "Automation failed: ") + summary, "kanvas-runner")
+        if success and task.get("state") == "doing":
+            task["state"] = "review"
+            task["review"] = {"agent": {"status": "pending"}, "manual": {"status": "pending"}}
+        return task
+    return mutate(path, op)
+
+
+def run_automation(path, task_id):
+    """Prepare worktrees and run one persistent Codex task. Intended for a daemon thread."""
+    try:
+        board = load_board(path)
+        task = find_task(board, task_id)
+        config = automation_config(board, path)
+        if config is None:
+            raise KanvasError("Automation is not enabled for this board")
+        worktrees = prepare_automation_worktrees(task, config)
+        os.makedirs(config["runs"], exist_ok=True)
+        log = os.path.join(config["runs"], f"{automation_slug(task_id)}.jsonl")
+        last = os.path.join(config["runs"], f"{automation_slug(task_id)}-last.txt")
+        update_automation(path, task_id, "running", started=now_iso(), log=log,
+                          worktrees=[{k: x[k] for k in ("id", "path", "worktree", "branch", "commit")} for x in worktrees])
+        prompt = automation_prompt(board, task, config, worktrees)
+        command = ["codex", "exec", "-C", worktrees[0]["worktree"], "-s", "workspace-write",
+                   "--approve-for-me", "--json", "-o", last]
+        for extra in worktrees[1:]:
+            command += ["--add-dir", extra["worktree"]]
+        if config.get("model"):
+            command += ["-m", str(config["model"])]
+        if config.get("reasoning"):
+            command += ["-c", f'model_reasoning_effort="{config["reasoning"]}"']
+        command.append("-")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        with open(log, "w", encoding="utf-8", newline="\n") as output:
+            proc = subprocess.run(command, input=prompt, text=True, encoding="utf-8", errors="replace",
+                                  stdout=output, stderr=subprocess.STDOUT, creationflags=flags)
+        try:
+            summary = read_text_file(last).strip()
+        except OSError:
+            summary = ""
+        if not summary:
+            summary = f"Codex exited with code {proc.returncode}. See {log}"
+        finish_automation(path, task_id, proc.returncode == 0, summary)
+    except Exception as e:
+        try:
+            finish_automation(path, task_id, False, str(e))
+        except Exception:
+            pass
+
+
 def read_input(value, use_stdin=False, file_path=None, what="text"):
     """Text from an argument, stdin, or a file.
 
@@ -854,6 +1032,11 @@ def print_task(board, task):
             dirty = " + uncommitted changes" if git.get("dirty") else ""
             print(f"  Git: {git.get('branch', '?')} @ {str(git.get('commit', ''))[:12]}{dirty}")
             print(f"       {git.get('worktree') or git.get('repo', '')}")
+        if task["work"].get("automation"):
+            run = task["work"]["automation"]
+            print(f"  Automation: {run.get('status', 'unknown')}" + (f" · {run.get('log')}" if run.get("log") else ""))
+            if run.get("summary"):
+                print(_indent(run["summary"], "    "))
     if task.get("review"):
         agent = task["review"].get("agent") or {}
         manual = task["review"].get("manual") or {}
@@ -1129,6 +1312,8 @@ def cmd_start(args):
             raise KanvasError(f"{t['id']} has no approved product definition; complete the PO/TL grill in the board first")
         t["state"] = "doing"
         t["work"] = {"by": actor(args), "at": now_iso(), "plan": note}
+        if t["definition"].get("repositories"):
+            t["work"]["repositories"] = list(t["definition"]["repositories"])
         if git:
             t["work"]["git"] = git
         t.pop("review", None)
@@ -1993,6 +2178,72 @@ def state_file():
     return os.path.join(base, "boards.json")
 
 
+class AutomationDispatcher:
+    """Watches open boards and turns newly-started tasks into isolated Codex runs."""
+
+    def __init__(self, server):
+        self.server = server
+        self.stop_event = threading.Event()
+        self.active = set()
+        self.lock = threading.Lock()
+        self.thread = threading.Thread(target=self._loop, name="kanvas-automation", daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+
+    def _loop(self):
+        while not self.stop_event.wait(1):
+            with self.server.boards_lock:
+                paths = list(self.server.boards.values())
+            for path in paths:
+                try:
+                    self.scan(path)
+                except (KanvasError, OSError, ValueError) as e:
+                    if not self.server.quiet:
+                        print(f"Automation skipped {path}: {e}", file=sys.stderr, flush=True)
+
+    def scan(self, path):
+        board = load_board(path)
+        if automation_config(board, path) is None:
+            return
+        for task in board["tasks"]:
+            work = task.get("work") if isinstance(task.get("work"), dict) else {}
+            run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+            if (task.get("state") != "doing" or not work.get("plan") or not task_repository_ids(task)
+                    or run.get("status")):
+                continue
+            token = (os.path.normcase(os.path.abspath(path)), task["id"].upper())
+            with self.lock:
+                if token in self.active:
+                    continue
+                self.active.add(token)
+
+            def claim(board, tid=task["id"]):
+                fresh = find_task(board, tid)
+                fresh_work = fresh.get("work") if isinstance(fresh.get("work"), dict) else {}
+                fresh_run = fresh_work.get("automation") if isinstance(fresh_work.get("automation"), dict) else {}
+                if fresh.get("state") != "doing" or fresh_run.get("status"):
+                    return False
+                fresh_work["automation"] = {"status": "queued", "updated": now_iso()}
+                fresh["work"] = fresh_work
+                return True
+
+            if not mutate(path, claim):
+                with self.lock:
+                    self.active.discard(token)
+                continue
+
+            def execute(board_path=path, tid=task["id"], key=token):
+                try:
+                    run_automation(board_path, tid)
+                finally:
+                    with self.lock:
+                        self.active.discard(key)
+
+            threading.Thread(target=execute, name=f"kanvas-{task['id']}", daemon=True).start()
+
+
 class BoardServer(ThreadingHTTPServer):
     """Serves every open board, each at /<name>/."""
 
@@ -2016,6 +2267,7 @@ class BoardServer(ThreadingHTTPServer):
         self.phone_lock = threading.Lock()
         self.boards = share.boards if share else {}  # name -> path, in the order the boards were opened
         self.boards_lock = share.boards_lock if share else threading.Lock()
+        self.dispatcher = share.dispatcher if share else AutomationDispatcher(self)
         if path:
             self.add_board(path)
 
@@ -2077,6 +2329,8 @@ class BoardServer(ThreadingHTTPServer):
             self.phone_listener = None
 
     def server_close(self):
+        if getattr(self, "opens_boards", False) and getattr(self, "dispatcher", None):
+            self.dispatcher.stop()
         self._stop_phone()
         super().server_close()
 
