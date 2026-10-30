@@ -935,6 +935,15 @@ class BoardViewTests(unittest.TestCase):
         self.assertEqual(delivery["dev"]["evidence"], "PR #1 merged at abc123")
         self.assertEqual(delivery["production"]["evidence"], "main abc123; smoke test passed")
 
+    def test_a_legacy_todo_can_receive_its_product_definition(self):
+        board = {"kanvas": 1, "title": "", "groups": [], "tasks": [task("A-01", "todo")]}
+        code = ("const b = normalize(input), board = b, IX = indexOf(b), vstate = (t) => vstateIn(IX, t), before = stateMoves(b.tasks[0])[0].label;"
+                "ops.define('A-01', seenOf(b.tasks[0]), { outcome: 'Ship', repositories: ['api'] })(b);"
+                "process.stdout.write(JSON.stringify([before, b.tasks[0].state, b.tasks[0].definition.repositories]));")
+        out = json.loads(run_html_js(self, code, json.dumps(board), [
+            ("function mustFind(", "\n// ----"), ("function stateMoves(", "\nfunction stateMenu(")]))
+        self.assertEqual(out, ["PO/TL Grill me", "todo", ["api"]])
+
 
 class ReviewFlowTests(unittest.TestCase):
     """Marking the open task done or sending it back in the board view opens the next task in review."""

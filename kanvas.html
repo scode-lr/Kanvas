@@ -2459,7 +2459,7 @@ const ops = {
   },
   define: (id, seen, definition, at = nowIso()) => (b) => {
     const t = mustFind(b, id);
-    if (t.state !== "proposed") throw new Error(`${t.id} is no longer proposed`);
+    if (!["proposed", "todo"].includes(t.state)) throw new Error(`${t.id} can no longer receive a product definition`);
     if (revisedSince(t, seen)) throw new Error(`${t.id} was revised since you opened it; read the new version first`);
     t.definition = { ...definition, approved: true, by: "human", at };
     t.state = "todo";
@@ -3808,7 +3808,12 @@ function stateMoves(t) {
     case "proposed": return [{ label: "PO/TL Grill me", icon: "check", run: () => approveDefinition(t), to: "todo", primary: true, asks: true },
       ...(changeRequest(t) ? [] : [{ label: "Ask for changes", icon: "edit", run: () => askChanges(t), asks: true }]),
       { label: "Reject", icon: "trash", run: () => removeTask(t), danger: true, asks: true }];
-    case "todo": return [{ label: "Architect/Senior Grill me", icon: "play", run: () => startWorkDialog(t), to: "doing", primary: true, asks: true }];
+    case "todo": return !t.definition?.approved
+      ? [{ label: "PO/TL Grill me", icon: "check", run: () => approveDefinition(t), to: "todo", primary: true, asks: true }]
+      : [{ label: "Architect/Senior Grill me", icon: "play", run: () => startWorkDialog(t), to: "doing", primary: true, asks: true }];
+    case "blocked": return !t.definition?.approved
+      ? [{ label: "PO/TL Grill me", icon: "check", run: () => approveDefinition(t), to: "todo", primary: true, asks: true }]
+      : [];
     case "doing": return [{ label: "Send to review", icon: "check", run: to("review"), to: "review", primary: true }, { label: "Pause", icon: "pause", run: to("todo"), to: "todo" }];
     case "review": {
       const agent = t.review?.agent?.status === "approved", manual = t.review?.manual?.status === "approved";
