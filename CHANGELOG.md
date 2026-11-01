@@ -7,6 +7,7 @@ Kanvas can execute an approved task instead of only describing it.
 - Watch open boards for newly started tasks, create isolated worktrees and branches, then launch a persistent `codex exec` implementation session with the project, product and technical context
 - Keep original checkouts untouched, capture run logs and worktree metadata on the task, and move successful runs to Review with both review gates pending
 - Leave failed runs in Doing with their exact error and log path, so automation failures are visible and recoverable
+- Allow each board to configure a branch pattern such as `feature/{id}` for task-based tracking
 
 ## v0.5.0 — 2026-10-29
 Kanvas models delivery evidence instead of treating “done” as a manual label.

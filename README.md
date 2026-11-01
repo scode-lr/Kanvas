@@ -257,6 +257,7 @@ Automation is opt-in and runs only while `kanvas serve` (or the login service) i
   "project_root": ".",
   "worktrees_root": ".kanvas/worktrees",
   "runs_root": ".kanvas/runs",
+  "branch_pattern": "feature/{id}",
   "repositories": [
     { "id": "front", "name": "Frontend", "path": "Frontend", "base": "origin/dev" },
     { "id": "api", "name": "API", "path": "Api", "base": "origin/dev" }
@@ -264,7 +265,7 @@ Automation is opt-in and runs only while `kanvas serve` (or the login service) i
 }
 ```
 
-The PO/TL Grill me requires at least one repository. After the Architect/Senior plan starts the task, Kanvas creates `kanvas/<task-id>-<title>` in each selected repository under `.kanvas/worktrees/<task-id>/`, launches Codex with `workspace-write` and automatic approval review, and stores JSONL logs under `.kanvas/runs/`. Add `.kanvas/` to the project root's `.gitignore`. Successful runs enter Review; push or PR authentication failures are reported without losing the local commits.
+The PO/TL Grill me requires at least one repository. After the Architect/Senior plan starts the task, Kanvas creates a branch in each selected repository under `.kanvas/worktrees/<task-id>/`, launches Codex with `workspace-write` and automatic approval review, and stores JSONL logs under `.kanvas/runs/`. Branches default to `kanvas/<task-id>-<title>`; set `branch_pattern` to a format such as `feature/{id}` when the project tracks work by task ID. Available fields are `{id}`, `{id_lower}`, `{id_slug}` and `{title_slug}`. Add `.kanvas/` to the project root's `.gitignore`. Successful runs enter Review; push or PR authentication failures are reported without losing the local commits.
 
 ## File format
 

@@ -776,6 +776,7 @@ def automation_config(board, path):
         "repositories": repositories,
         "worktrees": worktrees,
         "runs": runs,
+        "branch_pattern": str(config.get("branch_pattern") or "kanvas/{id_slug}-{title_slug}"),
         "model": config.get("model"),
         "reasoning": config.get("reasoning"),
     }
@@ -800,6 +801,23 @@ def _git(path, *args):
 def automation_slug(text):
     slug = re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
     return slug[:36] or "task"
+
+
+def automation_branch(task, config):
+    """Render the configured branch name for one automated task."""
+    values = {
+        "id": str(task["id"]),
+        "id_lower": str(task["id"]).lower(),
+        "id_slug": automation_slug(task["id"]),
+        "title_slug": automation_slug(task["title"]),
+    }
+    try:
+        branch = config["branch_pattern"].format(**values).strip().strip("/")
+    except (KeyError, ValueError) as e:
+        raise KanvasError(f"Invalid automation.branch_pattern: {e}")
+    if not branch or branch.startswith("-") or branch.endswith(".") or any(x in branch for x in ("..", "@{", "\\", " ")):
+        raise KanvasError(f"Invalid automated branch name: {branch or '(empty)'}")
+    return branch
 
 
 def automation_prompt(board, task, config, worktrees):
@@ -848,7 +866,7 @@ def prepare_automation_worktrees(task, config):
     out = []
     for repo_id in selected:
         repo = config["repositories"][repo_id]
-        branch = f"kanvas/{task['id'].lower()}-{automation_slug(task['title'])}"
+        branch = automation_branch(task, config)
         target = os.path.join(task_folder, repo_id)
         if os.path.exists(target):
             raise KanvasError(f"Automation worktree already exists: {target}")

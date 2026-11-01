@@ -1380,6 +1380,14 @@ class AutomationTests(TempBoard):
         self.assertEqual(subprocess.run(["git", "-C", worktrees[0]["worktree"], "branch", "--show-current"],
                                         capture_output=True, text=True, check=True).stdout.strip(), worktrees[0]["branch"])
 
+    def test_configurable_branch_pattern_uses_task_id(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        board["automation"]["branch_pattern"] = "feature/{id}"
+        config = kanvas.automation_config(board, self.path)
+        self.assertEqual(kanvas.automation_branch(kanvas.find_task(board, "DV-02"), config), "feature/DV-02")
+
     def test_successful_codex_run_moves_the_task_to_review(self):
         repo = os.path.join(self.dir, "front")
         os.makedirs(repo)
