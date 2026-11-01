@@ -1409,6 +1409,9 @@ class AutomationTests(TempBoard):
         self.assertEqual(task["work"]["automation"]["status"], "completed")
         self.assertEqual(task["review"]["agent"]["status"], "pending")
         self.assertEqual(run.call_args.args[0][:3], ["codex", "exec", "-C"])
+        self.assertIn("--approve-for-me", run.call_args.args[0])
+        self.assertNotIn("--sandbox", run.call_args.args[0])
+        self.assertNotIn("-s", run.call_args.args[0])
 
 
 class QuestionTests(TempBoard):

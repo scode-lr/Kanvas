@@ -915,7 +915,9 @@ def run_automation(path, task_id):
         update_automation(path, task_id, "running", started=now_iso(), log=log,
                           worktrees=[{k: x[k] for k in ("id", "path", "worktree", "branch", "commit")} for x in worktrees])
         prompt = automation_prompt(board, task, config, worktrees)
-        command = ["codex", "exec", "-C", worktrees[0]["worktree"], "-s", "workspace-write",
+        # --approve-for-me already selects the workspace-write sandbox. Recent Codex versions
+        # reject an explicit --sandbox combined with it.
+        command = ["codex", "exec", "-C", worktrees[0]["worktree"],
                    "--approve-for-me", "--json", "-o", last]
         for extra in worktrees[1:]:
             command += ["--add-dir", extra["worktree"]]
