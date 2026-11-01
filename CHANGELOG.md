@@ -9,6 +9,7 @@ Kanvas can execute an approved task instead of only describing it.
 - Leave failed runs in Doing with their exact error and log path, so automation failures are visible and recoverable
 - Allow each board to configure a branch pattern such as `feature/{id}` for task-based tracking
 - Use Codex automatic approval review without also passing its now-incompatible explicit sandbox flag
+- Add `retry ID` to rerun failed automation while preserving its isolated worktree and branch
 
 ## v0.5.0 — 2026-10-29
 Kanvas models delivery evidence instead of treating “done” as a manual label.

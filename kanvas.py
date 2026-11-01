@@ -869,7 +869,12 @@ def prepare_automation_worktrees(task, config):
         branch = automation_branch(task, config)
         target = os.path.join(task_folder, repo_id)
         if os.path.exists(target):
-            raise KanvasError(f"Automation worktree already exists: {target}")
+            current = _git(target, "branch", "--show-current")
+            if os.path.normcase(current) != os.path.normcase(branch):
+                raise KanvasError(f"Automation worktree already exists on {current}, expected {branch}: {target}")
+            out.append({**repo, "branch": branch, "worktree": target,
+                        "commit": _git(target, "rev-parse", "HEAD")})
+            continue
         os.makedirs(os.path.dirname(target), exist_ok=True)
         _git(repo["path"], "worktree", "add", "-b", branch, target, repo["base"])
         out.append({**repo, "branch": branch, "worktree": target, "commit": _git(target, "rev-parse", "HEAD")})
@@ -1418,6 +1423,26 @@ def cmd_pause(args):
 
     t = mutate(path, op)
     print(f"Paused {t['id']} (doing -> todo)")
+
+
+def cmd_retry(args):
+    path = board_path(args)
+
+    def op(board):
+        t = find_task(board, args.id)
+        if t["state"] != "doing":
+            raise KanvasError(f"{t['id']} is {view_state(t, task_map(board))}; only failed work in progress can be retried")
+        work = t.get("work") if isinstance(t.get("work"), dict) else {}
+        run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+        if run.get("status") != "failed":
+            raise KanvasError(f"{t['id']} automation is {run.get('status') or 'not started'}; only failed automation can be retried")
+        work.pop("automation", None)
+        t["work"] = work
+        add_note(t, "Retrying failed automation in its existing isolated worktree.", actor(args))
+        return t
+
+    t = mutate(path, op)
+    print(f"Queued retry for {t['id']}; the Kanvas server will reuse its isolated worktree.")
 
 
 def cmd_note(args):
@@ -3129,6 +3154,8 @@ def build_parser():
     p.add_argument("id")
     p.add_argument("-m", "--message", help="optional note on why")
     text_sources(p, "note")
+    p = add("retry", cmd_retry, "retry failed automation in its existing isolated worktree")
+    p.add_argument("id")
     p = add("note", cmd_note, "append a note to a task (keeps the description intact)")
     p.add_argument("id")
     p.add_argument("text", nargs="?")

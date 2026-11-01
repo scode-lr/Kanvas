@@ -1379,6 +1379,21 @@ class AutomationTests(TempBoard):
         self.assertTrue(os.path.isfile(os.path.join(worktrees[0]["worktree"], "README.md")))
         self.assertEqual(subprocess.run(["git", "-C", worktrees[0]["worktree"], "branch", "--show-current"],
                                         capture_output=True, text=True, check=True).stdout.strip(), worktrees[0]["branch"])
+        retried = kanvas.prepare_automation_worktrees(kanvas.find_task(board, "DV-02"), config)
+        self.assertEqual(retried[0]["worktree"], worktrees[0]["worktree"])
+
+    def test_retry_clears_a_failed_run_for_the_dispatcher(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        task = kanvas.find_task(board, "DV-02")
+        task["work"]["automation"] = {"status": "failed", "summary": "bad flags"}
+        write_board(self.path, board)
+        _, out, _ = self.run_cli("retry", "DV-02", "--as", "codex")
+        self.assertIn("Queued retry", out)
+        task = self.get("DV-02")
+        self.assertNotIn("automation", task["work"])
+        self.assertIn("Retrying failed automation", task["notes"][-1]["text"])
 
     def test_configurable_branch_pattern_uses_task_id(self):
         repo = os.path.join(self.dir, "front")

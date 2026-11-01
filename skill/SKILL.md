@@ -97,6 +97,7 @@ The human decides from what you write on the board: whether to approve a proposa
 | `finish ID -m SUMMARY` | doing -> review; opens both review gates |
 | `agent-review ID (--approve\|--changes) -m FINDINGS` | Independent review; changes return it to doing |
 | `pause ID [-m NOTE]` | doing -> todo |
+| `retry ID` | Retry failed automation in its existing isolated worktree |
 | `note ID TEXT` | Append a note |
 | `ask ID QUESTION` | Show the human that you wait for their reply in the conversation; the next note ends the wait |
 | `propose GROUP TITLE [DESC] [--deps ID ...]` | New proposal; use `-` as GROUP for none |
