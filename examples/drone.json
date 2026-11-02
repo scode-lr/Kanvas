@@ -47,7 +47,7 @@
       "notes": [
         {
           "at": "2026-10-21T11:30:00Z",
-          "by": "codex",
+          "by": "claude",
           "text": "Random courses of 8 gates between trees and poles; each run draws a new one."
         }
       ]
@@ -106,12 +106,12 @@
       "notes": [
         {
           "at": "2026-10-23T09:00:00Z",
-          "by": "codex",
+          "by": "claude",
           "text": "Plan: PPO on 64 simulators at once, overnight."
         },
         {
           "at": "2026-10-25T08:20:00Z",
-          "by": "codex",
+          "by": "claude",
           "text": "The policy flies the course on its own: 92 of 100 random courses through every gate, 3 crashes, 5 too slow.\n\n**Check:** `make replay` plays ten flights, the three crashes among them; all three happen in gusts above 7 m/s.\n\n**Decide:** good enough to try on the real drone in calm weather, or train on stronger wind first (about 6 more hours)?"
         }
       ]
@@ -123,7 +123,7 @@
       "group": "TR",
       "deps": ["TR-02", "SM-04"],
       "at": "2026-10-25T08:25:00Z",
-      "by": "codex",
+      "by": "claude",
       "desc": "Keep training the first policy on gusts up to 12 m/s, with the measured motors; about 6 hours."
     },
     {
@@ -196,7 +196,7 @@
       "group": "FT",
       "deps": ["FT-02"],
       "at": "2026-10-26T12:01:00Z",
-      "by": "codex"
+      "by": "claude"
     }
   ]
 }

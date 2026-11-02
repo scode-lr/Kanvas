@@ -1,14 +1,21 @@
 # Changelog
+## Unreleased
+- Run automated tasks with Claude Code headless (`claude -p`, stream-json log) in the task's worktrees, and take the task's summary, turns and cost from Claude's final result; Codex is no longer supported, and a board that sets `automation.executor` to anything but `claude` is refused
+- Kanvas pushes the branches and opens a GitHub pull request for every repository the agent changed, with the GitHub CLI, then moves the task to Review with the pull request links, which the task panel shows; a run with no commits, uncommitted tracked files or a failed push stays in Doing with the reason, and `retry` reuses an open pull request
+- Iterate on a pull request: a task sent back to Doing (Send back in the board, agent review changes, or a pause and restart) runs Claude again in the same worktree and branch, with the notes written since the last round and the comments, reviews and inline comments left on the pull request; the new commits go to the same pull request, which gets a comment for the round
+- Add `automation.max_rounds` (default 3), after which the task stays in Doing marked failed, and show the round in the task panel; `retry` keeps the round and the pull requests
+- The agent no longer needs GitHub access: by default it may not run `git push`, `git merge` or `gh`
+- Add `model`, `max_turns`, `max_budget_usd`, `allowed_tools` and `disallowed_tools` to `automation`
+
 ## v0.6.0 — 2026-10-30
 Kanvas can execute an approved task instead of only describing it.
 
 - Add opt-in per-board automation with named repositories, base refs and local worktree/run directories
 - Let the PO/TL Grill me select every repository a task may change and carry that scope into Doing
-- Watch open boards for newly started tasks, create isolated worktrees and branches, then launch a persistent `codex exec` implementation session with the project, product and technical context
+- Watch open boards for newly started tasks, create isolated worktrees and branches, then launch a persistent Claude Code implementation session with the project, product and technical context
 - Keep original checkouts untouched, capture run logs and worktree metadata on the task, and move successful runs to Review with both review gates pending
 - Leave failed runs in Doing with their exact error and log path, so automation failures are visible and recoverable
 - Allow each board to configure a branch pattern such as `feature/{id}` for task-based tracking
-- Use Codex automatic approval review without also passing its now-incompatible explicit sandbox flag
 - Add `retry ID` to rerun failed automation while preserving its isolated worktree and branch
 
 ## v0.5.0 — 2026-10-29

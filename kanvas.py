@@ -751,8 +751,8 @@ def automation_config(board, path):
     config = board.get("automation")
     if not isinstance(config, dict) or config.get("enabled") is not True:
         return None
-    if config.get("executor", "codex") != "codex":
-        raise KanvasError("automation.executor must be 'codex'")
+    if config.get("executor") not in (None, "claude"):
+        raise KanvasError("automation.executor is no longer needed: Kanvas runs tasks with Claude Code")
     root = os.path.abspath(os.path.join(os.path.dirname(path), config.get("project_root") or "."))
     repositories = {}
     for item in config.get("repositories") or []:
@@ -779,6 +779,11 @@ def automation_config(board, path):
         "branch_pattern": str(config.get("branch_pattern") or "kanvas/{id_slug}-{title_slug}"),
         "model": config.get("model"),
         "reasoning": config.get("reasoning"),
+        "max_rounds": _positive_int(config.get("max_rounds"), 3, "automation.max_rounds"),
+        "max_turns": config.get("max_turns"),
+        "max_budget_usd": config.get("max_budget_usd"),
+        "allowed_tools": _tool_list(config.get("allowed_tools"), CLAUDE_ALLOWED_TOOLS),
+        "disallowed_tools": _tool_list(config.get("disallowed_tools"), CLAUDE_DISALLOWED_TOOLS),
     }
 
 
@@ -820,10 +825,15 @@ def automation_branch(task, config):
     return branch
 
 
-def automation_prompt(board, task, config, worktrees):
+def automation_prompt(board, task, config, worktrees, round_no=1, feedback=""):
     repos = "\n".join(f"- {x['id']} ({x['name']}): {x['worktree']} on {x['branch']}" for x in worktrees)
     definition = task.get("definition") or {}
     work = task.get("work") or {}
+    followup = ""
+    if round_no > 1:
+        followup = (f"\nThis is round {round_no}: your earlier work was reviewed and sent back. The branches already hold "
+                    f"your commits. Address every point below, then commit.\n\nFeedback to address:\n"
+                    f"{feedback or '(no written feedback: check the earlier work against the acceptance criteria)'}\n")
     return f"""You are the implementation agent for Kanvas task {task['id']}: {task['title']}.
 
 Project root: {config['root']}
@@ -844,13 +854,14 @@ Non-goals:
 
 Technical plan:
 {work.get('plan') or '(not supplied)'}
-
-Read the root AGENTS.md and relevant files under docs/, then each repository's AGENTS.md. Work only in the
-isolated worktrees listed above; never modify the original checkouts. Implement the complete task across every
-selected repository, run proportionate tests, commit each repository with a conventional commit, push each branch
-when authentication is available, and open a pull request targeting dev. Do not merge or deploy. If GitHub access
-prevents push or PR creation, keep the local commits and report the exact blocker. End with a concise summary of
-changes, tests, commits and PR URLs (or blockers). Do not edit kanvas.json; Kanvas records your result itself.
+{followup}
+Read the root AGENTS.md (or CLAUDE.md) and relevant files under docs/, then each repository's AGENTS.md or CLAUDE.md.
+Work only in the isolated worktrees listed above; never modify the original checkouts. The branches may already
+hold commits from an earlier attempt: continue from them instead of starting over. Implement the complete task
+across every selected repository, run proportionate tests and commit each repository with a conventional commit,
+leaving no uncommitted changes to tracked files. Do not push, open pull requests, merge or deploy: Kanvas pushes
+each branch and opens the pull request itself when you finish. End with a concise summary of changes, tests and
+commits. Do not edit kanvas.json; Kanvas records your result itself.
 """
 
 
@@ -891,12 +902,14 @@ def update_automation(path, task_id, status, **fields):
     return mutate(path, op)
 
 
-def finish_automation(path, task_id, success, summary):
+def finish_automation(path, task_id, success, summary, pull_requests=None):
     def op(board):
         task = find_task(board, task_id)
         work = task.setdefault("work", {})
         run = work.setdefault("automation", {})
         run.update({"status": "completed" if success else "failed", "updated": now_iso(), "summary": summary})
+        if pull_requests:
+            run["pull_requests"] = pull_requests
         add_note(task, ("Automation completed: " if success else "Automation failed: ") + summary, "kanvas-runner")
         if success and task.get("state") == "doing":
             task["state"] = "review"
@@ -905,8 +918,164 @@ def finish_automation(path, task_id, success, summary):
     return mutate(path, op)
 
 
+CLAUDE_ALLOWED_TOOLS = ("Bash", "Edit", "Write", "Read", "Glob", "Grep")
+# Kanvas pushes the branch and opens the pull request itself, so the agent needs no GitHub access.
+CLAUDE_DISALLOWED_TOOLS = ("Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)")
+
+
+def _positive_int(value, default, name):
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise KanvasError(f"{name} must be a whole number of at least 1")
+    return value
+
+
+def _tool_list(value, default):
+    if value is None:
+        return list(default)
+    if isinstance(value, str):
+        value = value.split()
+    if not isinstance(value, (list, tuple)) or not all(isinstance(x, str) for x in value):
+        raise KanvasError("automation allowed_tools / disallowed_tools must be lists of strings")
+    return list(value)
+
+
+def claude_command(config, worktrees):
+    """Claude Code in headless mode: the prompt arrives on stdin and the run is logged as stream-json."""
+    command = [shutil.which("claude") or "claude", "-p", "--output-format", "stream-json", "--verbose",
+               "--permission-mode", "acceptEdits"]
+    for extra in worktrees[1:]:
+        command += ["--add-dir", extra["worktree"]]
+    if config.get("model"):
+        command += ["--model", str(config["model"])]
+    if config.get("max_turns"):
+        command += ["--max-turns", str(config["max_turns"])]
+    if config.get("max_budget_usd"):
+        command += ["--max-budget-usd", str(config["max_budget_usd"])]
+    if config["allowed_tools"]:
+        command += ["--allowedTools", *config["allowed_tools"]]
+    if config["disallowed_tools"]:
+        command += ["--disallowedTools", *config["disallowed_tools"]]
+    return command
+
+
+def claude_outcome(proc, log):
+    """The final `result` event of the stream-json log holds Claude's closing summary and whether it failed."""
+    result = None
+    try:
+        with open(log, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("type") == "result":
+                    result = event
+    except OSError:
+        pass
+    if result is None:
+        return False, ""
+    summary = str(result.get("result") or "").strip()
+    if not summary and result.get("subtype"):
+        summary = f"Claude stopped: {result['subtype']}"
+    if result.get("total_cost_usd") is not None:
+        summary += f"\n\n(Claude: {result.get('num_turns', '?')} turns, ${float(result['total_cost_usd']):.2f})"
+    return proc.returncode == 0 and not result.get("is_error"), summary.strip()
+
+
+def pull_request_feedback(pulls, since, root):
+    """Comments and reviews left on the task's pull requests after `since`, as lines of text. Never raises."""
+    lines = []
+
+    def add(who, when, where, body):
+        body = (body or "").strip()
+        if body and str(when or "") > since:
+            lines.append(f"- {who} on the pull request{where} ({when}): {body[:2000]}")
+
+    for pull in pulls or []:
+        url = str(pull.get("url") or "")
+        m = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", url)
+        if not m:
+            continue
+        try:
+            data = json.loads(_gh(root, "pr", "view", url, "--json", "comments,reviews") or "{}")
+            for c in data.get("comments") or []:
+                add((c.get("author") or {}).get("login", "?"), c.get("createdAt"), "", c.get("body"))
+            for r in data.get("reviews") or []:
+                add((r.get("author") or {}).get("login", "?"), r.get("submittedAt"),
+                    f" ({str(r.get('state') or '').lower().replace('_', ' ')})", r.get("body"))
+            inline = json.loads(_gh(root, "api", f"repos/{m.group(1)}/{m.group(2)}/pulls/{m.group(3)}/comments") or "[]")
+            for c in inline:
+                where = f" at {c.get('path')}:{c.get('line') or c.get('original_line') or '?'}"
+                add((c.get("user") or {}).get("login", "?"), c.get("created_at"), where, c.get("body"))
+        except (KanvasError, ValueError, AttributeError) as e:
+            lines.append(f"- (could not read the comments on {url}: {e})")
+    return lines[:30]
+
+
+def automation_feedback(task, run, root):
+    """What the human and the reviewers said since the last round: board notes, then pull request comments."""
+    since = str(run.get("since") or "")
+    lines = [f"- {n.get('by', '?')} ({n.get('at')}): {n.get('text')}" for n in task.get("notes") or []
+             if n.get("by") != "kanvas-runner" and str(n.get("at") or "") > since]
+    return "\n".join(lines + pull_request_feedback(run.get("pull_requests"), since, root))
+
+
+def pr_base_branch(repo):
+    base = repo["base"]
+    return base.split("/", 1)[1] if base.startswith("origin/") else base
+
+
+def _gh(path, *args):
+    exe = shutil.which("gh")
+    if not exe:
+        raise KanvasError("The GitHub CLI (gh) is not installed or not on PATH; Kanvas needs it to open pull requests")
+    proc = subprocess.run([exe, *args], cwd=path, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if proc.returncode:
+        raise KanvasError("gh " + " ".join(args[:2]) + ": " + (proc.stderr.strip() or proc.stdout.strip() or "failed"))
+    return proc.stdout.strip()
+
+
+def pull_request_body(task, summary):
+    definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
+    parts = [f"Kanvas task **{task['id']}**: {task['title']}"]
+    for heading, key in (("Outcome", "outcome"), ("Acceptance criteria", "acceptance")):
+        if definition.get(key):
+            parts.append(f"## {heading}\n{definition[key]}")
+    parts.append("## Agent summary\n" + (summary or "(none)"))
+    parts.append("Opened by Kanvas after a Claude Code run. Review it, then merge it yourself.")
+    return "\n\n".join(parts)
+
+
+def publish_pull_requests(task, worktrees, summary, round_no=1):
+    """Pushes each worktree branch that holds commits and opens (or finds) its pull request. Returns their records."""
+    pulls = []
+    for wt in worktrees:
+        folder = wt["worktree"]
+        ahead = int(_git(folder, "rev-list", "--count", f"{wt['base']}..HEAD") or 0)
+        if not ahead:
+            continue
+        if _git(folder, "status", "--porcelain", "--untracked-files=no"):
+            raise KanvasError(f"{wt['id']}: tracked files in {folder} have uncommitted changes; the agent must commit its work")
+        base = pr_base_branch(wt)
+        _git(folder, "push", "--set-upstream", "origin", wt["branch"])
+        url = _gh(folder, "pr", "list", "--head", wt["branch"], "--base", base, "--state", "open",
+                  "--json", "url", "--jq", ".[0].url")
+        if url and round_no > 1:
+            _gh(folder, "pr", "comment", url, "--body", f"Round {round_no} pushed by Kanvas.\n\n{summary}")
+        if not url:
+            url = _gh(folder, "pr", "create", "--base", base, "--head", wt["branch"],
+                      "--title", f"{task['id']}: {task['title']}", "--body", pull_request_body(task, summary))
+        pulls.append({"id": wt["id"], "name": wt["name"], "branch": wt["branch"], "base": base,
+                      "commits": ahead, "url": url.splitlines()[-1].strip()})
+    if not pulls:
+        raise KanvasError("The agent made no commits, so there is no pull request to open")
+    return pulls
+
+
 def run_automation(path, task_id):
-    """Prepare worktrees and run one persistent Codex task. Intended for a daemon thread."""
+    """Prepares worktrees, runs one Claude Code session and opens the pull requests. Meant for a daemon thread."""
     try:
         board = load_board(path)
         task = find_task(board, task_id)
@@ -914,34 +1083,33 @@ def run_automation(path, task_id):
         if config is None:
             raise KanvasError("Automation is not enabled for this board")
         worktrees = prepare_automation_worktrees(task, config)
+        previous = (task.get("work") or {}).get("automation") or {}
+        round_no = int(previous.get("round") or 1)
+        feedback = automation_feedback(task, previous, config["root"]) if round_no > 1 else ""
         os.makedirs(config["runs"], exist_ok=True)
         log = os.path.join(config["runs"], f"{automation_slug(task_id)}.jsonl")
-        last = os.path.join(config["runs"], f"{automation_slug(task_id)}-last.txt")
-        update_automation(path, task_id, "running", started=now_iso(), log=log,
+        update_automation(path, task_id, "running", started=now_iso(), log=log, executor="claude",
                           worktrees=[{k: x[k] for k in ("id", "path", "worktree", "branch", "commit")} for x in worktrees])
-        prompt = automation_prompt(board, task, config, worktrees)
-        # --approve-for-me already selects the workspace-write sandbox. Recent Codex versions
-        # reject an explicit --sandbox combined with it.
-        command = ["codex", "exec", "-C", worktrees[0]["worktree"],
-                   "--approve-for-me", "--json", "-o", last]
-        for extra in worktrees[1:]:
-            command += ["--add-dir", extra["worktree"]]
-        if config.get("model"):
-            command += ["-m", str(config["model"])]
-        if config.get("reasoning"):
-            command += ["-c", f'model_reasoning_effort="{config["reasoning"]}"']
-        command.append("-")
+        prompt = automation_prompt(board, task, config, worktrees, round_no, feedback)
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         with open(log, "w", encoding="utf-8", newline="\n") as output:
-            proc = subprocess.run(command, input=prompt, text=True, encoding="utf-8", errors="replace",
-                                  stdout=output, stderr=subprocess.STDOUT, creationflags=flags)
-        try:
-            summary = read_text_file(last).strip()
-        except OSError:
-            summary = ""
+            proc = subprocess.run(claude_command(config, worktrees), input=prompt, text=True, encoding="utf-8",
+                                  errors="replace", stdout=output, stderr=subprocess.STDOUT, creationflags=flags,
+                                  cwd=worktrees[0]["worktree"])
+        ok, summary = claude_outcome(proc, log)
         if not summary:
-            summary = f"Codex exited with code {proc.returncode}. See {log}"
-        finish_automation(path, task_id, proc.returncode == 0, summary)
+            summary = f"Claude exited with code {proc.returncode}. See {log}"
+        if round_no > 1:
+            summary = f"Round {round_no}. {summary}"
+        pulls = []
+        if ok:
+            try:
+                pulls = publish_pull_requests(task, worktrees, summary, round_no)
+                summary += "\n\nPull requests:\n" + "\n".join(f"- {x['name']}: {x['url']}" for x in pulls)
+            except KanvasError as e:
+                ok = False
+                summary += f"\n\nPull request not opened: {e}"
+        finish_automation(path, task_id, ok, summary, pulls)
     except Exception as e:
         try:
             finish_automation(path, task_id, False, str(e))
@@ -1436,7 +1604,11 @@ def cmd_retry(args):
         run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
         if run.get("status") != "failed":
             raise KanvasError(f"{t['id']} automation is {run.get('status') or 'not started'}; only failed automation can be retried")
-        work.pop("automation", None)
+        kept = {k: run[k] for k in ("round", "since", "pull_requests") if k in run}
+        if kept:
+            work["automation"] = kept
+        else:
+            work.pop("automation", None)
         t["work"] = work
         add_note(t, "Retrying failed automation in its existing isolated worktree.", actor(args))
         return t
@@ -2224,7 +2396,7 @@ def state_file():
 
 
 class AutomationDispatcher:
-    """Watches open boards and turns newly-started tasks into isolated Codex runs."""
+    """Watches open boards and turns newly-started tasks into isolated Claude Code runs."""
 
     def __init__(self, server):
         self.server = server
@@ -2250,13 +2422,16 @@ class AutomationDispatcher:
 
     def scan(self, path):
         board = load_board(path)
-        if automation_config(board, path) is None:
+        config = automation_config(board, path)
+        if config is None:
             return
         for task in board["tasks"]:
             work = task.get("work") if isinstance(task.get("work"), dict) else {}
             run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+            # A completed run moves its task to Review, so a completed run on a task in Doing was sent back.
+            sent_back = run.get("status") == "completed"
             if (task.get("state") != "doing" or not work.get("plan") or not task_repository_ids(task)
-                    or run.get("status")):
+                    or (run.get("status") and not sent_back)):
                 continue
             token = (os.path.normcase(os.path.abspath(path)), task["id"].upper())
             with self.lock:
@@ -2268,9 +2443,27 @@ class AutomationDispatcher:
                 fresh = find_task(board, tid)
                 fresh_work = fresh.get("work") if isinstance(fresh.get("work"), dict) else {}
                 fresh_run = fresh_work.get("automation") if isinstance(fresh_work.get("automation"), dict) else {}
-                if fresh.get("state") != "doing" or fresh_run.get("status"):
+                again = fresh_run.get("status") == "completed"
+                if fresh.get("state") != "doing" or (fresh_run.get("status") and not again):
                     return False
-                fresh_work["automation"] = {"status": "queued", "updated": now_iso()}
+                rounds = int(fresh_run.get("round") or 1)
+                queued = {"status": "queued", "updated": now_iso(), "round": rounds}
+                if again:
+                    if rounds >= config["max_rounds"]:
+                        message = (f"Stopped after {rounds} rounds (automation.max_rounds). Continue by hand, or raise "
+                                   f"the limit and run `retry {fresh['id']}`.")
+                        fresh_work["automation"] = {**fresh_run, "status": "failed", "updated": now_iso(),
+                                                    "summary": message}
+                        add_note(fresh, "Automation failed: " + message, "kanvas-runner")
+                        fresh["work"] = fresh_work
+                        return False
+                    queued.update(round=rounds + 1, since=fresh_run.get("updated") or "")
+                else:
+                    if fresh_run.get("since"):
+                        queued["since"] = fresh_run["since"]
+                if fresh_run.get("pull_requests"):
+                    queued["pull_requests"] = fresh_run["pull_requests"]
+                fresh_work["automation"] = queued
                 fresh["work"] = fresh_work
                 return True
 

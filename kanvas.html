@@ -4000,8 +4000,12 @@ function fillPanel(panel, t) {
       ...(t.work.git || []).map((g) => h("p", {}, h("b", {}, "Git: "),
         `${g.branch || "?"} @ ${(g.commit || "").slice(0, 12)}${g.dirty ? " + uncommitted changes" : ""}`,
         h("br"), h("span", { class: "muted" }, g.worktree || g.repo || ""))),
-      t.work.automation ? h("p", {}, h("b", {}, "Automation: "), t.work.automation.status || "unknown",
-        t.work.automation.summary ? ` · ${t.work.automation.summary}` : "") : null)));
+      t.work.automation ? h("p", {}, h("b", {}, "Automation: "), (t.work.automation.status || "unknown") + (t.work.automation.round > 1 ? ` (round ${t.work.automation.round})` : ""),
+        t.work.automation.summary ? ` · ${t.work.automation.summary}` : "") : null,
+      ...(t.work.automation?.pull_requests || []).map((pr) => h("p", {}, h("b", {}, "Pull request: "),
+        /^https:\/\//.test(pr.url || "")
+          ? h("a", { href: pr.url, target: "_blank", rel: "noopener" }, `${pr.name || pr.id} · ${pr.branch || ""}`)
+          : `${pr.name || pr.id} · ${pr.branch || ""}`)))));
   if (t.review) {
     const agent = t.review.agent || { status: "pending" }, manual = t.review.manual || { status: "pending" };
     workflow.push(h("section", { class: "p-sec" }, h("div", { class: "section-head" }, "Review gates"),

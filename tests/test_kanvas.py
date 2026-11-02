@@ -1350,7 +1350,6 @@ class AutomationTests(TempBoard):
         board = self.board()
         board["automation"] = {
             "enabled": True,
-            "executor": "codex",
             "project_root": self.dir,
             "worktrees_root": ".kanvas/worktrees",
             "runs_root": ".kanvas/runs",
@@ -1403,30 +1402,400 @@ class AutomationTests(TempBoard):
         config = kanvas.automation_config(board, self.path)
         self.assertEqual(kanvas.automation_branch(kanvas.find_task(board, "DV-02"), config), "feature/DV-02")
 
-    def test_successful_codex_run_moves_the_task_to_review(self):
-        repo = os.path.join(self.dir, "front")
-        os.makedirs(repo)
-        write_board(self.path, self.automated_board(repo))
-        fake_worktrees = [{"id": "front", "name": "Frontend", "path": repo, "base": "HEAD",
-                           "branch": "kanvas/dv-02-task", "worktree": repo, "commit": "a" * 40}]
+    def fake_worktrees(self, repo):
+        return [{"id": "front", "name": "Frontend", "path": repo, "base": "origin/dev",
+                 "branch": "feature/DV-02", "worktree": repo, "commit": "a" * 40}]
+
+    def run_claude(self, repo, events, returncode=0, pulls=None, publish_error=None, **extra):
+        board = self.automated_board(repo)
+        board["automation"].update(extra)
+        write_board(self.path, board)
 
         def completed(command, **kwargs):
-            last = os.path.join(self.dir, ".kanvas", "runs", "dv-02-last.txt")
-            with open(last, "w", encoding="utf-8") as f:
-                f.write("Implemented the task; tests pass; PR unavailable in the test.")
-            return mock.Mock(returncode=0)
+            runs = os.path.join(self.dir, ".kanvas", "runs")
+            with open(os.path.join(runs, "dv-02.jsonl"), "w", encoding="utf-8") as f:
+                for event in events:
+                    f.write((event if isinstance(event, str) else json.dumps(event)) + "\n")
+            return mock.Mock(returncode=returncode)
 
-        with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=fake_worktrees), \
+        publish = mock.Mock(side_effect=publish_error, return_value=pulls or [])
+        with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=self.fake_worktrees(repo)), \
+             mock.patch.object(kanvas, "publish_pull_requests", publish), \
              mock.patch.object(kanvas.subprocess, "run", side_effect=completed) as run:
             kanvas.run_automation(self.path, "DV-02")
+        return run, publish
+
+    def test_codex_is_no_longer_an_executor(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        board["automation"]["executor"] = "codex"
+        with self.assertRaises(kanvas.KanvasError) as caught:
+            kanvas.automation_config(board, self.path)
+        self.assertIn("Claude", str(caught.exception))
+        board["automation"]["executor"] = "claude"
+        self.assertIsNotNone(kanvas.automation_config(board, self.path))
+
+    def test_claude_command_runs_headless_and_leaves_github_to_kanvas(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        board["automation"].update(model="haiku", max_turns=40, max_budget_usd=2.5)
+        config = kanvas.automation_config(board, self.path)
+        worktrees = self.fake_worktrees(repo) + [dict(self.fake_worktrees(repo)[0], id="api", worktree="/work/api")]
+        command = kanvas.claude_command(config, worktrees)
+        self.assertEqual(os.path.basename(command[0]).split(".")[0], "claude")
+        self.assertEqual(command[1:3], ["-p", "--output-format"])
+        self.assertEqual(command[command.index("--output-format") + 1], "stream-json")
+        self.assertIn("--verbose", command)
+        self.assertEqual(command[command.index("--model") + 1], "haiku")
+        self.assertEqual(command[command.index("--max-turns") + 1], "40")
+        self.assertEqual(command[command.index("--max-budget-usd") + 1], "2.5")
+        self.assertEqual(command[command.index("--add-dir") + 1], "/work/api")
+        denied = command[command.index("--disallowedTools") + 1:]
+        self.assertEqual(denied, ["Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)"])
+        self.assertIn("Edit", command[command.index("--allowedTools"):command.index("--disallowedTools")])
+        self.assertNotIn("--dangerously-skip-permissions", command)
+
+    def test_claude_tool_lists_can_be_replaced(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        board["automation"].update(allowed_tools="Read Grep", disallowed_tools=["Bash(rm:*)"])
+        config = kanvas.automation_config(board, self.path)
+        self.assertEqual((config["allowed_tools"], config["disallowed_tools"]), (["Read", "Grep"], ["Bash(rm:*)"]))
+        board["automation"]["allowed_tools"] = 5
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.automation_config(board, self.path)
+
+    def test_prompt_tells_the_agent_not_to_push_or_open_pull_requests(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        prompt = kanvas.automation_prompt(board, kanvas.find_task(board, "DV-02"),
+                                          kanvas.automation_config(board, self.path), self.fake_worktrees(repo))
+        self.assertIn("Do not push, open pull requests, merge or deploy", prompt)
+        self.assertNotIn("open a pull request targeting", prompt)
+
+    def test_successful_run_opens_the_pull_request_and_moves_the_task_to_review(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        pull = {"id": "front", "name": "Frontend", "branch": "feature/DV-02", "base": "dev", "commits": 2,
+                "url": "https://github.com/acme/front/pull/7"}
+        run, publish = self.run_claude(repo, [
+            {"type": "system", "subtype": "init"},
+            "not json",
+            {"type": "result", "subtype": "success", "is_error": False, "num_turns": 12,
+             "total_cost_usd": 0.1234, "result": "Implemented the endpoint; tests pass"},
+        ], pulls=[pull])
         task = self.get("DV-02")
+        automation = task["work"]["automation"]
         self.assertEqual(task["state"], "review")
-        self.assertEqual(task["work"]["automation"]["status"], "completed")
         self.assertEqual(task["review"]["agent"]["status"], "pending")
-        self.assertEqual(run.call_args.args[0][:3], ["codex", "exec", "-C"])
-        self.assertIn("--approve-for-me", run.call_args.args[0])
-        self.assertNotIn("--sandbox", run.call_args.args[0])
-        self.assertNotIn("-s", run.call_args.args[0])
+        self.assertEqual((automation["status"], automation["executor"]), ("completed", "claude"))
+        self.assertEqual(automation["pull_requests"], [pull])
+        self.assertIn("Implemented the endpoint; tests pass", automation["summary"])
+        self.assertIn("12 turns, $0.12", automation["summary"])
+        self.assertIn("- Frontend: https://github.com/acme/front/pull/7", automation["summary"])
+        self.assertEqual(run.call_args.kwargs["cwd"], repo)
+        self.assertIn("Implement the complete task", run.call_args.kwargs["input"])
+        publish.assert_called_once()
+
+    def test_a_pull_request_failure_leaves_the_task_in_doing_with_the_reason(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        _, publish = self.run_claude(
+            repo, [{"type": "result", "subtype": "success", "is_error": False, "result": "All done"}],
+            publish_error=kanvas.KanvasError("gh pr create: authentication required"))
+        task = self.get("DV-02")
+        self.assertEqual(task["state"], "doing")
+        automation = task["work"]["automation"]
+        self.assertEqual(automation["status"], "failed")
+        self.assertIn("All done", automation["summary"])
+        self.assertIn("Pull request not opened: gh pr create: authentication required", automation["summary"])
+
+    def test_claude_error_result_skips_the_pull_request(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        _, publish = self.run_claude(
+            repo, [{"type": "result", "subtype": "error_max_turns", "is_error": True, "result": ""}], returncode=1)
+        task = self.get("DV-02")
+        self.assertEqual((task["state"], task["work"]["automation"]["status"]), ("doing", "failed"))
+        self.assertIn("error_max_turns", task["work"]["automation"]["summary"])
+        publish.assert_not_called()
+
+    def test_claude_run_without_a_result_event_fails_with_the_log_path(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        _, publish = self.run_claude(repo, ["Credit balance is too low"], returncode=1)
+        automation = self.get("DV-02")["work"]["automation"]
+        self.assertEqual(automation["status"], "failed")
+        self.assertIn("Claude exited with code 1", automation["summary"])
+        self.assertIn("dv-02.jsonl", automation["summary"])
+        publish.assert_not_called()
+
+    # --- iterating: sent-back tasks run again with the feedback ---
+
+    def sent_back_board(self, repo, round_no=1, **run):
+        board = self.automated_board(repo)
+        task = kanvas.find_task(board, "DV-02")
+        task["work"]["automation"] = {"status": "completed", "updated": "2026-11-02T10:00:00Z", "round": round_no, **run}
+        task["notes"] = [
+            {"at": "2026-11-02T09:00:00Z", "by": "human", "text": "Before the first run"},
+            {"at": "2026-11-02T10:00:01Z", "by": "kanvas-runner", "text": "Automation completed: done"},
+            {"at": "2026-11-02T11:00:00Z", "by": "human", "text": "Sent back: handle the empty city"},
+            {"at": "2026-11-02T11:05:00Z", "by": "claude-reviewer", "text": "Agent review changes requested: add a test"},
+        ]
+        return board
+
+    def scan(self, board_data, **config):
+        """Runs one dispatcher pass over the board and returns the (board path, task id) pairs it launched."""
+        write_board(self.path, board_data)
+        launched, done = [], threading.Event()
+        dispatcher = object.__new__(kanvas.AutomationDispatcher)
+        dispatcher.lock, dispatcher.active = threading.Lock(), set()
+
+        def fake(path, task_id):
+            launched.append(task_id)
+            done.set()
+
+        with mock.patch.object(kanvas, "run_automation", side_effect=fake):
+            dispatcher.scan(self.path)
+            done.wait(2)
+        return launched
+
+    def test_a_task_sent_back_to_doing_runs_again_as_the_next_round(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        launched = self.scan(self.sent_back_board(repo, pull_requests=[{"url": "https://github.com/a/b/pull/1"}]))
+        self.assertEqual(launched, ["DV-02"])
+        run = self.get("DV-02")["work"]["automation"]
+        self.assertEqual((run["status"], run["round"], run["since"]), ("queued", 2, "2026-11-02T10:00:00Z"))
+        self.assertEqual(run["pull_requests"], [{"url": "https://github.com/a/b/pull/1"}])
+
+    def test_a_completed_run_still_in_review_does_not_run_again(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.sent_back_board(repo)
+        kanvas.find_task(board, "DV-02")["state"] = "review"
+        self.assertEqual(self.scan(board), [])
+
+    def test_the_round_limit_stops_the_loop_and_says_why(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.sent_back_board(repo, round_no=3)
+        launched = self.scan(board)
+        self.assertEqual(launched, [])
+        task = self.get("DV-02")
+        self.assertEqual(task["state"], "doing")
+        self.assertEqual(task["work"]["automation"]["status"], "failed")
+        self.assertIn("Stopped after 3 rounds", task["work"]["automation"]["summary"])
+        self.assertIn("Stopped after 3 rounds", task["notes"][-1]["text"])
+        board = self.sent_back_board(repo, round_no=3)
+        board["automation"]["max_rounds"] = 4
+        self.assertEqual(self.scan(board), ["DV-02"])
+        self.assertEqual(self.get("DV-02")["work"]["automation"]["round"], 4)
+
+    def test_max_rounds_must_be_a_positive_whole_number(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        for bad in (0, -1, "3", 1.5, True):
+            board["automation"]["max_rounds"] = bad
+            with self.assertRaises(kanvas.KanvasError):
+                kanvas.automation_config(board, self.path)
+        board["automation"]["max_rounds"] = 5
+        self.assertEqual(kanvas.automation_config(board, self.path)["max_rounds"], 5)
+
+    def test_feedback_is_the_notes_since_the_last_round_without_the_runner_s_own(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.sent_back_board(repo)
+        task = kanvas.find_task(board, "DV-02")
+        run = dict(task["work"]["automation"], since="2026-11-02T10:00:00Z")
+        text = kanvas.automation_feedback(task, run, self.dir)
+        self.assertIn("human (2026-11-02T11:00:00Z): Sent back: handle the empty city", text)
+        self.assertIn("claude-reviewer", text)
+        self.assertNotIn("Before the first run", text)
+        self.assertNotIn("Automation completed", text)
+
+    def test_feedback_includes_pull_request_comments_reviews_and_inline_comments(self):
+        pulls = [{"url": "https://github.com/acme/front/pull/7"}]
+        views = json.dumps({
+            "comments": [{"author": {"login": "sergi"}, "createdAt": "2026-11-02T11:10:00Z", "body": "Rename the helper"},
+                         {"author": {"login": "sergi"}, "createdAt": "2026-11-02T09:00:00Z", "body": "Too old"}],
+            "reviews": [{"author": {"login": "sergi"}, "submittedAt": "2026-11-02T11:11:00Z",
+                         "state": "CHANGES_REQUESTED", "body": "Needs work"}]})
+        inline = json.dumps([{"user": {"login": "sergi"}, "created_at": "2026-11-02T11:12:00Z",
+                              "path": "src/greet.ts", "line": 4, "body": "Use a const"}])
+        with mock.patch.object(kanvas, "_gh", side_effect=[views, inline]) as gh:
+            lines = kanvas.pull_request_feedback(pulls, "2026-11-02T10:00:00Z", self.dir)
+        self.assertEqual(len(lines), 3)
+        self.assertIn("Rename the helper", lines[0])
+        self.assertIn("(changes requested)", lines[1])
+        self.assertIn("at src/greet.ts:4", lines[2])
+        self.assertEqual(gh.call_args_list[1].args[1:3], ("api", "repos/acme/front/pulls/7/comments"))
+
+    def test_unreadable_pull_request_comments_do_not_stop_the_round(self):
+        with mock.patch.object(kanvas, "_gh", side_effect=kanvas.KanvasError("gh: not logged in")):
+            lines = kanvas.pull_request_feedback([{"url": "https://github.com/a/b/pull/1"}], "", self.dir)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("could not read the comments", lines[0])
+
+    def test_round_two_prompt_carries_the_feedback(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        config = kanvas.automation_config(board, self.path)
+        task = kanvas.find_task(board, "DV-02")
+        first = kanvas.automation_prompt(board, task, config, self.fake_worktrees(repo))
+        self.assertNotIn("Feedback to address", first)
+        second = kanvas.automation_prompt(board, task, config, self.fake_worktrees(repo), 2, "- human: handle the empty city")
+        self.assertIn("This is round 2", second)
+        self.assertIn("- human: handle the empty city", second)
+
+    def test_a_follow_up_round_sends_the_feedback_to_claude_and_comments_on_the_same_pull_request(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.sent_back_board(repo)
+        kanvas.find_task(board, "DV-02")["work"]["automation"].update(
+            status="queued", round=2, since="2026-11-02T10:00:00Z")
+        write_board(self.path, board)
+        pull = {"id": "front", "name": "Frontend", "branch": "feature/DV-02", "base": "dev", "commits": 3,
+                "url": "https://github.com/acme/front/pull/7"}
+
+        def completed(command, **kwargs):
+            with open(os.path.join(self.dir, ".kanvas", "runs", "dv-02.jsonl"), "w", encoding="utf-8") as f:
+                f.write(json.dumps({"type": "result", "is_error": False, "result": "Handled the empty city"}) + "\n")
+            return mock.Mock(returncode=0)
+
+        publish = mock.Mock(return_value=[pull])
+        with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=self.fake_worktrees(repo)), \
+             mock.patch.object(kanvas, "publish_pull_requests", publish), \
+             mock.patch.object(kanvas.subprocess, "run", side_effect=completed) as claude:
+            kanvas.run_automation(self.path, "DV-02")
+        prompt = claude.call_args.kwargs["input"]
+        self.assertIn("This is round 2", prompt)
+        self.assertIn("Sent back: handle the empty city", prompt)
+        self.assertIn("add a test", prompt)
+        self.assertNotIn("Before the first run", prompt)
+        self.assertEqual(publish.call_args.args[3], 2)
+        task = self.get("DV-02")
+        self.assertEqual((task["state"], task["work"]["automation"]["round"]), ("review", 2))
+        self.assertTrue(task["work"]["automation"]["summary"].startswith("Round 2. Handled the empty city"))
+
+    def test_publish_comments_on_an_open_pull_request_from_round_two(self):
+        repo, git = self.git_repo_with_remote("front")
+        with open(os.path.join(repo, "b.txt"), "w") as f:
+            f.write("b\n")
+        git("add", "b.txt")
+        git("commit", "-m", "feat: b")
+        task = kanvas.find_task(self.automated_board(repo), "DV-02")
+        front = {"id": "front", "name": "Frontend", "base": "origin/dev", "branch": "feature/DV-02", "worktree": repo}
+        with mock.patch.object(kanvas, "_gh", return_value="https://github.com/acme/front/pull/9") as gh:
+            kanvas.publish_pull_requests(task, [front], "Handled it", 2)
+        self.assertEqual([c.args[1:3] for c in gh.call_args_list], [("pr", "list"), ("pr", "comment")])
+        self.assertIn("Round 2", gh.call_args_list[1].args[-1])
+
+    def test_retry_keeps_the_round_and_the_pull_requests(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        task = kanvas.find_task(board, "DV-02")
+        task["work"]["automation"] = {"status": "failed", "summary": "boom", "round": 2, "since": "2026-11-02T10:00:00Z",
+                                      "pull_requests": [{"url": "https://github.com/a/b/pull/1"}]}
+        write_board(self.path, board)
+        self.run_cli("retry", "DV-02", "--as", "human")
+        self.assertEqual(self.get("DV-02")["work"]["automation"],
+                         {"round": 2, "since": "2026-11-02T10:00:00Z", "pull_requests": [{"url": "https://github.com/a/b/pull/1"}]})
+        launched = self.scan(kanvas.load_board(self.path))
+        self.assertEqual(launched, ["DV-02"])
+        self.assertEqual(self.get("DV-02")["work"]["automation"]["round"], 2)
+
+    def git_repo_with_remote(self, name):
+        """A repository on branch dev whose `origin` is a bare repository, plus a task branch with commits."""
+        bare = os.path.join(self.dir, name + "-origin.git")
+        repo = os.path.join(self.dir, name)
+        git = lambda *a, cwd=repo: subprocess.run(["git", *a], cwd=cwd, check=True, capture_output=True, text=True)
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "--bare", bare], check=True, capture_output=True)
+        git("init", "-b", "dev")
+        git("config", "user.email", "test@example.com")
+        git("config", "user.name", "Test")
+        with open(os.path.join(repo, "a.txt"), "w") as f:
+            f.write("a\n")
+        git("add", "a.txt")
+        git("commit", "-m", "init")
+        git("remote", "add", "origin", bare)
+        git("push", "origin", "dev")
+        git("fetch", "origin")
+        git("checkout", "-b", "feature/DV-02")
+        return repo, git
+
+    def test_publish_pushes_the_branch_and_opens_one_pull_request_per_changed_repository(self):
+        repo, git = self.git_repo_with_remote("front")
+        with open(os.path.join(repo, "b.txt"), "w") as f:
+            f.write("b\n")
+        git("add", "b.txt")
+        git("commit", "-m", "feat: b")
+        board = self.automated_board(repo)
+        task = kanvas.find_task(board, "DV-02")
+        unchanged = {"id": "api", "name": "API", "base": "origin/dev", "branch": "feature/DV-02",
+                     "worktree": repo, "path": repo}
+        # An API worktree with no commits ahead of its base is skipped.
+        with mock.patch.object(kanvas, "_git", side_effect=lambda path, *a: "0" if a[:1] == ("rev-list",) and path == "/api" else subprocess.run(
+                ["git", "-C", path, *a], capture_output=True, text=True, check=True).stdout.strip()):
+            front = {"id": "front", "name": "Frontend", "base": "origin/dev", "branch": "feature/DV-02", "worktree": repo}
+            api = dict(unchanged, worktree="/api")
+            with mock.patch.object(kanvas, "_gh", side_effect=["", "https://github.com/acme/front/pull/9\n"]) as gh:
+                pulls = kanvas.publish_pull_requests(task, [front, api], "Did it")
+        self.assertEqual(len(pulls), 1)
+        self.assertEqual((pulls[0]["id"], pulls[0]["base"], pulls[0]["commits"]), ("front", "dev", 1))
+        self.assertEqual(pulls[0]["url"], "https://github.com/acme/front/pull/9")
+        create = gh.call_args_list[1].args
+        self.assertEqual(create[1:3], ("pr", "create"))
+        self.assertEqual(create[create.index("--base") + 1], "dev")
+        self.assertEqual(create[create.index("--title") + 1], "DV-02: " + task["title"])
+        self.assertIn("Did it", create[create.index("--body") + 1])
+        remote = subprocess.run(["git", "-C", repo, "ls-remote", "--heads", "origin", "feature/DV-02"],
+                                capture_output=True, text=True, check=True).stdout
+        self.assertIn("refs/heads/feature/DV-02", remote)
+
+    def test_publish_reuses_an_open_pull_request_when_retrying(self):
+        repo, git = self.git_repo_with_remote("front")
+        with open(os.path.join(repo, "b.txt"), "w") as f:
+            f.write("b\n")
+        git("add", "b.txt")
+        git("commit", "-m", "feat: b")
+        task = kanvas.find_task(self.automated_board(repo), "DV-02")
+        front = {"id": "front", "name": "Frontend", "base": "origin/dev", "branch": "feature/DV-02", "worktree": repo}
+        with mock.patch.object(kanvas, "_gh", return_value="https://github.com/acme/front/pull/9") as gh:
+            pulls = kanvas.publish_pull_requests(task, [front], "Again")
+        self.assertEqual(gh.call_count, 1)
+        self.assertEqual(pulls[0]["url"], "https://github.com/acme/front/pull/9")
+
+    def test_publish_fails_without_commits_or_with_uncommitted_changes(self):
+        repo, git = self.git_repo_with_remote("front")
+        task = kanvas.find_task(self.automated_board(repo), "DV-02")
+        front = {"id": "front", "name": "Frontend", "base": "origin/dev", "branch": "feature/DV-02", "worktree": repo}
+        with self.assertRaises(kanvas.KanvasError) as caught:
+            kanvas.publish_pull_requests(task, [front], "x")
+        self.assertIn("no commits", str(caught.exception))
+        with open(os.path.join(repo, "b.txt"), "w") as f:
+            f.write("b\n")
+        git("add", "b.txt")
+        git("commit", "-m", "feat: b")
+        with open(os.path.join(repo, "a.txt"), "w") as f:
+            f.write("changed\n")
+        with self.assertRaises(kanvas.KanvasError) as caught:
+            kanvas.publish_pull_requests(task, [front], "x")
+        self.assertIn("uncommitted", str(caught.exception))
+
+    def test_publish_explains_a_missing_github_cli(self):
+        with mock.patch.object(kanvas.shutil, "which", return_value=None):
+            with self.assertRaises(kanvas.KanvasError) as caught:
+                kanvas._gh(self.dir, "pr", "list")
+        self.assertIn("GitHub CLI", str(caught.exception))
 
 
 class QuestionTests(TempBoard):

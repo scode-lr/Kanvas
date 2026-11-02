@@ -146,7 +146,7 @@ The first Grill me records the outcome, needs and constraints, acceptance criter
 - **Right-click menus.** On a card: state actions, a new task that depends on it or blocks it, adding and removing dependencies, copying the ID, deleting. On an arrow (left or right click): the two tasks it connects are highlighted and shown in the menu; click either one to open it, or remove the connection. On empty space: a new task in that group, a new group, or deleting that group (its tasks stay without a group unless you choose to delete them too).
 - **Undo and redo.** Ctrl+Z undoes your last change in the browser, Ctrl+Shift+Z or Ctrl+Y redoes it, and the arrows next to New task do the same. On a Mac, these and the page's other Ctrl shortcuts use ⌘, as the page shows. The toast that confirms a change has an Undo button for that change. Changes agents made in the meantime are kept: an undo only touches what your change touched, and refuses if an agent has changed that since. Inside a text field, Ctrl+Z undoes typing as usual.
 - **YOLO.** "YOLO up to here…" selects a dependency chain for autonomous attention. It never creates product definitions, approves reviews, merges to dev or promotes to production. The task carries a YOLO tag and covered work a lightning icon; the same menu turns it off.
-- **Execution automation.** A board may opt into a local Codex runner by declaring its repositories under `automation`. The product Grill me then selects Front, API or any other configured repository. Moving the task to Doing creates isolated branches and worktrees, launches `codex exec` with the root documentation and repository instructions, records its live status/log paths, and moves a successful implementation to Review. Original checkouts are never used as workspaces. Kanvas never merges or deploys automatically.
+- **Execution automation.** A board may opt into running tasks with Claude Code by declaring its repositories under `automation`. The product Grill me then selects Front, API or any other configured repository. Moving the task to Doing creates isolated branches and worktrees, launches Claude Code (`claude -p`) with the root documentation and repository instructions, and records its live status and log path. When Claude finishes, Kanvas pushes each branch that has commits, opens a GitHub pull request and moves the task to Review with the pull request links, ready for you to review and merge. Original checkouts are never used as workspaces. Kanvas never merges or deploys automatically.
 - **Everything else.** Filter by state, search (press `/`), hide finished work, groups with their own ID prefixes (from the menu on the board name), light, dark or system theme, keyboard shortcuts (press `?`), arrow keys to move from card to card and Enter to move into its panel (Tab goes round the panel, Escape comes back out), and links: `#TR-02` in the URL opens that task.
 
 ![The board view in dark mode](img/board-dark.png)
@@ -253,7 +253,7 @@ Automation is opt-in and runs only while `kanvas serve` (or the login service) i
 ```json
 "automation": {
   "enabled": true,
-  "executor": "codex",
+  "model": "sonnet",
   "project_root": ".",
   "worktrees_root": ".kanvas/worktrees",
   "runs_root": ".kanvas/runs",
@@ -265,7 +265,11 @@ Automation is opt-in and runs only while `kanvas serve` (or the login service) i
 }
 ```
 
-The PO/TL Grill me requires at least one repository. After the Architect/Senior plan starts the task, Kanvas creates a branch in each selected repository under `.kanvas/worktrees/<task-id>/`, launches Codex with `workspace-write` and automatic approval review, and stores JSONL logs under `.kanvas/runs/`. Branches default to `kanvas/<task-id>-<title>`; set `branch_pattern` to a format such as `feature/{id}` when the project tracks work by task ID. Available fields are `{id}`, `{id_lower}`, `{id_slug}` and `{title_slug}`. Add `.kanvas/` to the project root's `.gitignore`. Successful runs enter Review; push or PR authentication failures are reported without losing the local commits.
+The PO/TL Grill me requires at least one repository. After the Architect/Senior plan starts the task, Kanvas creates a branch in each selected repository under `.kanvas/worktrees/<task-id>/`, launches Claude Code in headless mode (`claude -p`) and stores its JSONL log under `.kanvas/runs/`. Branches default to `kanvas/<task-id>-<title>`; set `branch_pattern` to a format such as `feature/{id}` when the project tracks work by task ID. Available fields are `{id}`, `{id_lower}`, `{id_slug}` and `{title_slug}`. Add `.kanvas/` to the project root's `.gitignore`. A successful run enters Review with a pull request per repository the agent changed, based on the repository's `base` (`origin/dev` opens it against `dev`). The agent only commits; Kanvas itself pushes the branch and opens the pull request with the GitHub CLI, so `gh` must be installed and signed in (`gh auth login`) in the environment `kanvas serve` runs in, and the agent never needs GitHub credentials. A run that made no commits, left tracked files uncommitted, or could not push or open the pull request stays in Doing with the exact reason; `kanvas retry ID` runs it again on the same branch and reuses a pull request that is already open.
+
+**Iterating.** Comment on the pull request in GitHub, or use Send back in the board (or let an agent reviewer request changes), and the task returns to Doing. Kanvas then runs Claude again as the next round, in the same worktree and branch: the prompt carries the notes written since the last round (the runner's own excluded) and the comments, reviews and inline comments left on the pull request since then. The new commits go to the same pull request, which gets a comment for the round, and the task goes back to Review. `max_rounds` (default 3) stops the loop: the task stays in Doing, marked failed, until you continue by hand or raise the limit and run `retry ID`. The task panel shows the round.
+
+`model` takes an alias such as `haiku`, `sonnet` or `opus` (or a full model name), and `max_turns` and `max_budget_usd` cap a run so an unattended agent cannot spend without limit. The run edits files in the worktrees and may use `allowed_tools`, which defaults to `Bash`, `Edit`, `Write`, `Read`, `Glob` and `Grep`. `disallowed_tools` defaults to `git push`, `git merge` and every `gh` command, so the agent cannot publish or merge anything itself; replace either list in the board to change this. Authentication comes from the environment `kanvas serve` runs in, such as `ANTHROPIC_API_KEY` or a Claude Code login, and `claude` must be on its `PATH`. Kanvas shows Claude's closing summary, turns and cost on the task.
 
 ## File format
 
@@ -290,7 +294,7 @@ The PO/TL Grill me requires at least one repository. After the Architect/Senior 
       "notes": [
         {
           "at": "2026-10-25T08:20:00Z",
-          "by": "codex",
+          "by": "claude",
           "text": "The policy flies the course on its own: 92 of 100 random courses through every gate."
         }
       ]
