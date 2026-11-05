@@ -18,10 +18,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -31,8 +33,9 @@ from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from html import escape
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 VERSION = "0.6.0"
 FORMAT = 1
@@ -783,6 +786,7 @@ def automation_config(board, path):
     runs = os.path.abspath(os.path.join(root, config.get("runs_root") or ".kanvas/runs"))
     return {
         "root": root,
+        "board": path,
         "repositories": repositories,
         "worktrees": worktrees,
         "runs": runs,
@@ -796,6 +800,8 @@ def automation_config(board, path):
         "curator": curator_settings(config.get("curator")),
         "design": design_settings(config.get("design")),
         "max_rounds": _positive_int(config.get("max_rounds"), 3, "automation.max_rounds"),
+        "timeout_minutes": _positive_int(config.get("timeout_minutes"), None, "automation.timeout_minutes"),
+        "idle_minutes": _positive_int(config.get("idle_minutes"), None, "automation.idle_minutes"),
         "max_turns": config.get("max_turns"),
         "max_budget_usd": config.get("max_budget_usd"),
         "allowed_tools": _tool_list(config.get("allowed_tools"), CLAUDE_ALLOWED_TOOLS),
@@ -894,7 +900,14 @@ def automation_prompt(board, task, config, worktrees, round_no=1, feedback=""):
     approved = work.get("design") if isinstance(work.get("design"), dict) else {}
     design = (f"\nApproved UI/UX design (the human approved it: build exactly this and do not invent other UI; if it cannot "
               f"be built as written, say so in your summary):\n{approved['text']}\n"
+              + (f"\nThe approved mockup (the exact look the human accepted, to be rebuilt with the application's own "
+                 f"components and styles, not pasted):\n```html\n{approved['mockup']}\n```\n" if approved.get("mockup") else "")
               if approved.get("status") == DESIGN_APPROVED and approved.get("text") else "")
+    if design:
+        design += (f"\nWhen the UI is built, look at the real result: run `kanvas --board \"{config['board']}\" shots <the html file, or the URL "
+                   f"of the app you started> --task {task['id']}`. It saves screenshots at phone, iPad and desktop size as this task's "
+                   f"evidence, where the human compares them with the design. Open them with Read, compare them with the mockup and fix "
+                   f"what differs before you finish. Stop any server you started.\n")
     followup = ""
     if round_no > 1:
         followup = (f"\nThis is round {round_no}: your earlier work was reviewed and sent back. The branches already hold "
@@ -1026,20 +1039,20 @@ DEFAULT_AGENT = "implementer"
 # same keys of `automation`. A task picks its role with `definition.agent`; without one it runs as the implementer.
 # kanvas.html repeats these roles to fill the Agent choice of the product definition: change both together.
 DEFAULT_AGENTS = {
-    "implementer": {"model": "sonnet", "effort": "medium"},
-    "complex": {"model": "opus", "effort": "high"},
+    "implementer": {"model": "sonnet", "effort": "medium", "timeout_minutes": 40, "max_budget_usd": 2},
+    "complex": {"model": "opus", "effort": "high", "timeout_minutes": 60, "max_budget_usd": 5},
     # The reviewers read the diff in their prompt and open other files only when it is not enough, so they need no shell.
     # `agent` runs them as the project's agent of that name. The strong one looks again at what the first could not decide.
-    "reviewer": {"agent": "reviewer", "model": "haiku", "effort": "low", "max_turns": 12,
-                 "allowed_tools": ["Read", "Glob", "Grep"]},
-    "reviewer-strong": {"agent": "reviewer", "model": "sonnet", "effort": "medium", "max_turns": 16,
-                        "allowed_tools": ["Read", "Glob", "Grep"]},
+    "reviewer": {"agent": "reviewer", "model": "haiku", "effort": "low", "max_turns": 12, "timeout_minutes": 10,
+                 "max_budget_usd": 0.3, "allowed_tools": ["Read", "Glob", "Grep"]},
+    "reviewer-strong": {"agent": "reviewer", "model": "sonnet", "effort": "medium", "max_turns": 16, "timeout_minutes": 15,
+                        "max_budget_usd": 0.6, "allowed_tools": ["Read", "Glob", "Grep"]},
     # Proposes the UI/UX of a front task before anyone implements it; it reads the app and the design rules, nothing else.
-    "designer": {"agent": "designer", "model": "sonnet", "effort": "medium", "max_turns": 15,
-                 "allowed_tools": ["Read", "Glob", "Grep"]},
+    "designer": {"agent": "designer", "model": "sonnet", "effort": "medium", "max_turns": 15, "timeout_minutes": 15,
+                 "max_budget_usd": 1, "allowed_tools": ["Read", "Glob", "Grep"]},
     # Keeps the documentation repository in step with an accepted task; it only edits documentation, so it needs no shell.
-    "curator": {"agent": "brain-curator", "model": "haiku", "effort": "low", "max_turns": 15,
-                "allowed_tools": ["Read", "Edit", "Write", "Glob", "Grep"]},
+    "curator": {"agent": "brain-curator", "model": "haiku", "effort": "low", "max_turns": 15, "timeout_minutes": 15,
+                "max_budget_usd": 0.5, "allowed_tools": ["Read", "Edit", "Write", "Glob", "Grep"]},
 }
 
 
@@ -1062,6 +1075,9 @@ def agent_roles(value):
             raise KanvasError(f"automation.agents.{name}.effort must be one of {', '.join(EFFORT_LEVELS)}")
         if role.get("max_turns") is not None:
             role["max_turns"] = _positive_int(role["max_turns"], None, f"automation.agents.{name}.max_turns")
+        for key in ("timeout_minutes", "idle_minutes"):
+            if role.get(key) is not None:
+                role[key] = _positive_int(role[key], None, f"automation.agents.{name}.{key}")
         for key in ("allowed_tools", "disallowed_tools"):
             if key in given:
                 role[key] = _tool_list(given[key], ())
@@ -1158,6 +1174,185 @@ def claude_command(config, worktrees, role=None):
     if disallowed:
         command += ["--disallowedTools", *disallowed]
     return command
+
+
+# ---------------------------------------------------------------------------
+# An agent that is stuck must not go on spending tokens. Every run of Claude Code is watched: it is stopped when the
+# human asks (`kanvas stop`, the Stop button), when it has run longer than its role allows, or when its log has not grown
+# for a while (a command that never ends, a question nobody can answer). Its role's `max_budget_usd` caps what it spends.
+
+DEFAULT_TIMEOUT_MINUTES = 40
+DEFAULT_IDLE_MINUTES = 10
+
+
+def agent_limits(config, role):
+    role = role or {}
+    minutes = role.get("timeout_minutes") or config.get("timeout_minutes") or DEFAULT_TIMEOUT_MINUTES
+    idle = role.get("idle_minutes") or config.get("idle_minutes") or DEFAULT_IDLE_MINUTES
+    return {"timeout": minutes * 60, "idle": idle * 60}
+
+
+def kill_tree(proc):
+    """Ends the agent and everything it started, such as a dev server that would otherwise keep running."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def agent_run(command, input="", stdout=None, cwd=None, env=None, creationflags=0, limits=None, stop=None, **_):
+    """Runs Claude Code with `input` on its stdin and its output in `stdout`, and watches it. The result has the exit
+    code and `stopped`, the reason Kanvas ended it, or None when it ended by itself."""
+    limits = limits or {}
+    options = {"stdin": subprocess.PIPE, "stdout": stdout, "stderr": subprocess.STDOUT, "text": True, "encoding": "utf-8",
+               "errors": "replace", "cwd": cwd, "env": env}
+    if os.name == "nt":
+        options["creationflags"] = creationflags
+    else:
+        options["start_new_session"] = True
+    proc = subprocess.Popen(command, **options)
+
+    def feed():
+        try:
+            proc.stdin.write(input)
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+    threading.Thread(target=feed, daemon=True).start()
+    started = changed = time.monotonic()
+    size, reason = -1, None
+    while True:
+        try:
+            proc.wait(timeout=1)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.monotonic()
+        try:
+            current = os.path.getsize(stdout.name) if stdout else 0
+        except OSError:
+            current = size
+        if current != size:
+            size, changed = current, now
+        if stop and stop():
+            reason = "stopped"
+        elif limits.get("timeout") and now - started > limits["timeout"]:
+            reason = f"it ran for more than {limits['timeout'] // 60} minutes"
+        elif limits.get("idle") and now - changed > limits["idle"]:
+            reason = f"it wrote nothing for more than {limits['idle'] // 60} minutes"
+        if reason:
+            kill_tree(proc)
+            proc.wait()
+            break
+    return SimpleNamespace(returncode=proc.returncode, stopped=reason)
+
+
+# ---------------------------------------------------------------------------
+# Seeing the result: `kanvas shots` opens a page in a headless browser at the size of a phone, an iPad and a desktop browser
+# and keeps the screenshots as the task's evidence, so that the human can put what was built next to the design they approved.
+
+SHOT_DEVICES = (("mobile", 390, 844), ("ipad", 820, 1180), ("web", 1280, 800))
+BROWSER_NAMES = ("google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser", "msedge", "microsoft-edge")
+
+
+def find_browser():
+    """Chrome, Chromium or Edge: the one named by KANVAS_BROWSER, or the first found on PATH or in the usual folders."""
+    wanted = os.environ.get("KANVAS_BROWSER")
+    if wanted:
+        return wanted if os.path.isfile(wanted) else shutil.which(wanted)
+    found = next(filter(None, map(shutil.which, BROWSER_NAMES)), None)
+    if found:
+        return found
+    roots = [os.environ.get(v) for v in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
+    candidates = [os.path.join(r, *rest) for r in roots if r for rest in (
+        ("Google", "Chrome", "Application", "chrome.exe"), ("Microsoft", "Edge", "Application", "msedge.exe"))]
+    candidates += ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+    return next(filter(os.path.isfile, candidates), None)
+
+
+def take_shots(browser, target, folder, wait=4):
+    """Saves design-mobile.png, design-ipad.png and design-web.png of `target` (a URL or an HTML file) in `folder`."""
+    url = target if re.match(r"(https?|file)://", target) else "file:///" + os.path.abspath(target).replace(os.sep, "/").lstrip("/")
+    if not re.match(r"(https?|file)://", target) and not os.path.isfile(target):
+        raise KanvasError(f"{target} is not a file or a URL")
+    os.makedirs(folder, exist_ok=True)
+    saved = []
+    for name, width, height in SHOT_DEVICES:
+        out = os.path.join(folder, f"design-{name}.png")
+        if os.path.exists(out):
+            os.remove(out)
+        with tempfile.TemporaryDirectory(prefix="kanvas-shot-") as profile:
+            command = [browser, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-sandbox",
+                       "--disable-extensions", f"--user-data-dir={profile}", f"--window-size={width},{height}",
+                       f"--virtual-time-budget={int(wait * 1000)}", f"--screenshot={out}", url]
+            try:
+                proc = subprocess.run(command, capture_output=True, text=True, timeout=90, encoding="utf-8", errors="replace")
+            except subprocess.TimeoutExpired:
+                raise KanvasError(f"The browser did not finish the {name} screenshot of {target} in 90 seconds")
+        if not os.path.isfile(out) or not os.path.getsize(out):
+            raise KanvasError(f"The browser took no {name} screenshot of {target}: {(proc.stderr or proc.stdout).strip()[-300:]}")
+        saved.append(out)
+    return saved
+
+
+def cmd_shots(args):
+    path = board_path(args)
+    task = find_task(load_board(path), args.task or os.environ.get("KANVAS_TASK") or "")
+    folder = args.out or os.path.join(evidence_folder(evidence_root(path), task["id"]) or "", "final")
+    if not args.out and not evidence_folder(evidence_root(path), task["id"]):
+        raise KanvasError("This board has no evidence folder for that task")
+    browser = find_browser()
+    if not browser:
+        raise KanvasError("No browser to take the screenshots: install Chrome, Chromium or Edge, or set KANVAS_BROWSER to it")
+    for shot in take_shots(browser, args.target, folder, args.wait):
+        print(shot)
+
+
+def stop_text(proc):
+    """Why Kanvas ended a run, in a sentence, or "" when the run ended by itself."""
+    reason = getattr(proc, "stopped", None)
+    if not isinstance(reason, str):
+        return ""
+    return "Stopped by you." if reason == "stopped" else f"Stopped by Kanvas because {reason}."
+
+
+def request_stop(path, task_id):
+    """Asks the agent working on a task to stop. The runner that owns the process sees the request and ends it."""
+    def op(board):
+        t = find_task(board, task_id)
+        run = ((t.get("work") or {}).get("automation")) or {}
+        if run.get("status") not in ("queued", "running") and not (t.get("work") or {}).get("busy"):
+            raise KanvasError(f"No agent is working on {t['id']}")
+        t["work"]["stop"] = {"at": now_iso()}
+        return t
+    return mutate(path, op)
+
+
+def stop_requested(path, task_id):
+    try:
+        return bool((find_task(load_board(path), task_id).get("work") or {}).get("stop"))
+    except (KanvasError, OSError):
+        return False
+
+
+def clear_stop(path, task_id):
+    def op(board):
+        work = find_task(board, task_id).get("work")
+        if isinstance(work, dict):
+            work.pop("stop", None)
+    try:
+        if stop_requested(path, task_id):
+            mutate(path, op)
+    except (KanvasError, OSError):
+        pass
 
 
 def read_result(log):
@@ -1349,6 +1544,11 @@ def review_prompt(task, run, worktrees, changes, previous, strong=False):
         for w, (log, stat, diff) in zip(worktrees, changes))
     again = (f"\nYour previous review asked for these changes; check that each one was fixed:\n{previous}\n"
              if previous else "")
+    approved = work.get("design") if isinstance(work.get("design"), dict) else {}
+    designed = (f"\nUI/UX design the human approved before the work started. It was decided on purpose: check that the change "
+                f"builds it, and never ask for something it rules out (for example a convention it sets aside):\n"
+                f"{_clip(approved.get('text'), 6000)}\n"
+                if approved.get("status") == DESIGN_APPROVED and approved.get("text") else "")
     undecided = ('A first reviewer could not decide and sent this to you, so do not escalate: decide "approve" or '
                  '"changes". What the diff cannot show, such as how the backend behaves, goes in a finding to check, and '
                  'you ask for changes only for what you can point at. The human reads the pull request after you.'
@@ -1362,7 +1562,7 @@ Needs and constraints: {definition.get('needs') or '(not supplied)'}
 Acceptance criteria: {definition.get('acceptance') or '(not supplied)'}
 Non-goals: {definition.get('non_goals') or '(none)'}
 Technical plan: {_clip(work.get('plan'), 3000) or '(not supplied)'}
-
+{designed}
 What the implementer reported about its last round:
 {_clip(run.get('summary'), 3000) or '(nothing)'}
 {again}
@@ -1403,9 +1603,14 @@ def ask_reviewer(config, task, run, worktrees, changes, previous, role_name):
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     # It runs from the project folder, where the project's agents live, and may read every worktree.
     command = claude_command(config, [{"worktree": config["root"]}] + worktrees, role)
+    clear_stop(config["board"], task["id"])
     with open(log, "w", encoding="utf-8", newline="\n") as output:
-        proc = subprocess.run(command, input=prompt, text=True, encoding="utf-8", errors="replace", stdout=output,
-                              stderr=subprocess.STDOUT, creationflags=flags, cwd=config["root"], env=agent_environment())
+        proc = agent_run(command, input=prompt, text=True, encoding="utf-8", errors="replace", stdout=output,
+                         stderr=subprocess.STDOUT, creationflags=flags, cwd=config["root"], env=agent_environment(),
+                         limits=agent_limits(config, role), stop=lambda: stop_requested(config["board"], task["id"]))
+    clear_stop(config["board"], task["id"])
+    if stop_text(proc):
+        raise KanvasError(f"{role_name} did not finish the review. {stop_text(proc)}")
     result = read_result(log)
     if result is None or proc.returncode or result.get("is_error"):
         detail = str((result or {}).get("result") or f"it exited with code {proc.returncode}. See {log}")
@@ -1461,7 +1666,7 @@ def review_comment(role_name, model, round_no, outcome, review):
     return "\n".join(lines + ["", tail])
 
 
-def run_review(path, task_id, force=False):
+def _run_review(path, task_id, force=False):
     """Has the reviewer agent look at a task that reached Review and records its verdict. Returns (outcome, text) and
     never raises: a review that cannot run leaves a note and the task for the human. A stronger reviewer looks again
     at what the first could not decide."""
@@ -1531,10 +1736,17 @@ def run_automation(path, task_id):
                           worktrees=[{k: x[k] for k in ("id", "path", "worktree", "branch", "commit")} for x in worktrees])
         prompt = automation_prompt(board, task, config, worktrees, round_no, feedback)
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        clear_stop(path, task_id)
         with open(log, "w", encoding="utf-8", newline="\n") as output:
-            proc = subprocess.run(claude_command(config, worktrees, role), input=prompt, text=True, encoding="utf-8",
-                                  errors="replace", stdout=output, stderr=subprocess.STDOUT, creationflags=flags,
-                                  cwd=worktrees[0]["worktree"], env=agent_environment())
+            proc = agent_run(claude_command(config, worktrees, role), input=prompt, text=True, encoding="utf-8",
+                             errors="replace", stdout=output, stderr=subprocess.STDOUT, creationflags=flags,
+                             cwd=worktrees[0]["worktree"], env=agent_environment(),
+                             limits=agent_limits(config, role), stop=lambda: stop_requested(path, task_id))
+        clear_stop(path, task_id)
+        if stop_text(proc):
+            finish_automation(path, task_id, False, f"{stop_text(proc)} What it had done so far is in the worktree and "
+                                                    f"the log ({log}). `retry {task_id}` runs it again from there.")
+            return
         ok, summary = claude_outcome(proc, log)
         if not summary:
             summary = f"Claude exited with code {proc.returncode}. See {log}"
@@ -1563,6 +1775,20 @@ DESIGN_APPROVED, DESIGN_PENDING, DESIGN_CHANGES, DESIGN_FAILED = "approved", "pe
 def design_of(task):
     work = task.get("work") if isinstance(task.get("work"), dict) else {}
     return work.get("design") if isinstance(work.get("design"), dict) else {}
+
+
+DESIGN_HISTORY_LIMIT = 30
+
+
+def design_history(design):
+    """The conversation about a design, oldest first: each proposal of the designer, each answer of the human (which
+    round it answers) and the approval. A design made before the history existed starts from its current proposal."""
+    history = [dict(x) for x in design.get("history") or [] if isinstance(x, dict)]
+    if not history and design.get("text"):
+        history.append({"type": "proposal", "round": int(design.get("round") or 1), "at": design.get("at") or "",
+                        "by": design.get("by") or "designer", "text": design["text"],
+                        **({"mockup": design["mockup"]} if design.get("mockup") else {})})
+    return history
 
 
 def design_applies(task, config):
@@ -1596,18 +1822,92 @@ Do not invent a visual language. Read the CLAUDE.md of the application, its desi
 
 Answer in the language the task is written in, in markdown, under 700 words, with these sections:
 1. **Goal** and who uses it, per role.
-2. **Mobile layout** (phone): a short ASCII wireframe, top to bottom, and the interactions.
-3. **Tablet layout** (iPad, portrait and landscape): an ASCII wireframe, and what it does with the extra space (columns, split view, side panel) instead of stretching the phone layout.
-4. **Web layout** (desktop browser): an ASCII wireframe, and what changes with a mouse and keyboard (hover, context menu, shortcuts, wide tables).
+2. **Mobile layout** (phone): how it is laid out, top to bottom, and the interactions.
+3. **Tablet layout** (iPad, portrait and landscape): what it does with the extra space (columns, split view, side panel) instead of stretching the phone layout.
+4. **Web layout** (desktop browser): what changes with a mouse and keyboard (hover, context menu, shortcuts, wide tables).
 5. **Reuse**: the existing components, styles and screens it builds on, with their paths. A new component needs one line of justification.
 6. **States**: loading, empty, error, success and no permission.
 7. **Texts**: the labels and messages, as the app would show them.
 8. **Accessibility** that matters here.
 9. **Open questions** the human should decide. If there are none, say so.
+
+Then end with the mockup, so the human sees the design as it will look instead of reading about it: one fenced ```html block with a complete, standalone HTML page (under 40,000 characters) and nothing after it. Rules for the mockup:
+- It is the real design, not a sketch: copy the application's own CSS (its variables, classes, fonts and spacing) into one `<style>`, use the shared classes, and fill it with believable sample data. No new colours or fonts.
+- One responsive file: the same page is shown in a 390 px wide frame (phone), an 820 px frame (iPad portrait) and a 1280 px frame (web), so it must adapt with the application's own breakpoints.
+- Make it interactive where the task needs it (filters that filter, tabs that switch, a form that shows its validation) with a few lines of inline JavaScript.
+- No external requests: no links to files, fonts, images or scripts; use inline SVG or CSS for any image.
 """
 
 
+# While an agent designs or reviews a task the board marks it, and the page lets the human look at it and nothing else.
+# (A run of the implementer is already marked by its own status.) The page ignores a mark older than half an hour.
+def mark_busy(path, task_id, who):
+    def op(board):
+        t = find_task(board, task_id)
+        work = t.get("work") if isinstance(t.get("work"), dict) else None
+        if who:
+            t.setdefault("work", {})["busy"] = {"by": who, "at": now_iso()}
+        elif work is not None:
+            work.pop("busy", None)
+        return t
+    try:
+        mutate(path, op)
+    except (KanvasError, OSError):
+        pass
+
+
+def clear_busy_marks(path):
+    """When Kanvas starts nothing is being worked on, so any mark a crash left behind is stale."""
+    if not any(isinstance((t.get("work") or {}).get("busy"), dict) for t in load_board(path)["tasks"]):
+        return
+
+    def op(board):
+        for t in board["tasks"]:
+            if isinstance(t.get("work"), dict):
+                t["work"].pop("busy", None)
+    mutate(path, op)
+
+
+def run_review(path, task_id, force=False):
+    mark_busy(path, task_id, "reviewer")
+    try:
+        return _run_review(path, task_id, force)
+    finally:
+        mark_busy(path, task_id, None)
+
+
 def run_design(path, task_id):
+    mark_busy(path, task_id, "designer")
+    try:
+        return _run_design(path, task_id)
+    finally:
+        mark_busy(path, task_id, None)
+
+
+MOCKUP_LIMIT = 60000
+
+
+def split_design_reply(text):
+    """The designer's description and the HTML mockup that ends it, which is "" when there is none or it is not a page."""
+    found = list(re.finditer(r"```html\s*(.*?)```", text, re.S))
+    if not found:
+        return text.strip(), ""
+    last = found[-1]
+    page_html = last.group(1).strip()
+    prose = (text[:last.start()] + text[last.end():]).strip()
+    if not re.search(r"<(!doctype|html|body|main|div|style)\b", page_html, re.I) or len(page_html) > MOCKUP_LIMIT:
+        return prose, ""
+    return prose, page_html
+
+
+# The mockup is the designer's own markup, shown in the human's browser: it may run its own script (a filter that
+# filters) but gets no origin, no network and no access to the board.
+MOCKUP_HEADERS = {"Content-Security-Policy": "sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; "
+                                              "script-src 'unsafe-inline'; img-src data:; font-src data:",
+                  "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"}
+
+
+def _run_design(path, task_id):
     """Has the designer propose the UI/UX of a task and records the proposal for the human to approve. Never raises: a
     design that cannot be made leaves a note and the task waiting."""
     try:
@@ -1627,15 +1927,21 @@ def run_design(path, task_id):
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         folders = [{"worktree": config["root"]}] + [{"worktree": config["repositories"][i]["path"]}
                                                    for i in config["design"]["repositories"] if i in config["repositories"]]
+        clear_stop(path, task_id)
         with open(log, "w", encoding="utf-8", newline="\n") as output:
-            proc = subprocess.run(claude_command(config, folders, role), input=prompt, text=True, encoding="utf-8",
-                                  errors="replace", stdout=output, stderr=subprocess.STDOUT, creationflags=flags,
-                                  cwd=config["root"], env=agent_environment())
+            proc = agent_run(claude_command(config, folders, role), input=prompt, text=True, encoding="utf-8",
+                             errors="replace", stdout=output, stderr=subprocess.STDOUT, creationflags=flags,
+                             cwd=config["root"], env=agent_environment(),
+                             limits=agent_limits(config, role), stop=lambda: stop_requested(path, task_id))
+        clear_stop(path, task_id)
+        if stop_text(proc):
+            raise KanvasError(f"the designer did not finish. {stop_text(proc)}")
         result = read_result(log)
         text = str((result or {}).get("result") or "").strip()
         if result is None or proc.returncode or result.get("is_error") or not text:
             detail = text or f"it exited with code {proc.returncode}. See {log}"
             raise KanvasError(f"the designer could not make the proposal: {_clip(detail, 300)}")
+        text, mockup = split_design_reply(text)
     except Exception as e:
         def fail(board):
             t = find_task(board, task_id)
@@ -1656,8 +1962,12 @@ def run_design(path, task_id):
         design = design_of(t)
         if design.get("status") in (DESIGN_PENDING, DESIGN_APPROVED):
             return None
-        t.setdefault("work", {})["design"] = {"status": DESIGN_PENDING, "text": text, "round": int(design.get("round") or 0) + 1,
-                                              "by": "designer", "at": now_iso()}
+        round_no, at = int(design.get("round") or 0) + 1, now_iso()
+        entry = {"type": "proposal", "round": round_no, "at": at, "by": "designer", "text": text,
+                 **({"mockup": mockup} if mockup else {})}
+        t.setdefault("work", {})["design"] = {"status": DESIGN_PENDING, "text": text, "round": round_no, "by": "designer", "at": at,
+                                              **({"mockup": mockup} if mockup else {}),
+                                              "history": (design_history(design) + [entry])[-DESIGN_HISTORY_LIMIT:]}
         add_note(t, "Design proposal ready: approve it or ask for changes before the implementation starts.", "designer")
         return t
     return ("pending", text) if mutate(path, record) else ("stale", "The task moved on while the design was made.")
@@ -1673,10 +1983,16 @@ def set_design(path, task_id, approve, feedback=""):
         if approve:
             if design.get("status") != DESIGN_PENDING:
                 raise KanvasError(f"{t['id']} has no design proposal to approve")
-            t["work"]["design"] = {**design, "status": DESIGN_APPROVED, "by": "human", "at": now_iso(), "feedback": ""}
+            at = now_iso()
+            t["work"]["design"] = {**design, "status": DESIGN_APPROVED, "by": "human", "at": at, "feedback": "",
+                                   "history": design_history(design) + [{"type": "approved", "round": int(design.get("round") or 1),
+                                                                         "at": at, "by": "human"}]}
             add_note(t, "Design approved.", "human")
         else:
-            t["work"]["design"] = {**design, "status": DESIGN_CHANGES, "feedback": feedback, "at": now_iso()}
+            at = now_iso()
+            t["work"]["design"] = {**design, "status": DESIGN_CHANGES, "feedback": feedback, "at": at,
+                                   "history": design_history(design) + [{"type": "feedback", "round": int(design.get("round") or 1),
+                                                                         "at": at, "by": "human", "text": feedback}]}
             add_note(t, f"Design changes requested: {feedback}" if feedback else "Design requested again.", "human")
         return t
     return mutate(path, op)
@@ -2267,6 +2583,13 @@ def cmd_design(args):
     else:
         design = design_of(task)
         print(f"{task['id']}: design {design.get('status') or 'not made yet'}" + (f"\n\n{design['text']}" if design.get("text") else ""))
+
+
+def cmd_stop(args):
+    path = board_path(args)
+    task = find_task(load_board(path), args.id)
+    request_stop(path, task["id"])
+    print(f"Asked the agent on {task['id']} to stop; it ends within a few seconds")
 
 
 def cmd_review(args):
@@ -3165,10 +3488,15 @@ class AutomationDispatcher:
                         print(f"Automation skipped {path}: {e}", file=sys.stderr, flush=True)
 
     def scan(self, path):
+        cleaned = self.__dict__.setdefault("cleaned", set())
+        if path not in cleaned:
+            cleaned.add(path)
+            clear_busy_marks(path)
         board = load_board(path)
         config = automation_config(board, path)
         if config is None:
             return
+        self._settle_orphan_stops(path, board)
         for task in list(board["tasks"]):
             work = task.get("work") if isinstance(task.get("work"), dict) else {}
             run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
@@ -3248,6 +3576,29 @@ class AutomationDispatcher:
                         self.active.discard(key)
 
             threading.Thread(target=execute, name=f"kanvas-{task['id']}", daemon=True).start()
+
+    def _settle_orphan_stops(self, path, board):
+        """A stop asked for a run this Kanvas is not running (it restarted since) has nobody to answer it: the run is over."""
+        for task in board["tasks"]:
+            work = task.get("work") if isinstance(task.get("work"), dict) else {}
+            if not work.get("stop"):
+                continue
+            key = (os.path.normcase(os.path.abspath(path)), task["id"].upper())
+            with self.lock:
+                if key in self.active or ("review",) + key in self.active or ("design",) + key in self.active:
+                    continue
+
+            def settle(fresh, tid=task["id"]):
+                t = find_task(fresh, tid)
+                w = t.get("work") if isinstance(t.get("work"), dict) else {}
+                w.pop("stop", None)
+                w.pop("busy", None)
+                run = w.get("automation") if isinstance(w.get("automation"), dict) else {}
+                if run.get("status") in ("queued", "running"):
+                    w["automation"] = {**run, "status": "failed", "updated": now_iso(),
+                                       "summary": "Stopped by you; it was not running any more."}
+                    add_note(t, "Automation failed: stopped by you; it was not running any more.", "kanvas-runner")
+            mutate(path, settle)
 
     def _start_design(self, path, task_id):
         """Has the designer propose the UI/UX of a task that is about to start, unless it is already doing so."""
@@ -3869,6 +4220,19 @@ class BoardHandler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"files": files}).encode("utf-8"))
         if len(rest) >= 3 and rest[0] == "evidence":
             return self._evidence(path, rest[1], rest[2:])
+        if len(rest) == 3 and rest[:2] == ["api", "design"]:
+            try:
+                design = design_of(find_task(load_board(path), rest[2]))
+                wanted = parse_qs(urlparse(self.path).query).get("round", [""])[0]
+                mockup = design.get("mockup")
+                if wanted.isdigit():
+                    mockup = next((x.get("mockup") for x in design_history(design)
+                                   if x.get("type") == "proposal" and x.get("round") == int(wanted)), None)
+            except KanvasError:
+                mockup = None
+            if not isinstance(mockup, str) or not mockup:
+                return self._error(404, "Not found")
+            return self._send(200, mockup.encode("utf-8"), "text/html; charset=utf-8", MOCKUP_HEADERS)
         if len(rest) == 3 and rest[:2] == ["api", "assist"]:
             job = self.server.assist_status(name, rest[2])
             if job is None:
@@ -4488,6 +4852,13 @@ def build_parser():
     p.add_argument("-m", "--message", help="optional note on why")
     text_sources(p, "note")
     p = add("retry", cmd_retry, "retry failed automation in its existing isolated worktree")
+    p.add_argument("id")
+    p = add("shots", cmd_shots, "screenshot a page at phone, iPad and desktop size and keep them as the task's evidence")
+    p.add_argument("target", help="an HTML file or the URL of a running app")
+    p.add_argument("--task", metavar="ID", help="the task the screenshots belong to (default: $KANVAS_TASK)")
+    p.add_argument("--out", metavar="DIR", help="save them here instead of in the task's evidence folder")
+    p.add_argument("--wait", type=float, default=4, metavar="SECONDS", help="how long the page may run before the shot (default: %(default)s)")
+    p = add("stop", cmd_stop, "stop the agent that is working on a task (a stuck run), so it spends no more tokens")
     p.add_argument("id")
     p = add("design", cmd_design, "show, approve or ask for changes to the UI/UX design a front task needs before it is built")
     p.add_argument("id")

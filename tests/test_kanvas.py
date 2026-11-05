@@ -1424,7 +1424,7 @@ class AutomationTests(TempBoard):
         publish = mock.Mock(side_effect=publish_error, return_value=pulls or [])
         with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=self.fake_worktrees(repo)), \
              mock.patch.object(kanvas, "publish_pull_requests", publish), mock.patch.object(kanvas, "save_changes"), \
-             mock.patch.object(kanvas.subprocess, "run", side_effect=completed) as run:
+             mock.patch.object(kanvas, "agent_run", side_effect=completed) as run:
             kanvas.run_automation(self.path, "DV-02")
         return run, publish
 
@@ -1496,9 +1496,159 @@ class AutomationTests(TempBoard):
         self.assertNotIn("Edit", roles["reviewer"]["allowed_tools"])
         _, config = self.roles_of(agents={"complex": {"model": "fable"}, "docs": {"model": "haiku", "effort": "low", "max_turns": 5}})
         roles = config["agents"]
-        self.assertEqual(roles["complex"], {"model": "fable", "effort": "high"})
+        self.assertEqual(roles["complex"], {"model": "fable", "effort": "high", "timeout_minutes": 60, "max_budget_usd": 5})
         self.assertEqual(roles["docs"], {"model": "haiku", "effort": "low", "max_turns": 5})
-        self.assertEqual(roles["implementer"], {"model": "sonnet", "effort": "medium"})
+        self.assertEqual(roles["implementer"], {"model": "sonnet", "effort": "medium", "timeout_minutes": 40, "max_budget_usd": 2})
+        for name, role in roles.items():
+            if name in kanvas.DEFAULT_AGENTS:
+                self.assertTrue(role["timeout_minutes"] and role["max_budget_usd"], name)
+
+    def run_process(self, code, **kwargs):
+        """kanvas.agent_run over a real Python process standing in for Claude Code."""
+        log = os.path.join(self.dir, "agent.jsonl")
+        started = time.monotonic()
+        with open(log, "w", encoding="utf-8") as output:
+            proc = kanvas.agent_run([sys.executable, "-u", "-c", code], input="prompt", stdout=output, cwd=self.dir,
+                                    env=dict(os.environ), **kwargs)
+        return proc, time.monotonic() - started, log
+
+    def test_a_run_that_ends_by_itself_is_left_alone(self):
+        proc, _, log = self.run_process("import sys; print('got', sys.stdin.read())", limits={"timeout": 30, "idle": 30})
+        self.assertEqual((proc.returncode, proc.stopped), (0, None))
+        self.assertEqual(kanvas.stop_text(proc), "")
+        with open(log, encoding="utf-8") as f:
+            self.assertIn("got prompt", f.read())
+
+    def png_size(self, path):
+        with open(path, "rb") as f:
+            head = f.read(24)
+        self.assertEqual(head[:8], b"\x89PNG\r\n\x1a\n")
+        return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+    def test_shots_keep_the_page_at_phone_ipad_and_desktop_size_as_evidence(self):
+        browser = kanvas.find_browser()
+        if not browser:
+            self.skipTest("No Chrome, Chromium or Edge to take the screenshots")
+        page = os.path.join(self.dir, "page.html")
+        with open(page, "w", encoding="utf-8") as f:
+            f.write("<!doctype html><html><body style='margin:0'><h1 style='background:#0b5fff;color:#fff'>Hi</h1></body></html>")
+        _, out, _ = self.run_cli("shots", page, "--task", "DV-02", env={"KANVAS_BROWSER": browser})
+        folder = os.path.join(self.dir, ".kanvas", "evidence", "DV-02", "final")
+        self.assertEqual(len(out.split()), 3)
+        self.assertEqual([self.png_size(os.path.join(folder, f"design-{n}.png")) for n in ("mobile", "ipad", "web")],
+                         [(390, 844), (820, 1180), (1280, 800)])
+        self.assertEqual([f["path"] for f in kanvas.evidence_files(os.path.join(self.dir, ".kanvas", "evidence", "DV-02"))],
+                         ["final/design-ipad.png", "final/design-mobile.png", "final/design-web.png"])
+
+    def test_shots_refuse_what_they_cannot_screenshot(self):
+        self.assertIn("is not a file or a URL", self.fails("shots", os.path.join(self.dir, "nope.html"), "--task", "DV-02",
+                                                           env={"KANVAS_BROWSER": sys.executable}))
+        self.assertIn("No browser", self.fails("shots", "x.html", "--task", "DV-02", env={"KANVAS_BROWSER": os.path.join(self.dir, "none")}))
+        self.assertIn("not found", self.fails("shots", "x.html", "--task", "NOPE-1"))
+
+    def test_the_implementer_is_told_to_look_at_what_it_built_when_a_design_was_approved(self):
+        def prompt_for(**design):
+            board = self.designing_board(**design)
+            config = kanvas.automation_config(board, self.path)
+            repo = config["repositories"]["front"]["path"]
+            return kanvas.automation_prompt(board, kanvas.find_task(board, "DV-02"), config, self.fake_worktrees(repo))
+
+        approved = prompt_for(status="approved", text="Chips on top")
+        self.assertIn("shots <the html file", approved)
+        self.assertIn("--task DV-02", approved)
+        self.assertIn(self.path, approved)
+        self.assertNotIn("shots <the html file", prompt_for(status="pending", text="Chips on top"))
+
+    def test_a_run_that_writes_nothing_is_stopped_so_it_spends_no_more(self):
+        proc, took, _ = self.run_process("import time; time.sleep(60)", limits={"timeout": 60, "idle": 2})
+        self.assertIn("wrote nothing", proc.stopped)
+        self.assertLess(took, 20)
+        self.assertIn("Stopped by Kanvas because it wrote nothing", kanvas.stop_text(proc))
+
+    def test_a_run_that_lasts_too_long_is_stopped_even_if_it_keeps_writing(self):
+        code = "import time\nwhile True:\n    print('x'); time.sleep(0.2)"
+        proc, took, _ = self.run_process(code, limits={"timeout": 2, "idle": 60})
+        self.assertIn("ran for more than", proc.stopped)
+        self.assertLess(took, 20)
+
+    def test_a_run_is_stopped_when_the_human_asks(self):
+        asked = []
+        proc, took, _ = self.run_process("import time; time.sleep(60)", limits={"timeout": 60, "idle": 60},
+                                         stop=lambda: asked.append(1) or len(asked) > 1)
+        self.assertEqual(proc.stopped, "stopped")
+        self.assertEqual(kanvas.stop_text(proc), "Stopped by you.")
+        self.assertLess(took, 20)
+
+    def test_the_limits_come_from_the_role_then_the_board_then_the_defaults(self):
+        config = {"timeout_minutes": 20, "idle_minutes": 5}
+        self.assertEqual(kanvas.agent_limits(config, {"timeout_minutes": 7}), {"timeout": 420, "idle": 300})
+        self.assertEqual(kanvas.agent_limits(config, None), {"timeout": 1200, "idle": 300})
+        self.assertEqual(kanvas.agent_limits({}, {}), {"timeout": 40 * 60, "idle": 10 * 60})
+        _, config = self.roles_of(timeout_minutes=12, idle_minutes=3)
+        self.assertEqual((config["timeout_minutes"], config["idle_minutes"]), (12, 3))
+        for bad in ({"timeout_minutes": 0}, {"idle_minutes": "soon"}):
+            with self.assertRaises(kanvas.KanvasError):
+                self.roles_of(**bad)
+
+    def test_stopping_a_task_needs_an_agent_working_on_it(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        write_board(self.path, self.automated_board(repo))
+        self.assertIn("No agent is working on DV-02", self.fails("stop", "DV-02"))
+        board = self.board()
+        kanvas.find_task(board, "DV-02")["work"]["automation"] = {"status": "running", "updated": kanvas.now_iso()}
+        write_board(self.path, board)
+        _, out, _ = self.run_cli("stop", "DV-02")
+        self.assertIn("to stop", out)
+        self.assertTrue(kanvas.stop_requested(self.path, "DV-02"))
+        kanvas.clear_stop(self.path, "DV-02")
+        self.assertFalse(kanvas.stop_requested(self.path, "DV-02"))
+
+    def test_a_stopped_implementer_run_fails_with_the_reason_and_can_be_retried(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        write_board(self.path, self.automated_board(repo))
+        stopped = mock.Mock(returncode=1, stopped="stopped")
+
+        def fake(command, **kwargs):
+            kwargs["stdout"].write("")
+            return stopped
+
+        with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=self.fake_worktrees(repo)),              mock.patch.object(kanvas, "publish_pull_requests") as publish, mock.patch.object(kanvas, "agent_run", side_effect=fake):
+            kanvas.run_automation(self.path, "DV-02")
+        run = self.get("DV-02")["work"]["automation"]
+        self.assertEqual(run["status"], "failed")
+        self.assertIn("Stopped by you.", run["summary"])
+        self.assertIn("retry DV-02", run["summary"])
+        publish.assert_not_called()
+        self.assertEqual(self.get("DV-02")["state"], "doing")
+
+    def test_a_stopped_review_leaves_a_note_and_the_task_for_the_human(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        stopped = mock.Mock(returncode=1, stopped="it wrote nothing for more than 10 minutes")
+        write_board(self.path, self.review_board(repo))
+
+        def fake(command, **kwargs):
+            return stopped
+
+        with mock.patch.object(kanvas, "review_diff", return_value=("", "", "")), mock.patch.object(kanvas, "agent_run", side_effect=fake):
+            outcome, text = kanvas.run_review(self.path, "DV-02")
+        self.assertEqual(outcome, "failed")
+        self.assertIn("Stopped by Kanvas because it wrote nothing", self.get("DV-02")["notes"][-1]["text"])
+        self.assertEqual(self.get("DV-02")["state"], "review")
+
+    def test_a_stop_asked_to_a_run_that_no_longer_exists_is_settled_by_the_dispatcher(self):
+        board = self.designing_board()
+        board["automation"]["design"] = False
+        task = kanvas.find_task(board, "DV-02")
+        task["work"]["automation"] = {"status": "running", "updated": kanvas.now_iso()}
+        task["work"]["stop"] = {"at": kanvas.now_iso()}
+        self.assertEqual(self.scan_designing(board), [])
+        work = self.get("DV-02")["work"]
+        self.assertNotIn("stop", work)
+        self.assertEqual(work["automation"]["status"], "failed")
+        self.assertIn("Stopped by you", work["automation"]["summary"])
 
     def test_invalid_agent_roles_and_lean_flag_are_refused(self):
         for bad in ([], {"x": "opus"}, {"x": {"model": 3}}, {"x": {"effort": "huge"}}, {"x": {"max_turns": 0}},
@@ -1615,7 +1765,7 @@ class AutomationTests(TempBoard):
             return mock.Mock(returncode=0)
 
         with mock.patch.object(kanvas, "review_diff", return_value=("abc feat: export", " a.ts | 2 +-", "+export()")), \
-             mock.patch.object(kanvas.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(kanvas, "agent_run", side_effect=fake_run), \
              mock.patch.object(kanvas, "_gh", side_effect=lambda path, *a: self.comments.append(a) or ""):
             return kanvas.run_review(self.path, task_id, force)
 
@@ -1641,6 +1791,18 @@ class AutomationTests(TempBoard):
         self.assertEqual(len(self.comments), 1)
         self.assertEqual(self.comments[0][:3], ("pr", "comment", "https://github.com/acme/front/pull/7"))
         self.assertIn("**Approved.** Meets the criteria", self.comments[0][4])
+        self.assertNotIn("approved before the work started", call["prompt"])
+
+    def test_the_reviewer_is_told_what_design_the_human_approved(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.review_board(repo)
+        kanvas.find_task(board, "DV-02")["work"]["design"] = {"status": "approved", "text": "Plain English, no new i18n keys"}
+        self.run_reviewers(board, [{"verdict": "approve", "summary": "ok", "findings": []}])
+        prompt = self.review_calls[0]["prompt"]
+        self.assertIn("approved before the work started", prompt)
+        self.assertIn("Plain English, no new i18n keys", prompt)
+        self.assertIn("never ask for something it rules out", prompt)
         self.assertIn("ready for your review", self.comments[0][4])
 
     def test_the_reviewer_sends_the_work_back_with_its_findings(self):
@@ -1987,7 +2149,67 @@ class AutomationTests(TempBoard):
                      "result": reply}
             kwargs["stdout"].write(json.dumps(event) + "\n")
             return mock.Mock(returncode=returncode)
-        return mock.patch.object(kanvas.subprocess, "run", side_effect=fake_run)
+        return mock.patch.object(kanvas, "agent_run", side_effect=fake_run)
+
+    def test_the_board_marks_a_task_while_the_designer_works_on_it_and_clears_the_mark(self):
+        write_board(self.path, self.designing_board())
+        seen = []
+
+        def fake_run(command, **kwargs):
+            seen.append((self.get("DV-02")["work"] or {}).get("busy"))
+            event = {"type": "result", "subtype": "success", "is_error": False, "result": "## Goal\nx"}
+            kwargs["stdout"].write(json.dumps(event) + "\n")
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(kanvas, "agent_run", side_effect=fake_run):
+            kanvas.run_design(self.path, "DV-02")
+        self.assertEqual(seen[0]["by"], "designer")
+        self.assertTrue(seen[0]["at"])
+        self.assertNotIn("busy", self.get("DV-02")["work"])
+        with self.fake_designer("", returncode=1):
+            kanvas.run_design(self.path, "DV-02")
+        self.assertNotIn("busy", self.get("DV-02")["work"])
+
+    def test_the_board_marks_a_task_while_the_reviewer_works_on_it_and_clears_the_mark(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        marks = []
+        original = kanvas._run_review
+        with mock.patch.object(kanvas, "_run_review", side_effect=lambda *a, **k: marks.append(self.get("DV-02")["work"].get("busy")) or original(*a, **k)):
+            self.run_reviewers(self.review_board(repo), [{"verdict": "approve", "summary": "ok", "findings": []}])
+        self.assertEqual(marks[0]["by"], "reviewer")
+        self.assertNotIn("busy", self.get("DV-02")["work"])
+
+    def test_marks_a_crash_left_behind_are_cleared_when_the_dispatcher_starts(self):
+        board = self.designing_board()
+        board["automation"]["design"] = False
+        kanvas.find_task(board, "DV-02")["work"]["busy"] = {"by": "reviewer", "at": kanvas.now_iso()}
+        self.scan_designing(board)
+        self.assertNotIn("busy", self.get("DV-02")["work"])
+
+    def test_the_conversation_about_a_design_is_kept_as_a_history_of_rounds(self):
+        page = lambda word: f"<!doctype html><html><body><p>{word}</p></body></html>"
+        write_board(self.path, self.designing_board())
+        with self.fake_designer(f"## v1\n\n```html\n{page('first')}\n```"):
+            kanvas.run_design(self.path, "DV-02")
+        kanvas.set_design(self.path, "DV-02", False, "use tabs instead")
+        with self.fake_designer(f"## v2\n\n```html\n{page('second')}\n```"):
+            kanvas.run_design(self.path, "DV-02")
+        kanvas.set_design(self.path, "DV-02", True)
+        design = self.get("DV-02")["work"]["design"]
+        self.assertEqual([(x["type"], x["round"]) for x in design["history"]],
+                         [("proposal", 1), ("feedback", 1), ("proposal", 2), ("approved", 2)])
+        self.assertEqual(design["history"][1]["text"], "use tabs instead")
+        self.assertEqual((design["history"][0]["mockup"], design["history"][2]["mockup"]), (page("first"), page("second")))
+        self.assertEqual((design["text"], design["mockup"]), ("## v2", page("second")))
+        self.assertTrue(all(x["at"] and x["by"] for x in design["history"]))
+
+    def test_a_design_made_before_the_history_existed_starts_it_from_its_current_proposal(self):
+        write_board(self.path, self.designing_board(status="pending", text="old words", round=3, by="designer", at="2026-11-05T10:00:00Z"))
+        kanvas.set_design(self.path, "DV-02", False, "more air")
+        history = self.get("DV-02")["work"]["design"]["history"]
+        self.assertEqual([(x["type"], x["round"]) for x in history], [("proposal", 3), ("feedback", 3)])
+        self.assertEqual(history[0]["text"], "old words")
 
     def test_the_designer_proposes_and_the_human_approves_or_asks_for_changes(self):
         write_board(self.path, self.designing_board())
@@ -2014,6 +2236,31 @@ class AutomationTests(TempBoard):
         self.assertEqual(self.get("DV-02")["work"]["design"]["status"], "approved")
         with self.assertRaises(kanvas.KanvasError):
             kanvas.set_design(self.path, "DV-02", True)
+
+    def test_the_mockup_is_taken_from_the_end_of_the_designers_reply(self):
+        page = "<!doctype html><html><body><div class=chip>All</div></body></html>"
+        prose, mockup = kanvas.split_design_reply(f"## Goal\nA filter\n\n```html\n{page}\n```")
+        self.assertEqual((prose, mockup), ("## Goal\nA filter", page))
+        self.assertEqual(kanvas.split_design_reply("## Goal\nOnly words"), ("## Goal\nOnly words", ""))
+        self.assertEqual(kanvas.split_design_reply("text\n```html\nnot a page at all\n```")[1], "")
+        self.assertEqual(kanvas.split_design_reply("```html\n<div>" + "x" * kanvas.MOCKUP_LIMIT + "</div>\n```")[1], "")
+        self.assertIn("one fenced ```html block", kanvas.design_prompt(
+            kanvas.find_task(self.designing_board(), "DV-02"), kanvas.automation_config(self.designing_board(), self.path), "", ""))
+
+    def test_the_designers_mockup_is_kept_served_sandboxed_and_given_to_the_implementer(self):
+        page = "<!doctype html><html><body><div class=chip>All</div><script>1</script></body></html>"
+        write_board(self.path, self.designing_board())
+        with self.fake_designer(f"## Goal\nA filter\n\n```html\n{page}\n```"):
+            kanvas.run_design(self.path, "DV-02")
+        design = self.get("DV-02")["work"]["design"]
+        self.assertEqual((design["mockup"], design["text"]), (page, "## Goal\nA filter"))
+        kanvas.set_design(self.path, "DV-02", True)
+        board = kanvas.load_board(self.path)
+        config = kanvas.automation_config(board, self.path)
+        repo = config["repositories"]["front"]["path"]
+        prompt = kanvas.automation_prompt(board, kanvas.find_task(board, "DV-02"), config, self.fake_worktrees(repo))
+        self.assertIn(page, prompt)
+        self.assertIn("exact look the human accepted", prompt)
 
     def test_the_implementer_is_told_to_build_the_approved_design(self):
         def prompt_for(**design):
@@ -2348,7 +2595,7 @@ class AutomationTests(TempBoard):
         publish = mock.Mock(return_value=[pull])
         with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=self.fake_worktrees(repo)), \
              mock.patch.object(kanvas, "publish_pull_requests", publish), mock.patch.object(kanvas, "save_changes"), \
-             mock.patch.object(kanvas.subprocess, "run", side_effect=completed) as claude:
+             mock.patch.object(kanvas, "agent_run", side_effect=completed) as claude:
             kanvas.run_automation(self.path, "DV-02")
         prompt = claude.call_args.kwargs["input"]
         self.assertIn("This is round 2", prompt)
@@ -3281,6 +3528,33 @@ class ServerTests(TempBoard):
         if etag:
             headers["If-Match"] = etag
         return self.request("PUT", self.api, json.dumps(board).encode("utf-8"), headers)
+
+    def test_the_mockup_of_a_design_is_served_with_a_policy_that_gives_it_no_origin_and_no_network(self):
+        page = "<!doctype html><html><body><p id=x>hi</p><script>document.getElementById('x')</script></body></html>"
+        board = self.board()
+        kanvas.find_task(board, "DV-02")["work"] = {"design": {"status": "pending", "text": "words", "mockup": page}}
+        kanvas.find_task(board, "DV-03")["work"] = {"design": {"status": "pending", "text": "words only"}}
+        write_board(self.path, board)
+        status, headers, body = self.request("GET", f"/{self.name}/api/design/DV-02")
+        self.assertEqual((status, body.decode("utf-8")), (200, page))
+        self.assertTrue(headers["Content-Type"].startswith("text/html"))
+        policy = headers["Content-Security-Policy"]
+        for part in ("sandbox allow-scripts", "default-src 'none'", "img-src data:"):
+            self.assertIn(part, policy)
+        self.assertNotIn("allow-same-origin", policy)
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(self.request("GET", f"/{self.name}/api/design/DV-03")[0], 404)
+        older = "<!doctype html><html><body>older</body></html>"
+        board = self.board()
+        kanvas.find_task(board, "DV-02")["work"]["design"].update(round=2, history=[
+            {"type": "proposal", "round": 1, "at": "t", "by": "designer", "text": "v1", "mockup": older},
+            {"type": "proposal", "round": 2, "at": "t", "by": "designer", "text": "v2", "mockup": page}])
+        write_board(self.path, board)
+        self.assertEqual(self.request("GET", f"/{self.name}/api/design/DV-02?round=1")[2].decode("utf-8"), older)
+        self.assertEqual(self.request("GET", f"/{self.name}/api/design/DV-02?round=2")[2].decode("utf-8"), page)
+        self.assertEqual(self.request("GET", f"/{self.name}/api/design/DV-02")[2].decode("utf-8"), page)
+        self.assertEqual(self.request("GET", f"/{self.name}/api/design/DV-02?round=9")[0], 404)
+        self.assertEqual(self.request("GET", f"/{self.name}/api/design/NOPE-1")[0], 404)
 
     def test_starting_skips_the_host_name_lookup(self):
         """socket.getfqdn, which HTTPServer calls on start, can take half a minute on macOS."""

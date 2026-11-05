@@ -382,6 +382,67 @@ button.add-line:hover { color: var(--text); }
 .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
 .md p, .md ul, .md ol, .md pre, .md blockquote { margin: 0 0 8px; }
 .design-text p { white-space: pre-wrap; font-variant-ligatures: none; }
+.design-open { display: flex; gap: 12px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); cursor: pointer; margin-bottom: 8px; }
+.design-open:hover, .design-open:focus-visible { border-color: var(--accent); outline: none; }
+.design-card.waiting .design-open { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.design-thumb { flex: none; display: block; height: 150px; overflow: hidden; border-radius: 10px; pointer-events: none; }
+.design-thumb .device { margin: 0; }
+.design-cta { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.design-cta small { color: var(--muted); }
+.design-cta .icon { align-self: flex-start; }
+.design-spec { margin-bottom: 8px; }
+.design-spec summary { cursor: pointer; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+.busy-note { display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin: 0 0 10px; border-radius: 8px; color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.busy-text { flex: 1; min-width: 0; }
+.busy-note button { flex: none; }
+.busy-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); animation: busy-pulse 1.2s ease-in-out infinite; }
+@keyframes busy-pulse { 50% { opacity: .25; transform: scale(.7); } }
+.studio-side-head { font-weight: 700; margin-bottom: 12px; }
+.studio-empty { color: var(--muted); }
+.studio-answer { display: flex; gap: 8px; }
+.tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.tl-item { display: flex; gap: 10px; position: relative; padding-bottom: 14px; }
+.tl-item:not(:last-child)::before { content: ""; position: absolute; left: 5px; top: 16px; bottom: 0; width: 2px; background: var(--border); }
+.tl-dot { flex: none; width: 12px; height: 12px; margin-top: 3px; border-radius: 50%; background: var(--accent); }
+.tl-item.human .tl-dot { background: #ff8a3d; }
+.tl-item.done .tl-dot { background: #3fcf78; }
+.tl-item.wait .tl-dot { background: transparent; border: 2px solid var(--accent); box-sizing: border-box; }
+.tl-body { min-width: 0; flex: 1; }
+.tl-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.tl-head small { color: var(--muted); white-space: nowrap; }
+.tl-sub { color: var(--muted); font-size: 12px; margin: 2px 0 4px; }
+.tl-item.on .tl-head b { color: var(--accent); }
+.tl blockquote { margin: 6px 0 0; padding: 6px 10px; border-left: 3px solid var(--border-strong); background: var(--surface-2); border-radius: 0 6px 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tl-spec { margin-top: 6px; }
+.tl-spec summary { cursor: pointer; color: var(--muted); }
+.tl.compact .tl-item { padding-bottom: 10px; }
+.studio { position: fixed; inset: 0; z-index: 70; display: flex; flex-direction: column; background: var(--bg); }
+.studio-bar { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.studio-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1 1 260px; }
+.studio-title b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-title small { color: var(--muted); white-space: nowrap; }
+.studio-actions { display: flex; gap: 8px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: transparent; padding: 6px 14px; }
+.seg button.on { background: var(--accent); color: var(--accent-text); }
+.studio-body { flex: 1; display: flex; min-height: 0; }
+.studio-canvas { flex: 1; min-width: 0; overflow: auto; display: flex; align-items: center; justify-content: center; gap: 40px; padding: 24px 32px;
+  background-color: var(--bg); background-image: radial-gradient(var(--border) 1px, transparent 1px); background-size: 18px 18px; }
+.studio-side { flex: none; width: min(380px, 40vw); overflow: auto; padding: 16px; background: var(--surface); border-left: 1px solid var(--border); }
+.device { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; flex: none; }
+.device figcaption { font-size: 12px; color: var(--muted); }
+.device-fit { position: relative; }
+.device-frame { box-sizing: border-box; display: flex; flex-direction: column; transform-origin: 0 0; background: #111; box-shadow: 0 24px 60px rgb(0 0 0 / .28); overflow: hidden; }
+.device-frame iframe { flex: none; display: block; border: 0; background: #fff; }
+.device-frame.phone { border-radius: 46px; }
+.device-frame.phone iframe { border-radius: 34px; }
+.device-frame.tablet { border-radius: 30px; }
+.device-frame.tablet iframe { border-radius: 18px; }
+.device-frame.web { border-radius: 12px; background: #e6e8ee; }
+.web-bar { flex: none; height: 34px; display: flex; align-items: center; gap: 7px; padding: 0 14px; background: #d9dce4; }
+.web-bar i { width: 11px; height: 11px; border-radius: 50%; background: #aab0bd; }
+.web-bar span { margin-left: 14px; flex: 1; max-width: 420px; padding: 3px 12px; border-radius: 6px; background: #f3f4f7; color: #5a6577; font-size: 12px; }
 .md ul, .md ol { padding-left: 20px; }
 .md li.task { list-style: none; margin-left: -18px; }
 .md .tick, .md .tick input { cursor: pointer; }
@@ -582,7 +643,7 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 .welcome-card .row { display: flex; gap: 8px; flex-wrap: wrap; }
 
 @media (prefers-reduced-motion: reduce) {
-  .yolo-tag, .yolo-chip, .edge.live, .live, :is(.card, .kcard)::before, :is(.card, .kcard)::after { animation: none !important; }
+  .yolo-tag, .yolo-chip, .busy-dot, .edge.live, .live, :is(.card, .kcard)::before, :is(.card, .kcard)::after { animation: none !important; }
   :is(.card, .kcard).s-doing::before { content: none; }
   :is(.card, .kcard).s-doing:not(.asking) { border-color: var(--c); }
   #world.animate, .progress span { transition: none; }
@@ -2429,8 +2490,20 @@ const serveHint = (lead) => [lead, h("code", {}, "kanvas serve"), " in the proje
 function mustFind(b, id) {
   const t = b.tasks.find((x) => same(x.id, id));
   if (!t) throw new Error(`${id} no longer exists`);
+  const who = agentBusy(t);
+  if (who) throw new Error(`The ${who} is working on ${t.id}: you can look at it, but not change it until it finishes`);
   return t;
 }
+// An agent that is working on a task (designing it, implementing it, reviewing it) has it to itself: the human can look
+// at it and change nothing until it finishes. Marks older than the time a run can take are ignored, so a crash never locks a task.
+function agentBusy(t) {
+  const fresh = (iso, minutes) => !!iso && Date.now() - Date.parse(iso) < minutes * 60000;
+  const run = t.work?.automation;
+  if (["queued", "running"].includes(run?.status) && fresh(run.updated || run.started, 60)) return run.agent || "implementer";
+  const busy = t.work?.busy;
+  return busy?.by && fresh(busy.at, 30) ? busy.by : "";
+}
+
 // Times are taken when the change is made, so a save that replays it writes what the page showed.
 const addNote = (t, text, at) => t.notes.push({ at, by: "human", text });
 
@@ -2501,15 +2574,24 @@ const ops = {
     const t = mustFind(b, id), design = t.work?.design;
     if (t.state !== "doing" || !design || !["pending", "failed", "changes_requested"].includes(design.status)) throw new Error(`${t.id} has no design waiting for an answer`);
     if (approve && design.status !== "pending") throw new Error(`${t.id} has no design proposal to approve`);
-    t.work.design = approve ? { ...design, status: "approved", by: "human", at, feedback: "" } : { ...design, status: "changes_requested", feedback, at };
+    const history = [...designHistory(design), approve ? { type: "approved", round: design.round || 1, at, by: "human" }
+      : { type: "feedback", round: design.round || 1, at, by: "human", text: feedback }];
+    t.work.design = approve ? { ...design, status: "approved", by: "human", at, feedback: "", history } : { ...design, status: "changes_requested", feedback, at, history };
     addNote(t, approve ? "Design approved." : feedback ? `Design changes requested: ${feedback}` : "Design requested again.", at);
+  },
+  // The one thing a human may do to a task an agent is working on. The runner that owns the process sees the request and ends it.
+  stop: (id, at = nowIso()) => (b) => {
+    const t = b.tasks.find((x) => same(x.id, id));
+    if (!t) throw new Error(`${id} no longer exists`);
+    if (!agentBusy(t)) throw new Error(`No agent is working on ${t.id}`);
+    (t.work ||= {}).stop = { at };
   },
   manualReview: (id, summary, at = nowIso()) => (b) => {
     const t = mustFind(b, id);
     if (t.state !== "review") throw new Error(`${t.id} is no longer in review`);
     const review = t.review ||= {};
-    review.manual = { status: "approved", by: "human", at, summary };
-    addNote(t, `Manual review approved: ${summary}`, at);
+    review.manual = { status: "approved", by: "human", at, ...(summary ? { summary } : {}) };
+    addNote(t, summary ? `Manual review approved: ${summary}` : "Manual review approved.", at);
   },
   mergeDev: (id, evidence, at = nowIso()) => (b) => {
     const t = mustFind(b, id), review = t.review || {};
@@ -3882,6 +3964,126 @@ async function startWorkDialog(t) {
   undoable(ops.startWork(t.id, plan), `Started ${t.id} with a technical plan`, { onFail: () => startWorkDialog(t) });
 }
 
+// The conversation about a design, oldest first: each proposal of the designer, each answer of the human and the approval.
+// A design made before the history existed starts from its current proposal.
+function designHistory(design) {
+  if (design.history?.length) return design.history;
+  return design.text ? [{ type: "proposal", round: design.round || 1, at: design.at || "", by: design.by || "designer", text: design.text, mockup: design.mockup }] : [];
+}
+
+// The history as a timeline. A proposal that answers a comment says so, a comment says which version it answers, and the
+// last step says who has the ball. `onPick` lets the studio show an earlier version; `compact` leaves the spec out.
+function designTimeline(design, { current = null, onPick = null, compact = false } = {}) {
+  const items = designHistory(design), when = (x) => (x.at ? ago(x.at) : "");
+  const rows = items.map((x, i) => {
+    if (x.type === "feedback") {
+      return h("li", { class: "tl-item human" }, h("span", { class: "tl-dot" }), h("div", { class: "tl-body" },
+        h("div", { class: "tl-head" }, h("b", {}, `You · on v${x.round}`), h("small", {}, when(x))),
+        h("blockquote", {}, x.text || "Asked for the design again")));
+    }
+    if (x.type === "approved") {
+      return h("li", { class: "tl-item done" }, h("span", { class: "tl-dot" }), h("div", { class: "tl-body" },
+        h("div", { class: "tl-head" }, h("b", {}, `You approved v${x.round}`), h("small", {}, when(x)))));
+    }
+    const answers = i > 0 && items[i - 1].type === "feedback" ? items[i - 1].round : 0;
+    return h("li", { class: `tl-item proposal${x.round === current ? " on" : ""}` }, h("span", { class: "tl-dot" }), h("div", { class: "tl-body" },
+      h("div", { class: "tl-head" }, h("b", {}, `Designer · v${x.round}`), h("small", {}, when(x))),
+      answers ? h("div", { class: "tl-sub" }, `Answers your comment on v${answers}`) : null,
+      onPick && x.mockup ? h("button", { type: "button", class: "ghost", disabled: x.round === current, onclick: () => onPick(x.round) },
+        icon("eye"), x.round === current ? "Showing" : "Show this version") : null,
+      !compact && x.text ? h("details", { class: "tl-spec" }, h("summary", {}, "Spec"),
+        h("div", { class: "md design-text" }, ...x.text.split(/\n{2,}/).map((chunk) => h("p", {}, chunk)))) : null));
+  });
+  const last = items[items.length - 1];
+  if (design.status === "pending" && last?.type === "proposal") {
+    rows.push(h("li", { class: "tl-item wait" }, h("span", { class: "tl-dot" }), h("div", { class: "tl-body" }, h("b", {}, "Waiting for you"))));
+  } else if (design.status === "changes_requested" && last?.type === "feedback") {
+    rows.push(h("li", { class: "tl-item wait" }, h("span", { class: "tl-dot" }), h("div", { class: "tl-body" }, h("b", {}, `The designer is working on v${last.round + 1}…`))));
+  }
+  return h("ol", { class: `tl${compact ? " compact" : ""}` }, ...rows);
+}
+
+// The mockup is drawn by the browser in sandboxed frames at the size of a phone, an iPad and a desktop browser. The server
+// sends it with a policy that gives it no origin and no network, so its own script can only act on itself.
+const DEVICES = {
+  mobile: { label: "Mobile", note: "390 × 844", kind: "phone", w: 390, h: 844, pad: 12, top: 0 },
+  ipad: { label: "iPad", note: "820 × 1180, portrait", kind: "tablet", w: 820, h: 1180, pad: 14, top: 0 },
+  web: { label: "Web", note: "1280 × 800", kind: "web", w: 1280, h: 800, pad: 0, top: 34 },
+};
+const deviceSize = (d) => ({ w: d.w + 2 * d.pad, h: d.h + 2 * d.pad + d.top });
+function deviceFrame(id, round, key, scale, caption = true, built = "") {
+  const d = DEVICES[key], size = deviceSize(d);
+  const view = built
+    ? h("img", { src: built, alt: `What was built, ${d.label}`, style: `width:${d.w}px;height:${d.h}px;object-fit:cover;object-position:top` })
+    : h("iframe", { src: `api/design/${encodeURIComponent(id)}?round=${round}`, sandbox: "allow-scripts",
+      title: `Design mockup, ${d.label}`, style: `width:${d.w}px;height:${d.h}px` });
+  const bar = d.kind === "web" ? h("div", { class: "web-bar" }, h("i"), h("i"), h("i"), h("span", {}, "tacticalhub.app")) : null;
+  const frame = h("div", { class: `device-frame ${d.kind}`, style: `width:${size.w}px;height:${size.h}px;padding:${d.pad}px;transform:scale(${scale})` }, bar, view);
+  return h("figure", { class: "device" },
+    h("div", { class: "device-fit", style: `width:${Math.round(size.w * scale)}px;height:${Math.round(size.h * scale)}px` }, frame),
+    caption ? h("figcaption", {}, h("b", {}, d.label), ` ${d.note}`) : null);
+}
+
+// The design on its own full screen: the three devices side by side or one at a time, the timeline of the conversation in a
+// drawer, and the answer (approve, or ask for changes) right there. Any earlier version can be shown again.
+function openDesignStudio(t) {
+  const design = t.work.design, history = designHistory(design);
+  const proposals = history.filter((x) => x.type === "proposal"), latest = proposals.length ? proposals[proposals.length - 1].round : 1;
+  const waiting = design.status === "pending" && t.state === "doing" && !store.readOnly;
+  let view = "all", round = latest, source = "mockup", builtShots = {};
+  const canvas = h("div", { class: "studio-canvas" });
+  const side = h("aside", { class: "studio-side", hidden: history.length < 2 });
+  const sub = h("small", {});
+  const views = [["all", "All"], ["mobile", "Mobile"], ["ipad", "iPad"], ["web", "Web"]];
+  const seg = h("div", { class: "seg", role: "group", "aria-label": "Device" },
+    ...views.map(([key, label]) => h("button", { type: "button", "data-view": key, onclick: () => { view = key; draw(); } }, label)));
+  const sourceSeg = h("div", { class: "seg", role: "group", "aria-label": "Show", hidden: true },
+    ...[["mockup", "Design"], ["built", "Built"]].map(([key, label]) => h("button", { type: "button", "data-source": key, onclick: () => { source = key; draw(); } }, label)));
+  const answer = h("div", { class: "studio-answer" });
+  const root = h("div", { class: "studio", role: "dialog", "aria-label": `Design of ${t.id}` });
+  const pick = (r) => { round = r; draw(); };
+  const draw = () => {
+    const shown = proposals.find((x) => x.round === round);
+    sub.textContent = source === "built" ? "what was built" : `design · v${round}${round === latest ? "" : " (an earlier version)"}`;
+    sourceSeg.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.source === source));
+    answer.hidden = round !== latest;
+    side.replaceChildren(h("div", { class: "studio-side-head" }, "Timeline"), designTimeline(design, { current: round, onPick: pick }));
+    seg.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.view === view));
+    if (source !== "built" && !shown?.mockup) { canvas.replaceChildren(h("p", { class: "studio-empty" }, "This version has no mockup, only the spec in the timeline.")); return; }
+    const keys = view === "all" ? ["mobile", "ipad", "web"] : [view], gap = 40;
+    const sizes = keys.map((k) => deviceSize(DEVICES[k]));
+    const room = { w: canvas.clientWidth - 64 - gap * (keys.length - 1), h: canvas.clientHeight - 48 - 30 };
+    const scale = Math.max(0.1, Math.min(1, room.w / sizes.reduce((sum, x) => sum + x.w, 0), room.h / Math.max(...sizes.map((x) => x.h))));
+    canvas.replaceChildren(...keys.map((k) => deviceFrame(t.id, round, k, scale, true, source === "built" ? builtShots[k] || "" : "")));
+  };
+  const close = () => { root.remove(); window.removeEventListener("resize", draw); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+  answer.append(...[
+    waiting ? h("button", { type: "button", onclick: () => { close(); askDesignChanges(t); } }, icon("edit"), "Ask for changes") : null,
+    waiting ? h("button", { type: "button", class: "primary", onclick: () => { close(); undoable(ops.designReview(t.id, true, ""), `Design approved for ${t.id}`); } }, icon("check"), "Approve design") : null].filter(Boolean));
+  root.append(
+    h("header", { class: "studio-bar" },
+      h("div", { class: "studio-title" }, h("span", { class: "cid" }, t.id), h("b", {}, t.title), sub),
+      sourceSeg,
+      seg,
+      h("div", { class: "studio-actions" },
+        h("button", { type: "button", onclick: () => { side.hidden = !side.hidden; draw(); } }, icon("note"), "Timeline"),
+        answer,
+        h("button", { type: "button", class: "ghost", title: "Close (Esc)", "aria-label": "Close", onclick: close }, icon("x")))),
+    h("div", { class: "studio-body" }, canvas, side));
+  document.body.append(root);
+  window.addEventListener("resize", draw);
+  document.addEventListener("keydown", onKey, true);
+  requestAnimationFrame(draw);
+  fetch(`api/evidence/${encodeURIComponent(t.id)}`, { cache: "no-store" }).then((r) => (r.ok ? r.json() : { files: [] })).then((d) => {
+    for (const f of d.files || []) {
+      const m = /(?:^|\/)final\/design-(mobile|ipad|web)\.png$/.exec(f.path);
+      if (m) builtShots[m[1]] = `evidence/${encodeURIComponent(t.id)}/${f.path.split("/").map(encodeURIComponent).join("/")}`;
+    }
+    if (Object.keys(builtShots).length === 3) { sourceSeg.hidden = false; source = t.state === "doing" && design.status === "pending" ? "mockup" : "built"; draw(); }
+  }).catch(() => {});
+}
+
 async function askDesignChanges(t, text = "") {
   const data = await modal(`Design changes · ${t.id}`, [
     h("p", {}, "The designer proposes the design again with your feedback. Nothing is built until you approve it."),
@@ -3892,11 +4094,20 @@ async function askDesignChanges(t, text = "") {
   undoable(ops.designReview(t.id, false, feedback), `Asked for design changes on ${t.id}`, { onFail: () => askDesignChanges(t, feedback) });
 }
 
+async function stopAgent(t, who) {
+  const data = await modal(`Stop the ${who} · ${t.id}`, [
+    h("p", {}, "The agent ends within a few seconds, so it spends no more tokens. What it did so far stays in the worktree, and `retry` runs it again from there."),
+  ], { ok: "Stop it", danger: true });
+  if (!data) return;
+  commit(ops.stop(t.id), { onFail: () => stopAgent(t, who) });
+  toast(`Asked the ${who} on ${t.id} to stop`);
+}
+
 async function approveManualReview(t) {
   const data = await modal(`Manual review · ${t.id}`, [
     h("p", {}, "Confirm the product behaviour and acceptance criteria manually. This does not merge the pull request."),
-    h("label", { class: "field" }, "Evidence", h("textarea", { name: "summary", rows: 5, required: true,
-      placeholder: "What was exercised, on which environment/device, and what passed?" })),
+    h("label", { class: "field" }, "Comment (optional)", h("textarea", { name: "summary", rows: 3,
+      placeholder: "What you checked, if you want it on record" })),
   ], { ok: "Approve manual review" });
   if (!data) return;
   undoable(ops.manualReview(t.id, data.get("summary").trim()), `Manual review approved for ${t.id}`,
@@ -3925,6 +4136,7 @@ async function recordProduction(t) {
 
 // `asks` marks moves that open a dialog first.
 function stateMoves(t) {
+  if (agentBusy(t)) return [];
   const to = (state) => () => moveTo(t, state);
   switch (vstate(t)) {
     case "proposed": return [{ label: "PO/TL Grill me", icon: "check", run: () => approveDefinition(t), to: "todo", primary: true, asks: true },
@@ -4073,7 +4285,7 @@ function evidenceSection(id) {
 
 function fillPanel(panel, t) {
   showPanel(panel, true);
-  const vs = vstate(t), ro = !!store.readOnly;
+  const busyBy = agentBusy(t), vs = vstate(t), ro = !!store.readOnly || !!busyBy;
   const kids = dependents(t);
   const last = t.notes[t.notes.length - 1];
   // The block under the title shows the latest note of work under way or finished, and a proposal's open request for changes.
@@ -4161,15 +4373,25 @@ function fillPanel(panel, t) {
         /^https:\/\//.test(pr.url || "")
           ? h("a", { href: pr.url, target: "_blank", rel: "noopener" }, `${pr.name || pr.id} · ${pr.branch || ""}`)
           : `${pr.name || pr.id} · ${pr.branch || ""}`)))));
+  let designTop = null;
   if (t.work?.design) {
     const design = t.work.design, waiting = design.status === "pending";
     const label = { pending: "waiting for you", approved: "approved", changes_requested: "changes requested", failed: "failed" }[design.status] || design.status;
-    workflow.push(h("section", { class: "p-sec" },
+    const open = () => openDesignStudio(t);
+    const section = h("section", { class: `p-sec design-card${waiting ? " waiting" : ""}` },
       h("div", { class: "section-head" }, "UI/UX design", h("span", { class: "count" }, label)),
-      h("div", { class: "md design-text" }, design.text ? design.text.split(/\n{2,}/).map((chunk) => h("p", {}, chunk)) : h("p", {}, "No proposal yet.")),
+      design.mockup ? h("div", { class: "design-open", role: "button", tabindex: "0", title: "Open the design", onclick: open,
+        onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } } },
+        h("span", { class: "design-thumb" }, deviceFrame(t.id, design.round || 1, "mobile", 0.22, false)),
+        h("span", { class: "design-cta" }, h("b", {}, waiting ? "Review the design" : "Open the design"),
+          h("small", {}, "See it as it will look on mobile, iPad and web"), icon("eye"))) : null,
+      designHistory(design).length > 1 ? h("details", { class: "design-spec", open: true }, h("summary", {}, "Timeline"), designTimeline(design, { compact: true })) : null,
+      h("details", { class: "design-spec", open: !design.mockup }, h("summary", {}, "Spec"),
+        h("div", { class: "md design-text" }, design.text ? design.text.split(/\n{2,}/).map((chunk) => h("p", {}, chunk)) : h("p", {}, "No proposal yet."))),
       !ro && t.state === "doing" && ["pending", "failed"].includes(design.status) ? h("div", { class: "row-end" },
         h("button", { onclick: () => askDesignChanges(t) }, icon("edit"), design.status === "failed" ? "Try again" : "Ask for changes"),
-        waiting ? h("button", { class: "primary", onclick: () => undoable(ops.designReview(t.id, true, ""), `Design approved for ${t.id}`) }, icon("check"), "Approve design") : null) : null));
+        waiting ? h("button", { class: "primary", onclick: () => undoable(ops.designReview(t.id, true, ""), `Design approved for ${t.id}`) }, icon("check"), "Approve design") : null) : null);
+    if (waiting) designTop = section; else workflow.push(section);
   }
   if (t.review) {
     const agent = t.review.agent || { status: "pending" }, manual = t.review.manual || { status: "pending" };
@@ -4200,7 +4422,11 @@ function fillPanel(panel, t) {
   panel.replaceChildren(head,
     h("div", { class: "p-body" },
       title,
+      busyBy ? h("div", { class: "busy-note", role: "status" }, h("span", { class: "busy-dot" }),
+        h("span", { class: "busy-text" }, `The ${busyBy} is working on this task. You can look at it; nothing else until it finishes.`),
+        store.readOnly ? null : h("button", { type: "button", class: "danger", title: "Stop the agent so that it spends no more tokens", onclick: () => stopAgent(t, busyBy) }, "Stop")) : null,
       nowCard(t, vs, ro, top),
+      designTop,
       desc ? h("section", { class: "p-sec" },
         t.desc || ui.editingDesc ? h("div", { class: "section-head" }, "Description",
           checks.length ? [h("span", { class: "lane-bar", title: `${done} of ${checks.length} checked` }, h("i", { style: `width:${(100 * done) / checks.length}%` })), h("span", { class: "count" }, `${done}/${checks.length}`)] : null,
@@ -5200,7 +5426,7 @@ function filterMenu() {
 function cardMenu(t) {
   const open = { label: `Open ${t.id}`, icon: "open", run: () => select(t.id) };
   const copyId = { label: "Copy ID", icon: "copy", run: () => copy(t.id) };
-  if (store.readOnly) return [open, copyId];
+  if (store.readOnly || agentBusy(t)) return [open, copyId];
   const picked = multi.has(key(t.id));
   return [
     open,

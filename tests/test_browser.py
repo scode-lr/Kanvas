@@ -441,6 +441,128 @@ class BrowserSmokeTests(unittest.TestCase):
             kanvas.load_board(self.path), "BE-03")["work"]["design"]["status"] == "approved")
         self.assertEqual(self.page.logged(), [])
 
+    def test_the_design_timeline_shows_each_comment_and_the_proposal_that_answers_it(self):
+        def talked(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "doing"
+            task["work"] = {"by": "human", "plan": "Build it", "design": {
+                "status": "pending", "text": "v2 words", "by": "designer", "round": 2, "at": "2026-11-05T10:05:00Z", "history": [
+                    {"type": "proposal", "round": 1, "at": "2026-11-05T10:00:00Z", "by": "designer", "text": "v1 words"},
+                    {"type": "feedback", "round": 1, "at": "2026-11-05T10:02:00Z", "by": "human", "text": "make the chips bigger"},
+                    {"type": "proposal", "round": 2, "at": "2026-11-05T10:05:00Z", "by": "designer", "text": "v2 words"}]}}
+        kanvas.mutate(self.path, talked)
+        self.load("#BE-03")
+        self.until("the timeline", "!!document.querySelector('#panel .tl')")
+        text = self.page.js("document.querySelector('#panel .tl').textContent")
+        self.assertLess(text.index("v1"), text.index("make the chips bigger"))
+        self.assertLess(text.index("make the chips bigger"), text.index("Answers your comment on v1"))
+        self.assertIn("Waiting for you", text)
+        self.assertEqual(self.page.logged(), [])
+
+    def test_the_design_studio_shows_the_three_devices_and_the_answer_without_stray_text(self):
+        page = "<!doctype html><html><body><p>Mockup</p></body></html>"
+
+        def designed(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "doing"
+            task["work"] = {"by": "human", "plan": "Build it", "design": {
+                "status": "pending", "text": "words", "mockup": page, "by": "designer", "round": 1, "at": "2026-11-05T10:00:00Z"}}
+        kanvas.mutate(self.path, designed)
+        self.load("#BE-03")
+        self.until("the design card", "!!document.querySelector('#panel .design-open')")
+        self.page.js("document.querySelector('#panel .design-open').click()")
+        self.until("the studio", "document.querySelectorAll('.studio .device-frame').length === 3")
+        bar = self.page.js("document.querySelector('.studio-bar').textContent")
+        self.assertNotIn("null", bar)
+        self.assertIn("Approve design", bar)
+        self.assertIn("Ask for changes", bar)
+        self.assertEqual(self.page.js("[...document.querySelectorAll('.studio iframe')].map((f) => f.getAttribute('sandbox')).join()"),
+                         "allow-scripts,allow-scripts,allow-scripts")
+        self.page.js("[...document.querySelectorAll('.studio .seg button')].find((b) => b.textContent === 'iPad').click()")
+        self.until("one device", "document.querySelectorAll('.studio .device-frame').length === 1")
+        self.assertEqual(self.page.logged(), [])
+
+    def test_the_studio_shows_what_was_built_next_to_the_design(self):
+        png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+        folder = os.path.join(self.dir, "demo", ".kanvas", "evidence", "BE-03", "final")
+        os.makedirs(folder)
+        for name in ("mobile", "ipad", "web"):
+            with open(os.path.join(folder, f"design-{name}.png"), "wb") as f:
+                f.write(png)
+
+        def built(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "review"
+            task["work"] = {"by": "human", "plan": "Build it", "design": {
+                "status": "approved", "text": "words", "mockup": "<!doctype html><html><body>m</body></html>", "round": 1}}
+        kanvas.mutate(self.path, built)
+        self.load("#BE-03")
+        self.until("the design card", "!!document.querySelector('#panel .design-open')")
+        self.page.js("document.querySelector('#panel .design-open').click()")
+        self.until("what was built", "document.querySelectorAll('.studio .device-frame img').length === 3")
+        self.assertIn("what was built", self.page.js("document.querySelector('.studio-title').textContent"))
+        self.page.js("[...document.querySelectorAll('.studio [data-source]')].find((b) => b.dataset.source === 'mockup').click()")
+        self.until("the mockup again", "document.querySelectorAll('.studio .device-frame iframe').length === 3")
+        self.assertEqual(self.page.logged(), [])
+
+    def test_a_task_an_agent_is_working_on_can_only_be_looked_at(self):
+        def busy(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "doing"
+            task["work"] = {"by": "human", "plan": "Build it", "busy": {"by": "reviewer", "at": kanvas.now_iso()}}
+        kanvas.mutate(self.path, busy)
+        self.load("#BE-03")
+        self.until("the notice", "!!document.querySelector('#panel .busy-note')")
+        self.assertIn("reviewer is working", self.page.js("document.querySelector('#panel .busy-note').textContent"))
+        self.assertFalse(self.page.js("!!document.querySelector('#panel .note-form')"))
+        self.assertFalse(self.page.js("[...document.querySelectorAll('#panel button')].some((b) => /Send to review|Pause/.test(b.textContent))"))
+        before = kanvas.find_task(kanvas.load_board(self.path), "BE-03")["state"]
+        self.page.js("document.querySelector('[data-id=\"BE-03\"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 50 }))")
+        time.sleep(0.3)
+        self.assertEqual(kanvas.find_task(kanvas.load_board(self.path), "BE-03")["state"], before)
+
+    def test_the_one_thing_allowed_on_a_busy_task_is_asking_the_agent_to_stop(self):
+        def busy(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "doing"
+            task["work"] = {"by": "human", "plan": "Build it", "busy": {"by": "designer", "at": kanvas.now_iso()}}
+        kanvas.mutate(self.path, busy)
+        self.load("#BE-03")
+        self.until("the notice", "!!document.querySelector('#panel .busy-note button')")
+        self.page.js("document.querySelector('#panel .busy-note button').click()")
+        self.until("the dialog", "!!document.querySelector('dialog.dlg[open]')")
+        self.page.js("document.querySelector('dialog.dlg[open] button[value=ok]').click()")
+        self.wait_for("the stop request in kanvas.json", lambda: bool(kanvas.find_task(
+            kanvas.load_board(self.path), "BE-03")["work"].get("stop")))
+        self.assertEqual(self.page.logged(), [])
+
+    def test_an_old_mark_does_not_lock_a_task(self):
+        def stale(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "doing"
+            task["work"] = {"by": "human", "plan": "Build it", "busy": {"by": "reviewer", "at": "2026-01-01T00:00:00Z"}}
+        kanvas.mutate(self.path, stale)
+        self.load("#BE-03")
+        self.until("the panel", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")
+        self.assertFalse(self.page.js("!!document.querySelector('#panel .busy-note')"))
+        self.assertTrue(self.page.js("!!document.querySelector('#panel .note-form')"))
+
+    def test_approving_the_manual_review_needs_no_comment(self):
+        def reviewing(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "review"
+            task["work"] = {"by": "human", "plan": "Build it"}
+            task["review"] = {"agent": {"status": "approved"}, "manual": {"status": "pending"}}
+        kanvas.mutate(self.path, reviewing)
+        self.load("#BE-03")
+        self.until("the panel", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")
+        self.page.js("[...document.querySelectorAll('#panel button')].find((b) => b.textContent.includes('Approve manual review')).click()")
+        self.until("the dialog", "!!document.querySelector('dialog.dlg[open]')")
+        self.page.js("document.querySelector('dialog.dlg[open] button[value=ok]').click()")
+        self.wait_for("the manual review in kanvas.json", lambda: kanvas.find_task(
+            kanvas.load_board(self.path), "BE-03")["review"]["manual"]["status"] == "approved")
+        self.assertEqual(self.page.logged(), [])
+
     def test_a_task_without_evidence_shows_no_evidence_section(self):
         self.load("#BE-03")
         self.until("the panel of BE-03", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")
