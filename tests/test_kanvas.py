@@ -1519,6 +1519,117 @@ class AutomationTests(TempBoard):
         with open(log, encoding="utf-8") as f:
             self.assertIn("got prompt", f.read())
 
+    def mcp_board(self):
+        """A board with a brain and a front repository that has an adr folder, and DV-02 with a run behind it."""
+        board = self.accepted_board()
+        front, brain = os.path.join(self.dir, "front"), os.path.join(self.dir, "brain")
+        os.makedirs(os.path.join(brain, "modules"), exist_ok=True)
+        os.makedirs(os.path.join(front, "adr"), exist_ok=True)
+        os.makedirs(os.path.join(front, "node_modules"), exist_ok=True)
+        files = {os.path.join(brain, "modules", "forms.md"): "# Forms\n\nA coordinator builds a form and parents fill it in.\nExports go to Google Sheets.\n",
+                 os.path.join(brain, "README.md"): "# Brain\n\nIndex of the documentation.\n",
+                 os.path.join(front, "adr", "0001-chips.md"): "# ADR 1\n\nFilters in lists are chips.\n",
+                 os.path.join(front, "node_modules", "junk.md"): "forms forms forms\n",
+                 os.path.join(front, "secret.env"): "forms=1\n"}
+        for file, text in files.items():
+            with open(file, "w", encoding="utf-8") as f:
+                f.write(text)
+        write_board(self.path, board)
+        return board
+
+    def call(self, name, arguments=None, read_only=False):
+        response = kanvas.mcp_handle(self.path, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                                 "params": {"name": name, "arguments": arguments or {}}}, read_only)
+        return response["result"]["content"][0]["text"], response["result"]["isError"]
+
+    def test_the_mcp_server_answers_the_protocol_over_stdio(self):
+        self.mcp_board()
+        requests = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}}},
+                    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                    {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "brain_search", "arguments": {"query": "forms parents"}}},
+                    {"jsonrpc": "2.0", "id": 4, "method": "nope"}]
+        proc = subprocess.run([sys.executable, SCRIPT, "--board", self.path, "mcp"], input="\n".join(map(json.dumps, requests)) + "\n",
+                              capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        replies = [json.loads(line) for line in proc.stdout.splitlines()]
+        self.assertEqual([r["id"] for r in replies], [1, 2, 3, 4])
+        self.assertEqual(replies[0]["result"]["protocolVersion"], "2025-03-26")
+        self.assertEqual(replies[0]["result"]["serverInfo"]["name"], "kanvas")
+        self.assertEqual(replies[0]["result"]["capabilities"], {"tools": {}})
+        names = {t["name"] for t in replies[1]["result"]["tools"]}
+        self.assertEqual(names, {"kanvas_status", "kanvas_list", "kanvas_show", "kanvas_usage", "brain_search", "brain_read",
+                                 "brain_list", "kanvas_propose", "kanvas_note"})
+        self.assertTrue(all(t["inputSchema"]["type"] == "object" for t in replies[1]["result"]["tools"]))
+        self.assertIn("modules/forms.md", replies[2]["result"]["content"][0]["text"])
+        self.assertEqual(replies[3]["error"]["code"], -32601)
+
+    def test_the_mcp_tools_read_the_board(self):
+        self.mcp_board()
+        status, failed = self.call("kanvas_status")
+        self.assertFalse(failed)
+        self.assertIn('"done"', status)
+        listed = json.loads(self.call("kanvas_list", {"filter": "done"})[0])
+        self.assertIn("DV-02", [t["id"] for t in listed])
+        self.assertTrue(all(t["state"] == "done" for t in listed))
+        shown = json.loads(self.call("kanvas_show", {"id": "dv-02"})[0])
+        self.assertEqual(shown["id"], "DV-02")
+        self.assertEqual(shown["run"]["status"], "completed")
+        self.assertIn("Added the city filter", shown["run"]["summary"])
+        text, failed = self.call("kanvas_show", {"id": "NOPE-9"})
+        self.assertTrue(failed)
+        self.assertIn("not found", text)
+
+    def test_the_mcp_documentation_tools_search_read_and_list_only_the_documentation(self):
+        self.mcp_board()
+        found = json.loads(self.call("brain_search", {"query": "forms parents fill"})[0])
+        self.assertEqual(found[0]["path"], "brain/modules/forms.md")
+        self.assertIn("parents", found[0]["snippet"])
+        self.assertEqual(self.call("brain_search", {"query": "chips"}) and json.loads(self.call("brain_search", {"query": "chips"})[0])[0]["path"],
+                         "front/adr/0001-chips.md")
+        self.assertIn("Exports go to Google Sheets", self.call("brain_read", {"path": "brain/modules/forms.md"})[0])
+        listing = self.call("brain_list")[0].splitlines()
+        self.assertEqual(listing, ["brain/README.md", "brain/modules/forms.md", "front/adr/0001-chips.md"])
+        for hidden in ("front/node_modules/junk.md", "front/secret.env", "../kanvas.json", "brain/../kanvas.json", "kanvas.json"):
+            text, failed = self.call("brain_read", {"path": hidden})
+            self.assertTrue(failed, hidden)
+        self.assertTrue(self.call("brain_search", {"query": "a"})[1])
+        self.assertEqual(self.call("brain_search", {"query": "zebra giraffe"})[0], "No document matches those words.")
+
+    def test_the_mcp_tools_let_an_agent_propose_and_note_but_not_decide(self):
+        self.mcp_board()
+        text, failed = self.call("kanvas_propose", {"title": "Export players to a sheet", "description": "A club asked for it", "group": "DV"})
+        self.assertFalse(failed)
+        new_id = text.split()[1].rstrip(":")
+        added = self.get(new_id)
+        self.assertEqual((added["state"], added["by"], added["title"]), ("proposed", "mcp", "Export players to a sheet"))
+        self.assertTrue(self.call("kanvas_note", {"id": "DV-02", "text": "late"})[1])
+        self.assertFalse(self.call("kanvas_note", {"id": new_id, "text": "Estimate: 2 days"})[1])
+        self.assertEqual(self.get(new_id)["notes"][-1]["text"], "Estimate: 2 days")
+        self.assertTrue(self.call("kanvas_propose", {"title": "x", "group": "no such group"})[1])
+        names = {t["name"] for t in kanvas.MCP_TOOLS}
+        self.assertFalse(names & {"kanvas_approve", "kanvas_start", "kanvas_merge", "kanvas_stop", "kanvas_review"})
+
+    def test_a_read_only_mcp_server_offers_and_runs_only_the_tools_that_read(self):
+        self.mcp_board()
+        listed = kanvas.mcp_handle(self.path, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, True)["result"]["tools"]
+        self.assertFalse({t["name"] for t in listed} & {"kanvas_propose", "kanvas_note"})
+        text, failed = self.call("kanvas_propose", {"title": "Nope"}, read_only=True)
+        self.assertTrue(failed)
+        self.assertIn("--read-only", text)
+        self.assertEqual(len(self.board()["tasks"]), len(kanvas.load_board(self.path)["tasks"]))
+
+    def test_the_mcp_usage_tool_totals_the_runs(self):
+        board = self.mcp_board()
+        runs = os.path.join(self.dir, ".kanvas", "runs")
+        os.makedirs(runs, exist_ok=True)
+        event = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 7, "total_cost_usd": 0.25,
+                 "usage": {"output_tokens": 100}, "modelUsage": {"claude-sonnet-5-5": {}}, "duration_ms": 12000, "result": "ok"}
+        with open(os.path.join(runs, "dv-02.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(event) + "\n")
+        usage = json.loads(self.call("kanvas_usage")[0])
+        self.assertEqual((usage["runs"], usage["total_usd"], usage["rows"][0]["turns"]), (1, 0.25, 7))
+
     def png_size(self, path):
         with open(path, "rb") as f:
             head = f.read(24)

@@ -2592,6 +2592,264 @@ def cmd_stop(args):
     print(f"Asked the agent on {task['id']} to stop; it ends within a few seconds")
 
 
+# ---------------------------------------------------------------------------
+# `kanvas mcp`: the board and the documentation, as tools for any Claude session or agent that speaks MCP (the commercial
+# agent that prices a client's request, a bot, an interactive session). It reads the board and the documentation folders
+# and writes only what agents may write in Kanvas anyway: a proposed task and a note. Approving, starting, reviewing,
+# stopping and merging stay with the human, so there is no tool for them.
+
+MCP_PROTOCOL = "2025-06-18"
+DOC_EXTENSIONS = (".md", ".html", ".txt", ".json")
+DOC_SKIP = {"node_modules", "bin", "obj", "dist", "build", "__pycache__"}
+DOC_MAX_BYTES = 60000
+MCP_INSTRUCTIONS = ("The board of a project where AI agents work under a human's approval, and its documentation. Read the "
+                    "board with kanvas_status, kanvas_list and kanvas_show, and what past runs cost with kanvas_usage. Look "
+                    "things up in the documentation with brain_search and brain_read. You may propose a task or add a note; "
+                    "a human approves, starts and reviews the work.")
+
+
+def docs_roots(board, path):
+    """The folders of documentation the tools may read, as [(label, folder)]: the `brain` repository, and the adr and docs
+    folders of the other repositories."""
+    config = automation_config(board, path)
+    roots = []
+    for repo_id, repo in (config["repositories"] if config else {}).items():
+        if repo_id == CURATOR_REPOSITORY:
+            roots.append((repo_id, repo["path"]))
+            continue
+        for sub_folder in ("adr", "docs"):
+            folder = os.path.join(repo["path"], sub_folder)
+            if os.path.isdir(folder):
+                roots.append((f"{repo_id}/{sub_folder}", folder))
+    return roots
+
+
+def docs_files(roots):
+    """Every readable document as (label path, real path), in a stable order."""
+    found = []
+    for label, root in roots:
+        for here, dirs, names in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in DOC_SKIP)
+            for name in sorted(names):
+                full = os.path.join(here, name)
+                if name.lower().endswith(DOC_EXTENSIONS) and not name.startswith(".") and os.path.isfile(full) \
+                        and not os.path.islink(full):
+                    found.append((f"{label}/{os.path.relpath(full, root)}".replace(os.sep, "/"), full))
+    return sorted(found)
+
+
+def docs_search(roots, query, limit=8):
+    terms = [w for w in re.findall(r"\w+", query.lower()) if len(w) > 2]
+    if not terms:
+        raise KanvasError("Give at least one word of three letters or more to search for")
+    results = []
+    for label_path, full in docs_files(roots):
+        try:
+            if os.path.getsize(full) > 500000:
+                continue
+            with open(full, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        lower = [line.lower() for line in lines]
+        text = "\n".join(lower)
+        score = sum(text.count(t) for t in terms) + 5 * sum(t in label_path.lower() for t in terms)
+        if not score:
+            continue
+        best = max(range(len(lines)), key=lambda i: (sum(t in lower[i] for t in terms), -i)) if lines else 0
+        snippet = "\n".join(lines[max(0, best - 1):best + 2]).strip()
+        results.append((score, label_path, best + 1, snippet[:400]))
+    results.sort(key=lambda r: (-r[0], r[1]))
+    return [{"path": p, "line": n, "score": sc, "snippet": snip} for sc, p, n, snip in results[:limit]]
+
+
+def docs_read(roots, wanted):
+    wanted = (wanted or "").strip().replace("\\", "/")
+    for label_path, full in docs_files(roots):
+        if label_path == wanted:
+            if os.path.getsize(full) > DOC_MAX_BYTES:
+                with open(full, encoding="utf-8", errors="replace") as f:
+                    return f.read(DOC_MAX_BYTES) + f"\n... (cut at {DOC_MAX_BYTES} characters)"
+            with open(full, encoding="utf-8", errors="replace") as f:
+                return f.read()
+    raise KanvasError(f"No document called {wanted}. brain_list shows the paths, brain_search finds one by its words")
+
+
+def task_brief(t, tasks):
+    return {"id": t["id"], "title": t["title"], "state": view_state(t, tasks), "group": t.get("group"),
+            "depends_on": t.get("deps") or [], "proposed_by": t.get("by"), "notes": len(t.get("notes") or [])}
+
+
+def task_detail(t, tasks):
+    work = t.get("work") if isinstance(t.get("work"), dict) else {}
+    run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+    detail = {**task_brief(t, tasks), "description": _clip(t.get("desc"), 3000)}
+    if isinstance(t.get("definition"), dict):
+        detail["definition"] = {k: v for k, v in t["definition"].items() if k in
+                                ("outcome", "needs", "acceptance", "non_goals", "repositories", "approved")}
+    if work.get("plan"):
+        detail["plan"] = _clip(work["plan"], 3000)
+    if run:
+        detail["run"] = {k: run.get(k) for k in ("status", "round", "agent", "summary") if run.get(k) is not None}
+        detail["run"]["summary"] = _clip(str(detail["run"].get("summary") or ""), 1500)
+        detail["pull_requests"] = [{"name": x.get("name"), "url": x.get("url")} for x in run.get("pull_requests") or []]
+    if design_of(t).get("status"):
+        detail["design"] = {"status": design_of(t)["status"], "round": design_of(t).get("round")}
+    if isinstance(t.get("review"), dict):
+        detail["review"] = {gate: (t["review"].get(gate) or {}).get("status") for gate in ("agent", "manual")}
+    detail["recent_notes"] = [{"by": n.get("by"), "at": n.get("at"), "text": _clip(n.get("text"), 800)}
+                              for n in (t.get("notes") or [])[-8:]]
+    return detail
+
+
+MCP_TOOLS = [
+    {"name": "kanvas_status", "description": "Overview of the board: how many tasks are in each state, and what is in progress, in review or waiting for the human.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "kanvas_list", "description": "List tasks, optionally only those in a state (proposed, todo, blocked, doing, review, done, production) or in a group.",
+     "inputSchema": {"type": "object", "properties": {"filter": {"type": "string", "description": "A state or a group name or id"}}}},
+    {"name": "kanvas_show", "description": "Everything about one task: description, product definition, plan, run, pull requests, review gates and recent notes.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
+    {"name": "kanvas_usage", "description": "What the automated runs cost: turns, dollars and tokens per task, agent role and model. Useful to estimate what similar work costs.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "brain_search", "description": "Search the project documentation (the brain: modules, decisions, operations, and the ADRs and docs of each repository) by words. Returns the best matches with a snippet.",
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["query"]}},
+    {"name": "brain_read", "description": "Read one document of the documentation by the path brain_search or brain_list gave.",
+     "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+    {"name": "brain_list", "description": "List the documents of the documentation.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "kanvas_propose", "description": "Propose a task for the human to approve. Nothing starts until they do.",
+     "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}, "description": {"type": "string"},
+                                                        "group": {"type": "string", "description": "Group name or id; omit for none"},
+                                                        "depends_on": {"type": "array", "items": {"type": "string"}}}, "required": ["title"]}},
+    {"name": "kanvas_note", "description": "Add a note to a task that is not done yet.",
+     "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}}, "required": ["id", "text"]}},
+]
+MCP_WRITE_TOOLS = ("kanvas_propose", "kanvas_note")
+
+
+def mcp_call(path, name, arguments, read_only=False):
+    """Runs one tool and returns its answer as text. A KanvasError is the tool's own refusal."""
+    args = arguments if isinstance(arguments, dict) else {}
+    if name in MCP_WRITE_TOOLS and read_only:
+        raise KanvasError("This server was started with --read-only")
+    board = load_board(path)
+    tasks = task_map(board)
+    if name == "kanvas_status":
+        by_state = {}
+        for t in board["tasks"]:
+            by_state.setdefault(view_state(t, tasks), []).append(task_brief(t, tasks))
+        return json.dumps({"title": board.get("title"), "total": len(board["tasks"]),
+                           "counts": {k: len(v) for k, v in by_state.items()},
+                           "doing": by_state.get("doing", []), "review": by_state.get("review", []),
+                           "proposed": by_state.get("proposed", [])}, ensure_ascii=False, indent=1)
+    if name == "kanvas_list":
+        flt = str(args.get("filter") or "").strip().lower()
+        rows = board["tasks"]
+        if flt:
+            state = "todo" if flt == "ready" else flt
+            if state in STATES or state == "blocked":
+                rows = [t for t in rows if view_state(t, tasks) == state]
+            else:
+                group = find_group(board, flt)
+                rows = [t for t in rows if t.get("group") == group["id"]]
+        return json.dumps([task_brief(t, tasks) for t in rows[:80]], ensure_ascii=False, indent=1)
+    if name == "kanvas_show":
+        return json.dumps(task_detail(find_task(board, str(args.get("id") or "")), tasks), ensure_ascii=False, indent=1)
+    if name == "kanvas_usage":
+        config = automation_config(board, path)
+        if config is None:
+            raise KanvasError("Automation is not enabled for this board, so there are no runs to measure")
+        rows = usage_runs(board, config)
+        total = sum(r["cost"] for r in rows)
+        return json.dumps({"runs": len(rows), "total_usd": round(total, 2),
+                           "average_usd": round(total / len(rows), 2) if rows else 0, "rows": rows}, ensure_ascii=False, indent=1)
+    if name in ("brain_search", "brain_read", "brain_list"):
+        roots = docs_roots(board, path)
+        if not roots:
+            raise KanvasError("This board has no documentation folders: configure a `brain` repository under automation")
+        if name == "brain_search":
+            limit = args.get("limit") if isinstance(args.get("limit"), int) and not isinstance(args.get("limit"), bool) else 8
+            found = docs_search(roots, str(args.get("query") or ""), max(1, min(20, limit)))
+            return json.dumps(found, ensure_ascii=False, indent=1) if found else "No document matches those words."
+        if name == "brain_read":
+            return docs_read(roots, args.get("path"))
+        return "\n".join(label_path for label_path, _ in docs_files(roots)[:400])
+    actor_name = os.environ.get("KANVAS_AGENT") or "mcp"
+    if name == "kanvas_propose":
+        deps = [str(d) for d in args.get("depends_on") or []] if isinstance(args.get("depends_on"), list) else []
+        group_ref = str(args.get("group") or "").strip()
+
+        def propose(fresh):
+            group = find_group(fresh, group_ref) if group_ref and group_ref != "-" else None
+            return add_task(fresh, args.get("title"), group, str(args.get("description") or ""), deps, by=actor_name)
+
+        t = mutate(path, propose)
+        return f"Proposed {t['id']}: {t['title']}. A human must approve it before any work starts."
+    if name == "kanvas_note":
+        text = str(args.get("text") or "").strip()
+
+        def note(fresh):
+            t = find_task(fresh, str(args.get("id") or ""))
+            if t["state"] in ("done", "production"):
+                raise KanvasError(f"{t['id']} is {t['state']}; propose a follow-up task instead")
+            add_note(t, text, actor_name)
+            return t
+
+        t = mutate(path, note)
+        return f"Added a note to {t['id']}."
+    raise KanvasError(f"There is no tool called {name}")
+
+
+def mcp_handle(path, request, read_only=False):
+    """The JSON-RPC response to one MCP request, or None for a notification."""
+    method, ident = request.get("method"), request.get("id")
+    if ident is None:
+        return None
+
+    def reply(result=None, error=None):
+        message = {"jsonrpc": "2.0", "id": ident}
+        message.update({"error": error} if error else {"result": result})
+        return message
+
+    if method == "initialize":
+        asked = (request.get("params") or {}).get("protocolVersion")
+        return reply({"protocolVersion": asked if isinstance(asked, str) and asked else MCP_PROTOCOL,
+                      "capabilities": {"tools": {}}, "serverInfo": {"name": "kanvas", "version": VERSION},
+                      "instructions": MCP_INSTRUCTIONS})
+    if method == "ping":
+        return reply({})
+    if method == "tools/list":
+        return reply({"tools": [t for t in MCP_TOOLS if not (read_only and t["name"] in MCP_WRITE_TOOLS)]})
+    if method == "tools/call":
+        params = request.get("params") or {}
+        try:
+            text, failed = mcp_call(path, str(params.get("name") or ""), params.get("arguments"), read_only), False
+        except KanvasError as e:
+            text, failed = str(e), True
+        except Exception as e:
+            text, failed = f"The tool failed: {e}", True
+        return reply({"content": [{"type": "text", "text": text}], "isError": failed})
+    return reply(error={"code": -32601, "message": f"Method not found: {method}"})
+
+
+def cmd_mcp(args):
+    path = board_path(args)
+    stdin, stdout = sys.stdin.buffer, sys.stdout.buffer
+    for raw in stdin:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            request = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
+        else:
+            response = mcp_handle(path, request, args.read_only) if isinstance(request, dict) else None
+        if response is not None:
+            stdout.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+            stdout.flush()
+
+
 def cmd_review(args):
     path = board_path(args)
     board = load_board(path)
@@ -4853,6 +5111,8 @@ def build_parser():
     text_sources(p, "note")
     p = add("retry", cmd_retry, "retry failed automation in its existing isolated worktree")
     p.add_argument("id")
+    p = add("mcp", cmd_mcp, "serve the board and the documentation to Claude over MCP (stdio), for agents that need to look things up")
+    p.add_argument("--read-only", action="store_true", help="offer only the tools that read, without proposing tasks or adding notes")
     p = add("shots", cmd_shots, "screenshot a page at phone, iPad and desktop size and keep them as the task's evidence")
     p.add_argument("target", help="an HTML file or the URL of a running app")
     p.add_argument("--task", metavar="ID", help="the task the screenshots belong to (default: $KANVAS_TASK)")
