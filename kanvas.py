@@ -59,6 +59,16 @@ LOCK_TIMEOUT = 10.0
 STALE_LOCK_AGE = 5.0
 MAX_UPLOAD = 20 * 1024 * 1024
 
+# What the board shows as a task's evidence: only screenshots and videos, from the folder of that task.
+EVIDENCE_TYPES = {
+    ".png": ("image", "image/png"), ".jpg": ("image", "image/jpeg"), ".jpeg": ("image", "image/jpeg"),
+    ".gif": ("image", "image/gif"), ".webp": ("image", "image/webp"),
+    ".webm": ("video", "video/webm"), ".mp4": ("video", "video/mp4"),
+}
+EVIDENCE_MAX_FILES = 200
+EVIDENCE_MAX_DEPTH = 3
+EVIDENCE_MAX_BYTES = 200 * 1024 * 1024
+
 
 class KanvasError(Exception):
     pass
@@ -2639,6 +2649,64 @@ class BoardServer(ThreadingHTTPServer):
         return out
 
 
+def evidence_root(path):
+    """The folder with one subfolder of evidence per task: `automation.evidence_root`, or `.kanvas/evidence` in the project
+    folder. It does not need automation to be on, so evidence added by hand shows too."""
+    try:
+        config = load_board(path).get("automation")
+    except (KanvasError, OSError):
+        return None
+    config = config if isinstance(config, dict) else {}
+    root = os.path.abspath(os.path.join(os.path.dirname(path), config.get("project_root") or "."))
+    return os.path.abspath(os.path.join(root, config.get("evidence_root") or ".kanvas/evidence"))
+
+
+def evidence_folder(root, task_id):
+    """The folder of one task's evidence under `root`, or None for an ID that could lead anywhere else."""
+    if not root or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", task_id or ""):
+        return None
+    return os.path.join(root, task_id)
+
+
+def evidence_files(folder):
+    """The screenshots and videos of one task as [{"path", "kind", "size"}], a few folders deep and in name order.
+    Hidden files and links are left out."""
+    found = []
+    if not folder or not os.path.isdir(folder):
+        return found
+    start = folder.rstrip(os.sep).count(os.sep)
+    for here, dirs, names in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        if here.rstrip(os.sep).count(os.sep) - start >= EVIDENCE_MAX_DEPTH:
+            dirs[:] = []
+        for name in sorted(names):
+            kind = EVIDENCE_TYPES.get(os.path.splitext(name)[1].lower())
+            full = os.path.join(here, name)
+            if kind and not name.startswith(".") and os.path.isfile(full) and not os.path.islink(full):
+                found.append({"path": os.path.relpath(full, folder).replace(os.sep, "/"), "kind": kind[0], "size": os.path.getsize(full)})
+                if len(found) >= EVIDENCE_MAX_FILES:
+                    return found
+    return found
+
+
+def evidence_file(folder, parts):
+    """(real path, content type) of the screenshot or video at `parts` inside a task's folder, or None when that is
+    anything else: another kind of file, a hidden or odd name, or a path that leaves the folder."""
+    if not folder or not parts:
+        return None
+    if any(not p or p.startswith(".") or "\\" in p or ":" in p or "\0" in p for p in parts):
+        return None
+    kind = EVIDENCE_TYPES.get(os.path.splitext(parts[-1])[1].lower())
+    if not kind:
+        return None
+    real, base = os.path.realpath(os.path.join(folder, *parts)), os.path.realpath(folder)
+    try:
+        inside = os.path.commonpath([real, base]) == base
+    except ValueError:
+        return None
+    return (real, kind[1]) if inside and os.path.isfile(real) else None
+
+
 class BoardHandler(BaseHTTPRequestHandler):
     server_version = "Kanvas/" + VERSION
 
@@ -2777,7 +2845,40 @@ class BoardHandler(BaseHTTPRequestHandler):
             if self.headers.get("If-None-Match") == tag:
                 return self._send(304, headers={"ETag": tag})
             return self._send(200, data, headers={"ETag": tag})
+        if len(rest) == 3 and rest[:2] == ["api", "evidence"]:
+            files = evidence_files(evidence_folder(evidence_root(path), rest[2]))
+            return self._send(200, json.dumps({"files": files}).encode("utf-8"))
+        if len(rest) >= 3 and rest[0] == "evidence":
+            return self._evidence(path, rest[1], rest[2:])
         return self._error(404, "Not found")
+
+    def _evidence(self, board, task_id, parts):
+        """One screenshot or video of a task. Videos need byte ranges so that the browser can skip through them."""
+        found = evidence_file(evidence_folder(evidence_root(board), task_id), parts)
+        if not found:
+            return self._error(404, "Not found")
+        file, ctype = found
+        try:
+            size = os.path.getsize(file)
+            if size > EVIDENCE_MAX_BYTES:
+                return self._error(413, "Too large")
+            with open(file, "rb") as f:
+                data = f.read()
+        except OSError:
+            return self._error(404, "Not found")
+        headers = {"Accept-Ranges": "bytes", "X-Content-Type-Options": "nosniff"}
+        wanted = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())
+        if wanted and (wanted.group(1) or wanted.group(2)):
+            first, last = wanted.groups()
+            if first:
+                start, end = int(first), min(int(last) if last else size - 1, size - 1)
+            else:
+                start, end = max(size - int(last), 0), size - 1
+            if start > end or start >= size:
+                return self._send(416, headers={"Content-Range": f"bytes */{size}"})
+            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+            return self._send(206, data[start:end + 1], ctype, headers)
+        return self._send(200, data, ctype, headers)
 
     def _phone(self, name):
         """The board's addresses for phones on Tailscale, with a QR code of the first; none while closed to phones.

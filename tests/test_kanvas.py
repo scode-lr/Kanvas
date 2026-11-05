@@ -2632,6 +2632,86 @@ class ServerTests(TempBoard):
         status, _, body = self.request("GET", self.api, headers={"If-None-Match": headers["ETag"]})
         self.assertEqual((status, body), (304, b""))
 
+    def put_evidence(self, files, task_id="DV-02", folder=os.path.join(".kanvas", "evidence")):
+        base = os.path.join(self.dir, folder, task_id)
+        for name, data in files.items():
+            target = os.path.join(base, *name.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as f:
+                f.write(data)
+
+    def test_lists_and_serves_the_evidence_of_a_task(self):
+        self.put_evidence({"01-start.png": b"\x89PNG-data", "run/video.webm": b"0123456789", "notes.txt": b"secret",
+                           ".hidden.png": b"x"})
+        status, _, body = self.request("GET", f"/{self.name}/api/evidence/DV-02")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["files"], [
+            {"path": "01-start.png", "kind": "image", "size": 9},
+            {"path": "run/video.webm", "kind": "video", "size": 10},
+        ])
+        status, headers, body = self.request("GET", f"/{self.name}/evidence/DV-02/01-start.png")
+        self.assertEqual((status, headers["Content-Type"], body), (200, "image/png", b"\x89PNG-data"))
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        video = f"/{self.name}/evidence/DV-02/run/video.webm"
+        status, headers, body = self.request("GET", video)
+        self.assertEqual((status, headers["Content-Type"], headers["Accept-Ranges"], body), (200, "video/webm", "bytes", b"0123456789"))
+        status, headers, body = self.request("GET", video, headers={"Range": "bytes=2-5"})
+        self.assertEqual((status, body, headers["Content-Range"]), (206, b"2345", "bytes 2-5/10"))
+        status, headers, body = self.request("GET", video, headers={"Range": "bytes=7-"})
+        self.assertEqual((status, body, headers["Content-Range"]), (206, b"789", "bytes 7-9/10"))
+        status, headers, body = self.request("GET", video, headers={"Range": "bytes=-4"})
+        self.assertEqual((status, body, headers["Content-Range"]), (206, b"6789", "bytes 6-9/10"))
+        status, headers, _ = self.request("GET", video, headers={"Range": "bytes=50-60"})
+        self.assertEqual((status, headers["Content-Range"]), (416, "bytes */10"))
+
+    def test_a_task_without_evidence_lists_nothing(self):
+        for task_id in ("DV-02", "DV-99", ".."):
+            with self.subTest(task_id=task_id):
+                status, _, body = self.request("GET", f"/{self.name}/api/evidence/{task_id}")
+                self.assertEqual((status, json.loads(body)), (200, {"files": []}))
+        self.assertEqual(self.request("GET", f"/{self.name}/api/evidence/a%2Fb")[0], 404)
+
+    def test_evidence_stays_inside_its_folder_and_is_only_screenshots_and_videos(self):
+        self.put_evidence({"a.png": b"x", "notes.txt": b"secret", "page.html": b"<script>1</script>"})
+        with open(os.path.join(self.dir, "outside.png"), "wb") as f:
+            f.write(b"outside")
+        base = f"/{self.name}/evidence"
+        for path in ("DV-02/notes.txt", "DV-02/page.html", "DV-02/missing.png", "DV-99/a.png", "DV-02/", "DV-02",
+                     "DV-02/../outside.png", "DV-02/%2e%2e/outside.png", "DV-02/..%2foutside.png",
+                     "DV-02/..%5coutside.png", "../outside.png", "%2e%2e/DV-02/a.png", "DV-02/C:/a.png"):
+            with self.subTest(path=path):
+                self.assertEqual(self.request("GET", f"{base}/{path}")[0], 404)
+        self.assertEqual(self.request("GET", f"{base}/DV-02/a.png")[0], 200)
+
+    def test_evidence_refuses_a_link_that_leaves_its_folder(self):
+        outside = os.path.join(self.dir, "outside.png")
+        with open(outside, "wb") as f:
+            f.write(b"outside")
+        self.put_evidence({"a.png": b"x"})
+        link = os.path.join(self.dir, ".kanvas", "evidence", "DV-02", "link.png")
+        try:
+            os.symlink(outside, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("this system does not allow symbolic links")
+        self.assertEqual(self.request("GET", f"/{self.name}/evidence/DV-02/link.png")[0], 404)
+        status, _, body = self.request("GET", f"/{self.name}/api/evidence/DV-02")
+        self.assertEqual([f["path"] for f in json.loads(body)["files"]], ["a.png"])
+
+    def test_evidence_follows_the_folder_the_board_names(self):
+        board = self.board()
+        board["automation"] = {"project_root": "work", "evidence_root": "shots"}
+        write_board(self.path, board)
+        self.put_evidence({"a.png": b"x"}, folder=os.path.join("work", "shots"))
+        status, _, body = self.request("GET", f"/{self.name}/api/evidence/DV-02")
+        self.assertEqual([f["path"] for f in json.loads(body)["files"]], ["a.png"])
+        self.assertEqual(self.request("GET", f"/{self.name}/evidence/DV-02/a.png")[0], 200)
+
+    def test_evidence_only_answers_to_this_computers_names(self):
+        self.put_evidence({"a.png": b"x"})
+        for path in (f"/{self.name}/api/evidence/DV-02", f"/{self.name}/evidence/DV-02/a.png"):
+            with self.subTest(path=path):
+                self.assertEqual(self.request("GET", path, headers={"Host": "evil.example:8765"})[0], 403)
+
     def test_compare_and_swap(self):
         _, headers, body = self.request("GET", self.api)
         etag = headers["ETag"]

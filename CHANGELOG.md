@@ -1,5 +1,6 @@
 # Changelog
 ## Unreleased
+- Show the evidence of a task in its panel: the screenshots and videos in `.kanvas/evidence/<task-id>/` (or `automation.evidence_root`) appear under *Evidence*, which `kanvas serve` lists and serves read-only, only images and videos and only from that folder
 - Run automated tasks with Claude Code headless (`claude -p`, stream-json log) in the task's worktrees, and take the task's summary, turns and cost from Claude's final result; Codex is no longer supported, and a board that sets `automation.executor` to anything but `claude` is refused
 - Kanvas pushes the branches and opens a GitHub pull request for every repository the agent changed, with the GitHub CLI, then moves the task to Review with the pull request links, which the task panel shows; a run with no commits, uncommitted tracked files or a failed push stays in Doing with the reason, and `retry` reuses an open pull request
 - Iterate on a pull request: a task sent back to Doing (Send back in the board, agent review changes, or a pause and restart) runs Claude again in the same worktree and branch, with the notes written since the last round and the comments, reviews and inline comments left on the pull request; the new commits go to the same pull request, which gets a comment for the round

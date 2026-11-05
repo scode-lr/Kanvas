@@ -324,6 +324,30 @@ class BrowserSmokeTests(unittest.TestCase):
                    timeout=5)
         self.assertEqual(self.page.logged(), [])
 
+    def test_the_panel_shows_the_screenshots_and_videos_a_task_left(self):
+        png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+        folder = os.path.join(self.dir, "demo", ".kanvas", "evidence", "BE-03", "run")
+        os.makedirs(folder)
+        for name, data in (("01-step.png", png), ("video.webm", b"not a real video")):
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(data)
+        self.load("#BE-03")
+        self.until("the evidence of BE-03", "!!document.querySelector('#panel .ev-grid img')")
+        self.assertEqual(self.page.js("document.querySelector('#panel .ev-clip video').getAttribute('src')"),
+                         "evidence/BE-03/run/video.webm")
+        self.assertEqual(self.page.js("document.querySelector('#panel .ev-shot').getAttribute('href')"),
+                         "evidence/BE-03/run/01-step.png")
+        self.until("the screenshot to load", "document.querySelector('#panel .ev-grid img').naturalWidth === 1")
+        self.assertTrue(self.page.js("document.querySelector('#panel .ev-grid').parentElement"
+                                     ".querySelector('.section-head').textContent.startsWith('Evidence')"))
+
+    def test_a_task_without_evidence_shows_no_evidence_section(self):
+        self.load("#BE-03")
+        self.until("the panel of BE-03", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")
+        time.sleep(0.5)
+        self.assertFalse(self.page.js("!!document.querySelector('#panel .ev-clip, #panel .ev-grid')"))
+        self.assertNotIn("Evidence", self.page.js("document.querySelector('#panel').innerText.replace('Delivery evidence', '')"))
+
     def test_a_failed_save_gives_the_typed_note_back(self):
         self.load("#BE-03")
         self.until("the panel of BE-03", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")

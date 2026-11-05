@@ -339,6 +339,14 @@ button.say { padding: 1px 6px; gap: 5px; font: 600 12px var(--mono); vertical-al
 .say .icon svg { width: 12px; height: 12px; }
 .p-sec { display: flex; flex-direction: column; gap: 6px; }
 .p-sec + .p-sec { padding-top: 14px; border-top: 1px solid var(--border); }
+.p-sec[hidden] { display: none; }
+.ev-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px; }
+.ev-shot { display: block; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface-2); }
+.ev-shot:hover { border-color: var(--border-strong); }
+.ev-shot img { display: block; width: 100%; height: auto; }
+.ev-clip { margin: 0; display: flex; flex-direction: column; gap: 3px; }
+.ev-clip video { width: 100%; max-height: 340px; border-radius: 6px; background: #000; }
+.ev-clip figcaption { font-size: 12px; color: var(--faint); overflow-wrap: anywhere; }
 .section-head { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 .section-head .count { color: var(--faint); font-weight: 600; letter-spacing: 0; }
 .section-head .lane-bar { width: 36px; }
@@ -3917,6 +3925,38 @@ function renderPanel() {
   panel.scrollTop = place;
 }
 
+// The screenshots and videos a task left in its evidence folder, which `kanvas serve` lists and serves. The section stays
+// hidden when there are none, and on a page with no server behind it (a file or an export).
+const evidenceSeen = new Map();
+
+function evidenceSection(id) {
+  const section = h("section", { class: "p-sec", hidden: true });
+  const url = (path) => `evidence/${encodeURIComponent(id)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+  const show = (files) => {
+    if (!files.length) { section.hidden = true; return; }
+    const images = files.filter((f) => f.kind === "image");
+    section.replaceChildren(...compact(
+      h("div", { class: "section-head" }, "Evidence", h("span", { class: "count" }, files.length)),
+      files.filter((f) => f.kind === "video").map((f) => h("figure", { class: "ev-clip" },
+        h("video", { controls: true, preload: "metadata", src: url(f.path) }), h("figcaption", {}, f.path))),
+      images.length ? h("div", { class: "ev-grid" }, images.map((f) =>
+        h("a", { class: "ev-shot", href: url(f.path), target: "_blank", rel: "noopener", title: f.path },
+          h("img", { src: url(f.path), alt: f.path, loading: "lazy" })))) : null));
+    section.hidden = false;
+  };
+  show(evidenceSeen.get(id) || []);
+  fetch(`api/evidence/${encodeURIComponent(id)}`, { cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : { files: [] }))
+    .then((d) => {
+      const files = Array.isArray(d.files) ? d.files : [];
+      const changed = JSON.stringify(files) !== JSON.stringify(evidenceSeen.get(id) || []);
+      evidenceSeen.set(id, files);
+      if (changed) show(files);
+    })
+    .catch(() => {});
+  return section;
+}
+
 function fillPanel(panel, t) {
   showPanel(panel, true);
   const vs = vstate(t), ro = !!store.readOnly;
@@ -4017,12 +4057,18 @@ function fillPanel(panel, t) {
     h("div", { class: "md" },
       t.delivery.dev ? h("p", {}, h("b", {}, "Dev: "), t.delivery.dev.evidence) : null,
       t.delivery.production ? h("p", {}, h("b", {}, "Production: "), t.delivery.production.evidence) : null)));
+  if (["doing", "review", "done", "production"].includes(vs)) workflow.push(evidenceSection(t.id));
 
-  const noteBox = h("textarea", { rows: 1, value: drafts.note.get(t.id) || "", placeholder: "Add a note for your agent or yourself", "aria-label": "New note" });
+  const noteBox = h("textarea", { rows: 1, value: drafts.note.get(t.id) || "", placeholder: t.state === "review" && t.work?.automation?.pull_requests?.length ? "Add a note: it asks for changes and the agent fixes the pull request" : "Add a note for your agent or yourself", "aria-label": "New note" });
   const form = ro ? null : h("div", { class: `note-form${noteBox.value ? " filled" : ""}` }, noteBox,
     h("div", { class: "row-end" }, h("span", { class: "hint" }, keyLabel("Markdown · Ctrl+Enter")), h("button", { class: "primary", onclick: () => addNoteNow() }, icon("note"), "Add note")));
   noteBox.addEventListener("input", () => { drafts.note.set(t.id, noteBox.value); form.classList.toggle("filled", !!noteBox.value); autosize(noteBox); });
-  const addNoteNow = () => { const v = noteBox.value.trim(); if (!v) return; noteBox.value = ""; drafts.note.delete(t.id); noteBox.blur(); commit(ops.note(t.id, v), { onFail: () => noteBack(t.id, v) }); };
+  // A note on a task in Review with a pull request asks for changes: the task returns to Doing and the next round fixes it.
+  const addNoteNow = () => {
+    const v = noteBox.value.trim(); if (!v) return; noteBox.value = ""; drafts.note.delete(t.id); noteBox.blur();
+    if (t.state === "review" && t.work?.automation?.pull_requests?.length) return review(t, "doing", `Sent back: ${v}`, () => noteBack(t.id, v));
+    commit(ops.note(t.id, v), { onFail: () => noteBack(t.id, v) });
+  };
   noteBox.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { addNoteNow(); focusPanel(noteBox); } if (e.key === "Escape") focusPanel(); });
   const earlier = t.notes.filter((n) => n !== top);
 
