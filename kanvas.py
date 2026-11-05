@@ -793,6 +793,7 @@ def automation_config(board, path):
         "agents": agent_roles(config.get("agents")),
         "assist": assist_settings(config.get("assist")),
         "review": review_settings(config.get("review")),
+        "curator": curator_settings(config.get("curator")),
         "max_rounds": _positive_int(config.get("max_rounds"), 3, "automation.max_rounds"),
         "max_turns": config.get("max_turns"),
         "max_budget_usd": config.get("max_budget_usd"),
@@ -915,7 +916,7 @@ Non-goals:
 Technical plan:
 {work.get('plan') or '(not supplied)'}
 {followup}
-Read the root AGENTS.md (or CLAUDE.md) and relevant files under docs/, then each repository's AGENTS.md or CLAUDE.md.
+Read the root AGENTS.md (or CLAUDE.md), then each repository's AGENTS.md or CLAUDE.md and the documentation it points to.
 Work only in the isolated worktrees listed above; never modify the original checkouts. The branches may already
 hold commits from an earlier attempt: continue from them instead of starting over. Implement the complete task
 across every selected repository, run proportionate tests and commit each repository with a conventional commit,
@@ -1028,6 +1029,9 @@ DEFAULT_AGENTS = {
                  "allowed_tools": ["Read", "Glob", "Grep"]},
     "reviewer-strong": {"agent": "reviewer", "model": "sonnet", "effort": "medium", "max_turns": 16,
                         "allowed_tools": ["Read", "Glob", "Grep"]},
+    # Keeps the documentation repository in step with an accepted task; it only edits documentation, so it needs no shell.
+    "curator": {"agent": "brain-curator", "model": "haiku", "effort": "low", "max_turns": 15,
+                "allowed_tools": ["Read", "Edit", "Write", "Glob", "Grep"]},
 }
 
 
@@ -1070,6 +1074,21 @@ def review_settings(value):
     if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 0:
         raise KanvasError("automation.review.rounds must be a whole number, 0 or more")
     return {"enabled": _flag(value.get("enabled"), True, "automation.review.enabled"), "rounds": rounds}
+
+
+CURATOR_REPOSITORY = "brain"
+
+
+def curator_settings(value):
+    """`automation.curator`: whether accepting an automated task creates a documentation task for the `brain`
+    repository. It only happens when the board has a repository with that id."""
+    if value is None:
+        return {"enabled": True}
+    if isinstance(value, bool):
+        return {"enabled": value}
+    if not isinstance(value, dict):
+        raise KanvasError("automation.curator must be true, false or an object")
+    return {"enabled": _flag(value.get("enabled"), True, "automation.curator.enabled")}
 
 
 def task_agent_name(task):
@@ -1500,6 +1519,7 @@ def run_automation(path, task_id):
             summary = f"Round {round_no}. {summary}"
         pulls = []
         if ok:
+            save_changes(config, task_id, worktrees)
             try:
                 pulls = publish_pull_requests(task, worktrees, summary, round_no)
                 summary += "\n\nPull requests:\n" + "\n".join(f"- {x['name']}: {x['url']}" for x in pulls)
@@ -1512,6 +1532,78 @@ def run_automation(path, task_id):
             finish_automation(path, task_id, False, str(e))
         except Exception:
             pass
+
+
+CHANGES_LIMIT = 30000
+
+
+def changes_path(config, task_id):
+    return os.path.join(config["runs"], f"{automation_slug(task_id)}.diff")
+
+
+def save_changes(config, task_id, worktrees):
+    """Keeps what a finished run changed (files and diff, per repository) beside its log. By the time the task is
+    accepted its branch is merged and no longer differs from its base, so the documentation task reads this copy."""
+    parts = []
+    for item in worktrees:
+        try:
+            base = config["repositories"][item["id"]]["base"]
+            stat = _git(item["worktree"], "diff", "--stat", f"{base}...HEAD")
+            diff = _git(item["worktree"], "diff", "--no-color", f"{base}...HEAD")
+        except (KanvasError, KeyError, OSError):
+            continue
+        if len(diff) > CHANGES_LIMIT:
+            diff = diff[:CHANGES_LIMIT] + "\n... (diff cut)"
+        parts.append(f"## {item['id']}\n\n{stat}\n\n{diff}")
+    try:
+        with open(changes_path(config, task_id), "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n\n".join(parts))
+    except OSError:
+        pass
+
+
+def curator_plan(task, run, config):
+    """The plan of the documentation task: what the accepted task did and where to find it."""
+    try:
+        with open(changes_path(config, task["id"]), encoding="utf-8") as f:
+            changes = f.read().strip()
+    except OSError:
+        changes = ""
+    return (f"Update the documentation of the `brain` repository for the accepted task {task['id']}: {task['title']}.\n\n"
+            f"Edit only files of this repository (modules/, adr/, ops/ and README.md). Change only the statements the work "
+            f"makes false, keep the wording of the file, and add an ADR in adr/ only for a new decision that is hard to "
+            f"reverse. If the documentation is already correct, change nothing and say so.\n\n"
+            f"What the implementer reported:\n{run.get('summary') or '(no summary)'}\n\n"
+            f"Changes of the accepted task:\n{changes or '(not available: rely on the summary)'}")
+
+
+def curate_task(path, task_id):
+    """Creates the documentation task for an accepted automated task and marks the accepted one as handled.
+    Returns the new task's id, or None when there is nothing to do."""
+    def op(board):
+        config = automation_config(board, path)
+        if config is None or not config["curator"]["enabled"] or CURATOR_REPOSITORY not in config["repositories"]:
+            return None
+        task = find_task(board, task_id)
+        run = ((task.get("work") or {}).get("automation")) or {}
+        repos = task_repository_ids(task)
+        if (task.get("state") != "done" or task.get("curated") or run.get("status") != "completed" or not repos
+                or CURATOR_REPOSITORY in repos):
+            return None
+        group = next((g for g in board["groups"] if g["id"] == task.get("group")), None)
+        doc = add_task(board, f"Docs: {task['title']}", group, f"Documentation for {task['id']}, kept up to date by the curator.",
+                       state="doing", by="kanvas")
+        doc["definition"] = {
+            "outcome": f"The brain documentation matches the accepted task {task['id']}.",
+            "needs": "Only documentation; change what the work made false.",
+            "acceptance": "Every statement the accepted work changed is correct in the brain documentation, and nothing else changes.",
+            "non_goals": "Code changes; rewriting sections that are still true.",
+            "repositories": [CURATOR_REPOSITORY], "agent": "curator", "approved": True, "by": "kanvas", "at": now_iso()}
+        doc["work"] = {"by": "kanvas", "at": now_iso(), "plan": curator_plan(task, run, config),
+                       "repositories": [CURATOR_REPOSITORY], "agent": "curator"}
+        task["curated"] = doc["id"]
+        return doc["id"]
+    return mutate(path, op)
 
 
 def read_input(value, use_stdin=False, file_path=None, what="text"):
@@ -2914,9 +3006,14 @@ class AutomationDispatcher:
         config = automation_config(board, path)
         if config is None:
             return
-        for task in board["tasks"]:
+        for task in list(board["tasks"]):
             work = task.get("work") if isinstance(task.get("work"), dict) else {}
             run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+            if (config["curator"]["enabled"] and CURATOR_REPOSITORY in config["repositories"] and task.get("state") == "done"
+                    and not task.get("curated") and run.get("status") == "completed"
+                    and task_repository_ids(task) and CURATOR_REPOSITORY not in task_repository_ids(task)):
+                curate_task(path, task["id"])
+                continue
             if (config["review"]["enabled"] and task.get("state") == "review" and run.get("status") == "completed"
                     and any(os.path.isdir(w.get("worktree") or "") for w in run.get("worktrees") or [])
                     and ((task.get("review") or {}).get("agent") or {}).get("status") == "pending"
@@ -3295,7 +3392,7 @@ def clean_assist(kind, data, board, repository_ids, role_names):
         agent = draft.get("agent")
         out["draft"] = {**{k: _clip(draft.get(k)) for k in ("outcome", "needs", "acceptance", "non_goals")},
                         "repositories": [r for r in draft.get("repositories") or [] if r in repository_ids],
-                        "agent": agent if agent in role_names and not str(agent).startswith("reviewer") else DEFAULT_AGENT}
+                        "agent": agent if agent in role_names and not str(agent).startswith(("reviewer", "curator")) else DEFAULT_AGENT}
         return out if out["draft"]["outcome"] else None
     out["draft"] = {"plan": _clip(draft.get("plan"), 8000)}
     return out if out["draft"]["plan"] else None

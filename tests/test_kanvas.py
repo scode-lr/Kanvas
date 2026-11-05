@@ -1422,7 +1422,7 @@ class AutomationTests(TempBoard):
 
         publish = mock.Mock(side_effect=publish_error, return_value=pulls or [])
         with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=self.fake_worktrees(repo)), \
-             mock.patch.object(kanvas, "publish_pull_requests", publish), \
+             mock.patch.object(kanvas, "publish_pull_requests", publish), mock.patch.object(kanvas, "save_changes"), \
              mock.patch.object(kanvas.subprocess, "run", side_effect=completed) as run:
             kanvas.run_automation(self.path, "DV-02")
         return run, publish
@@ -1876,6 +1876,94 @@ class AutomationTests(TempBoard):
         in_page = dict(re.findall(r"\"?([\w-]+)\"?: \{ model: \"(\w+)\" \}", declared))
         self.assertEqual(in_page, {name: role["model"] for name, role in kanvas.DEFAULT_AGENTS.items()})
 
+    def accepted_board(self, with_brain=True, **run):
+        """A board whose DV-02 was accepted (done) after an automated run on `front`."""
+        front, brain = os.path.join(self.dir, "front"), os.path.join(self.dir, "brain")
+        os.makedirs(front, exist_ok=True)
+        os.makedirs(brain, exist_ok=True)
+        board = self.automated_board(front)
+        if with_brain:
+            board["automation"]["repositories"].append({"id": "brain", "name": "Brain", "path": brain, "base": "HEAD"})
+        task = kanvas.find_task(board, "DV-02")
+        task["state"] = "done"
+        task["work"]["automation"] = {"status": "completed", "summary": "Added the city filter", **run}
+        return board
+
+    def test_accepting_an_automated_task_creates_a_documentation_task_for_the_brain(self):
+        board = self.accepted_board()
+        config = kanvas.automation_config(board, self.path)
+        os.makedirs(config["runs"], exist_ok=True)
+        with open(kanvas.changes_path(config, "DV-02"), "w", encoding="utf-8") as f:
+            f.write("## front\n\n+ city filter")
+        write_board(self.path, board)
+        created = kanvas.curate_task(self.path, "DV-02")
+        doc = self.get(created)
+        self.assertEqual((doc["state"], doc["title"]), ("doing", f"Docs: {self.get('DV-02')['title']}"))
+        self.assertEqual(kanvas.task_repository_ids(doc), ["brain"])
+        self.assertEqual(kanvas.task_agent_name(doc), "curator")
+        self.assertTrue(doc["definition"]["approved"])
+        self.assertIn("Added the city filter", doc["work"]["plan"])
+        self.assertIn("+ city filter", doc["work"]["plan"])
+        self.assertEqual(self.get("DV-02")["curated"], created)
+        self.assertIsNone(kanvas.curate_task(self.path, "DV-02"))
+        role = kanvas.automation_config(kanvas.load_board(self.path), self.path)["agents"]["curator"]
+        self.assertEqual((role["agent"], role["model"]), ("brain-curator", "haiku"))
+        self.assertNotIn("Bash", role["allowed_tools"])
+
+    def test_a_finished_run_keeps_its_changes_for_the_documentation_task(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        git = lambda *a: subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True)
+        subprocess.run(["git", "init", repo], check=True, capture_output=True)
+        git("config", "user.email", "test@example.com")
+        git("config", "user.name", "Test")
+        for text in ("one\n", "one\ntwo\n"):
+            with open(os.path.join(repo, "a.txt"), "w", encoding="utf-8") as f:
+                f.write(text)
+            git("add", "a.txt")
+            git("commit", "-m", text.strip())
+        board = self.automated_board(repo)
+        board["automation"]["repositories"][0]["base"] = "HEAD~1"
+        config = kanvas.automation_config(board, self.path)
+        os.makedirs(config["runs"], exist_ok=True)
+        kanvas.save_changes(config, "DV-02", [{"id": "front", "worktree": repo}])
+        with open(kanvas.changes_path(config, "DV-02"), encoding="utf-8") as f:
+            saved = f.read()
+        self.assertIn("## front", saved)
+        self.assertIn("+two", saved)
+
+    def test_the_dispatcher_creates_the_documentation_task_once_and_runs_it(self):
+        self.assertEqual(self.scan_launching(self.accepted_board()), [])
+        created = self.get("DV-02")["curated"]
+        self.assertEqual(self.get(created)["state"], "doing")
+        self.assertEqual(self.scan_launching(kanvas.load_board(self.path)), [("run", created)])
+        docs = [t for t in kanvas.load_board(self.path)["tasks"] if t["title"].startswith("Docs:")]
+        self.assertEqual(len(docs), 1)
+
+    def test_the_dispatcher_does_not_create_a_documentation_task_when_it_does_not_apply(self):
+        def never_ran(board):
+            del kanvas.find_task(board, "DV-02")["work"]["automation"]
+
+        def not_accepted(board):
+            kanvas.find_task(board, "DV-02")["state"] = "review"
+
+        def switched_off(board):
+            board["automation"]["curator"] = False
+
+        def brain_only(board):
+            kanvas.find_task(board, "DV-02")["work"]["repositories"] = ["brain"]
+            kanvas.find_task(board, "DV-02")["definition"]["repositories"] = ["brain"]
+
+        for name, change, with_brain in (("no brain repository", lambda b: None, False), ("never ran", never_ran, True),
+                                         ("not accepted", not_accepted, True), ("switched off", switched_off, True),
+                                         ("only the brain", brain_only, True)):
+            with self.subTest(name):
+                board = self.accepted_board(with_brain=with_brain)
+                change(board)
+                self.scan_launching(board)
+                self.assertFalse(self.get("DV-02").get("curated"))
+                self.assertEqual(len(kanvas.load_board(self.path)["tasks"]), len(board["tasks"]))
+
     def test_usage_needs_automation(self):
         self.assertIn("Automation is not enabled", self.fails("usage"))
 
@@ -2148,7 +2236,7 @@ class AutomationTests(TempBoard):
 
         publish = mock.Mock(return_value=[pull])
         with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=self.fake_worktrees(repo)), \
-             mock.patch.object(kanvas, "publish_pull_requests", publish), \
+             mock.patch.object(kanvas, "publish_pull_requests", publish), mock.patch.object(kanvas, "save_changes"), \
              mock.patch.object(kanvas.subprocess, "run", side_effect=completed) as claude:
             kanvas.run_automation(self.path, "DV-02")
         prompt = claude.call_args.kwargs["input"]
