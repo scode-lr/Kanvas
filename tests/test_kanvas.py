@@ -1354,6 +1354,7 @@ class AutomationTests(TempBoard):
             "worktrees_root": ".kanvas/worktrees",
             "runs_root": ".kanvas/runs",
             "repositories": [{"id": "front", "name": "Frontend", "path": repo, "base": "HEAD"}],
+            "design": False,
         }
         t = kanvas.find_task(board, "DV-02")
         t["state"] = "doing"
@@ -1931,6 +1932,116 @@ class AutomationTests(TempBoard):
             saved = f.read()
         self.assertIn("## front", saved)
         self.assertIn("+two", saved)
+
+    def designing_board(self, **design):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo, exist_ok=True)
+        board = self.automated_board(repo)
+        board["automation"]["design"] = True
+        if design:
+            kanvas.find_task(board, "DV-02")["work"]["design"] = design
+        return board
+
+    def scan_designing(self, board):
+        """One dispatcher pass with the designer and the implementer faked; returns what it launched."""
+        write_board(self.path, board)
+        launched, done = [], threading.Event()
+        dispatcher = object.__new__(kanvas.AutomationDispatcher)
+        dispatcher.lock, dispatcher.active = threading.Lock(), set()
+
+        def note(kind):
+            def fake(path, task_id, *a, **k):
+                launched.append((kind, task_id))
+                done.set()
+            return fake
+
+        with mock.patch.object(kanvas, "run_automation", side_effect=note("run")), \
+             mock.patch.object(kanvas, "run_design", side_effect=note("design")):
+            dispatcher.scan(self.path)
+            done.wait(2)
+        return launched
+
+    def test_a_front_task_gets_a_design_before_the_implementer_runs(self):
+        self.assertEqual(self.scan_designing(self.designing_board()), [("design", "DV-02")])
+        self.assertEqual(self.scan_designing(self.designing_board(status="changes_requested", text="v1", feedback="x")),
+                         [("design", "DV-02")])
+        for status in ("pending", "failed"):
+            self.assertEqual(self.scan_designing(self.designing_board(status=status, text="v1")), [], status)
+        self.assertEqual(self.scan_designing(self.designing_board(status="approved", text="v1")), [("run", "DV-02")])
+
+    def test_the_design_stage_only_applies_where_it_should(self):
+        off = self.designing_board()
+        off["automation"]["design"] = False
+        self.assertEqual(self.scan_designing(off), [("run", "DV-02")])
+        other = self.designing_board()
+        other["automation"]["design"] = {"repositories": ["api"]}
+        self.assertEqual(self.scan_designing(other), [("run", "DV-02")])
+        sent_back = self.designing_board()
+        kanvas.find_task(sent_back, "DV-02")["work"]["automation"] = {"status": "completed", "round": 1}
+        self.assertEqual(self.scan_designing(sent_back), [("run", "DV-02")])
+
+    def fake_designer(self, reply, returncode=0):
+        def fake_run(command, **kwargs):
+            self.design_call = {"command": command, "prompt": kwargs["input"], "cwd": kwargs["cwd"]}
+            event = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 4, "total_cost_usd": 0.05,
+                     "result": reply}
+            kwargs["stdout"].write(json.dumps(event) + "\n")
+            return mock.Mock(returncode=returncode)
+        return mock.patch.object(kanvas.subprocess, "run", side_effect=fake_run)
+
+    def test_the_designer_proposes_and_the_human_approves_or_asks_for_changes(self):
+        write_board(self.path, self.designing_board())
+        with self.fake_designer("## Goal\nA city filter\n\n```\n[ filter ]\n```"):
+            self.assertEqual(kanvas.run_design(self.path, "DV-02")[0], "pending")
+        command = " ".join(self.design_call["command"])
+        self.assertIn("--agent designer", command)
+        self.assertIn("--model sonnet", command)
+        self.assertIn("--tools Read,Glob,Grep", command)
+        self.assertIn("Do not invent a visual language", self.design_call["prompt"])
+        for size in ("Mobile layout", "Tablet layout", "Web layout", "iPad"):
+            self.assertIn(size, self.design_call["prompt"])
+        design = self.get("DV-02")["work"]["design"]
+        self.assertEqual((design["status"], design["round"]), ("pending", 1))
+        self.assertIn("A city filter", design["text"])
+        kanvas.set_design(self.path, "DV-02", False, "keep the filters in a sheet")
+        self.assertEqual(self.get("DV-02")["work"]["design"]["status"], "changes_requested")
+        with self.fake_designer("## Goal\nFilters in a sheet"):
+            kanvas.run_design(self.path, "DV-02")
+        self.assertIn("keep the filters in a sheet", self.design_call["prompt"])
+        self.assertIn("A city filter", self.design_call["prompt"])
+        self.assertEqual(self.get("DV-02")["work"]["design"]["round"], 2)
+        kanvas.set_design(self.path, "DV-02", True)
+        self.assertEqual(self.get("DV-02")["work"]["design"]["status"], "approved")
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.set_design(self.path, "DV-02", True)
+
+    def test_the_implementer_is_told_to_build_the_approved_design(self):
+        def prompt_for(**design):
+            board = self.designing_board(**design)
+            config = kanvas.automation_config(board, self.path)
+            repo = config["repositories"]["front"]["path"]
+            return kanvas.automation_prompt(board, kanvas.find_task(board, "DV-02"), config, self.fake_worktrees(repo))
+
+        approved = prompt_for(status="approved", text="Filters live in a bottom sheet")
+        self.assertIn("Filters live in a bottom sheet", approved)
+        self.assertIn("do not invent other UI", approved)
+        self.assertNotIn("not yet", prompt_for(status="pending", text="not yet"))
+
+    def test_a_design_that_cannot_be_made_waits_for_the_human(self):
+        write_board(self.path, self.designing_board())
+        with self.fake_designer("", returncode=1):
+            self.assertEqual(kanvas.run_design(self.path, "DV-02")[0], "failed")
+        self.assertEqual(self.get("DV-02")["work"]["design"]["status"], "failed")
+        self.assertIn("Design failed", self.get("DV-02")["notes"][-1]["text"])
+
+    def test_the_design_command_shows_approves_and_asks_again(self):
+        write_board(self.path, self.designing_board(status="pending", text="Filters in a sheet", round=1))
+        _, out, _ = self.run_cli("design", "DV-02")
+        self.assertIn("design pending", out)
+        self.assertIn("Filters in a sheet", out)
+        self.run_cli("design", "DV-02", "--changes", "use tabs")
+        self.assertEqual(self.get("DV-02")["work"]["design"]["feedback"], "use tabs")
+        self.assertIn("no design proposal", self.fails("design", "DV-02", "--approve"))
 
     def test_the_dispatcher_creates_the_documentation_task_once_and_runs_it(self):
         self.assertEqual(self.scan_launching(self.accepted_board()), [])

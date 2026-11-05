@@ -381,6 +381,7 @@ button.add-line:hover { color: var(--text); }
 .md { font-size: 13.5px; overflow-wrap: anywhere; }
 .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
 .md p, .md ul, .md ol, .md pre, .md blockquote { margin: 0 0 8px; }
+.design-text p { white-space: pre-wrap; font-variant-ligatures: none; }
 .md ul, .md ol { padding-left: 20px; }
 .md li.task { list-style: none; margin-left: -18px; }
 .md .tick, .md .tick input { cursor: pointer; }
@@ -2494,6 +2495,15 @@ const ops = {
     t.state = "doing";
     addNote(t, plan, at);
   },
+  // The human answers the UI/UX proposal of a front task: approving lets the implementer start, asking for changes
+  // makes the designer propose again with that feedback.
+  designReview: (id, approve, feedback, at = nowIso()) => (b) => {
+    const t = mustFind(b, id), design = t.work?.design;
+    if (t.state !== "doing" || !design || !["pending", "failed", "changes_requested"].includes(design.status)) throw new Error(`${t.id} has no design waiting for an answer`);
+    if (approve && design.status !== "pending") throw new Error(`${t.id} has no design proposal to approve`);
+    t.work.design = approve ? { ...design, status: "approved", by: "human", at, feedback: "" } : { ...design, status: "changes_requested", feedback, at };
+    addNote(t, approve ? "Design approved." : feedback ? `Design changes requested: ${feedback}` : "Design requested again.", at);
+  },
   manualReview: (id, summary, at = nowIso()) => (b) => {
     const t = mustFind(b, id);
     if (t.state !== "review") throw new Error(`${t.id} is no longer in review`);
@@ -3759,7 +3769,7 @@ const moveTo = (t, state) => undoable(ops.state(t.id, seenOf(t), state), moveWor
 const unlink = (id, dep) => undoable(ops.removeDep(id, dep), `${id} no longer waits for ${dep}`);
 
 // The built-in agent roles, which kanvas.py has too; the board's automation.agents changes and adds to them.
-const DEFAULT_AGENT_ROLES = { implementer: { model: "sonnet" }, complex: { model: "opus" }, reviewer: { model: "haiku" }, "reviewer-strong": { model: "sonnet" }, curator: { model: "haiku" } };
+const DEFAULT_AGENT_ROLES = { implementer: { model: "sonnet" }, complex: { model: "opus" }, reviewer: { model: "haiku" }, "reviewer-strong": { model: "sonnet" }, curator: { model: "haiku" }, designer: { model: "sonnet" } };
 
 function agentRoles() {
   const given = board.automation?.agents && typeof board.automation.agents === "object" ? board.automation.agents : {};
@@ -3828,7 +3838,7 @@ async function approveDefinition(t) {
   const nonGoals = h("textarea", { name: "non_goals", rows: 2, value: d.non_goals || "", placeholder: "What is explicitly outside this task?" });
   const repoSelect = repositories.length ? h("select", { name: "repositories", multiple: true, size: Math.min(6, repositories.length), required: true },
     ...repositories.map((r) => h("option", { value: r.id, selected: selected.has(r.id) }, r.name || r.id))) : null;
-  const agentSelect = repositories.length ? h("select", { name: "agent" }, ...Object.entries(agentRoles()).filter(([name]) => !name.startsWith("reviewer") && name !== "curator").map(([name, r]) =>
+  const agentSelect = repositories.length ? h("select", { name: "agent" }, ...Object.entries(agentRoles()).filter(([name]) => !name.startsWith("reviewer") && !["curator", "designer"].includes(name)).map(([name, r]) =>
     h("option", { value: name, selected: name === (d.agent || "implementer") }, `${name} · ${r.model || "default model"}`))) : null;
   const data = await modal(`PO + TL Grill me · ${t.id}`, [
     h("p", {}, "Define the product need before making this task available for development."),
@@ -3870,6 +3880,16 @@ async function startWorkDialog(t) {
   if (!data) return;
   const plan = data.get("plan").trim();
   undoable(ops.startWork(t.id, plan), `Started ${t.id} with a technical plan`, { onFail: () => startWorkDialog(t) });
+}
+
+async function askDesignChanges(t, text = "") {
+  const data = await modal(`Design changes · ${t.id}`, [
+    h("p", {}, "The designer proposes the design again with your feedback. Nothing is built until you approve it."),
+    h("label", { class: "field" }, "What needs to change?", h("textarea", { name: "text", rows: 4, required: true, value: text, placeholder: "e.g. Keep the filters in the sheet, as in the news list." })),
+  ], { ok: "Ask for changes" });
+  if (!data) return;
+  const feedback = data.get("text").trim();
+  undoable(ops.designReview(t.id, false, feedback), `Asked for design changes on ${t.id}`, { onFail: () => askDesignChanges(t, feedback) });
 }
 
 async function approveManualReview(t) {
@@ -4141,6 +4161,16 @@ function fillPanel(panel, t) {
         /^https:\/\//.test(pr.url || "")
           ? h("a", { href: pr.url, target: "_blank", rel: "noopener" }, `${pr.name || pr.id} · ${pr.branch || ""}`)
           : `${pr.name || pr.id} · ${pr.branch || ""}`)))));
+  if (t.work?.design) {
+    const design = t.work.design, waiting = design.status === "pending";
+    const label = { pending: "waiting for you", approved: "approved", changes_requested: "changes requested", failed: "failed" }[design.status] || design.status;
+    workflow.push(h("section", { class: "p-sec" },
+      h("div", { class: "section-head" }, "UI/UX design", h("span", { class: "count" }, label)),
+      h("div", { class: "md design-text" }, design.text ? design.text.split(/\n{2,}/).map((chunk) => h("p", {}, chunk)) : h("p", {}, "No proposal yet.")),
+      !ro && t.state === "doing" && ["pending", "failed"].includes(design.status) ? h("div", { class: "row-end" },
+        h("button", { onclick: () => askDesignChanges(t) }, icon("edit"), design.status === "failed" ? "Try again" : "Ask for changes"),
+        waiting ? h("button", { class: "primary", onclick: () => undoable(ops.designReview(t.id, true, ""), `Design approved for ${t.id}`) }, icon("check"), "Approve design") : null) : null));
+  }
   if (t.review) {
     const agent = t.review.agent || { status: "pending" }, manual = t.review.manual || { status: "pending" };
     workflow.push(h("section", { class: "p-sec" }, h("div", { class: "section-head" }, "Review gates"),

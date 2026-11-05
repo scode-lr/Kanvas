@@ -794,6 +794,7 @@ def automation_config(board, path):
         "assist": assist_settings(config.get("assist")),
         "review": review_settings(config.get("review")),
         "curator": curator_settings(config.get("curator")),
+        "design": design_settings(config.get("design")),
         "max_rounds": _positive_int(config.get("max_rounds"), 3, "automation.max_rounds"),
         "max_turns": config.get("max_turns"),
         "max_budget_usd": config.get("max_budget_usd"),
@@ -890,6 +891,10 @@ def automation_prompt(board, task, config, worktrees, round_no=1, feedback=""):
     repos = "\n".join(f"- {x['id']} ({x['name']}): {x['worktree']} on {x['branch']}" for x in worktrees)
     definition = task.get("definition") or {}
     work = task.get("work") or {}
+    approved = work.get("design") if isinstance(work.get("design"), dict) else {}
+    design = (f"\nApproved UI/UX design (the human approved it: build exactly this and do not invent other UI; if it cannot "
+              f"be built as written, say so in your summary):\n{approved['text']}\n"
+              if approved.get("status") == DESIGN_APPROVED and approved.get("text") else "")
     followup = ""
     if round_no > 1:
         followup = (f"\nThis is round {round_no}: your earlier work was reviewed and sent back. The branches already hold "
@@ -915,7 +920,7 @@ Non-goals:
 
 Technical plan:
 {work.get('plan') or '(not supplied)'}
-{followup}
+{design}{followup}
 Read the root AGENTS.md (or CLAUDE.md), then each repository's AGENTS.md or CLAUDE.md and the documentation it points to.
 Work only in the isolated worktrees listed above; never modify the original checkouts. The branches may already
 hold commits from an earlier attempt: continue from them instead of starting over. Implement the complete task
@@ -1029,6 +1034,9 @@ DEFAULT_AGENTS = {
                  "allowed_tools": ["Read", "Glob", "Grep"]},
     "reviewer-strong": {"agent": "reviewer", "model": "sonnet", "effort": "medium", "max_turns": 16,
                         "allowed_tools": ["Read", "Glob", "Grep"]},
+    # Proposes the UI/UX of a front task before anyone implements it; it reads the app and the design rules, nothing else.
+    "designer": {"agent": "designer", "model": "sonnet", "effort": "medium", "max_turns": 15,
+                 "allowed_tools": ["Read", "Glob", "Grep"]},
     # Keeps the documentation repository in step with an accepted task; it only edits documentation, so it needs no shell.
     "curator": {"agent": "brain-curator", "model": "haiku", "effort": "low", "max_turns": 15,
                 "allowed_tools": ["Read", "Edit", "Write", "Glob", "Grep"]},
@@ -1089,6 +1097,21 @@ def curator_settings(value):
     if not isinstance(value, dict):
         raise KanvasError("automation.curator must be true, false or an object")
     return {"enabled": _flag(value.get("enabled"), True, "automation.curator.enabled")}
+
+
+def design_settings(value):
+    """`automation.design`: whether a task that changes one of these repositories gets a UI/UX design proposal that the
+    human approves before the implementer starts."""
+    if value is None:
+        return {"enabled": True, "repositories": ["front"]}
+    if isinstance(value, bool):
+        return {"enabled": value, "repositories": ["front"]}
+    if not isinstance(value, dict):
+        raise KanvasError("automation.design must be true, false or an object")
+    repositories = value.get("repositories", ["front"])
+    if not isinstance(repositories, list) or not all(isinstance(x, str) for x in repositories):
+        raise KanvasError("automation.design.repositories must be a list of repository ids")
+    return {"enabled": _flag(value.get("enabled"), True, "automation.design.enabled"), "repositories": repositories}
 
 
 def task_agent_name(task):
@@ -1532,6 +1555,131 @@ def run_automation(path, task_id):
             finish_automation(path, task_id, False, str(e))
         except Exception:
             pass
+
+
+DESIGN_APPROVED, DESIGN_PENDING, DESIGN_CHANGES, DESIGN_FAILED = "approved", "pending", "changes_requested", "failed"
+
+
+def design_of(task):
+    work = task.get("work") if isinstance(task.get("work"), dict) else {}
+    return work.get("design") if isinstance(work.get("design"), dict) else {}
+
+
+def design_applies(task, config):
+    """Whether the task still has to have its UI/UX design approved before the implementer runs: it is in progress,
+    has not run yet and changes a repository that needs a design."""
+    work = task.get("work") if isinstance(task.get("work"), dict) else {}
+    run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+    return (config["design"]["enabled"] and task.get("state") == "doing" and not run.get("status")
+            and bool(set(task_repository_ids(task)) & set(config["design"]["repositories"])))
+
+
+def design_prompt(task, config, previous, feedback):
+    definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
+    work = task.get("work") if isinstance(task.get("work"), dict) else {}
+    repos = "\n".join(f"- {r['id']} ({r['name']}): {r['path']}" for i, r in config["repositories"].items()
+                      if i in config["design"]["repositories"])
+    again = (f"\nYour previous proposal:\n{_clip(previous, 6000)}\n\nThe human asked for these changes; address every one:\n"
+             f"{feedback or '(no written feedback)'}\n" if previous else "")
+    return f"""You are the UI/UX designer for Kanvas task {task['id']}: {task['title']}. Nobody has written code for it yet and you do not write any: you propose the design and a human approves it before an implementer builds it.
+
+Application repositories (read only):
+{repos}
+
+Product outcome: {definition.get('outcome') or task.get('desc') or '(not supplied)'}
+Needs and constraints: {definition.get('needs') or '(not supplied)'}
+Acceptance criteria: {definition.get('acceptance') or '(not supplied)'}
+Non-goals: {definition.get('non_goals') or '(none)'}
+Technical plan: {_clip(work.get('plan'), 3000) or '(not supplied)'}
+{again}
+Do not invent a visual language. Read the CLAUDE.md of the application, its design decisions (the adr folder), the shared styles and components, and one or two existing screens that resemble this one, then design with what exists. Design the three screen sizes the app is used on: mobile (a phone, the main one), tablet (an iPad, in portrait and landscape) and web (a desktop browser). Mobile first; say what changes on each of the others.
+
+Answer in the language the task is written in, in markdown, under 700 words, with these sections:
+1. **Goal** and who uses it, per role.
+2. **Mobile layout** (phone): a short ASCII wireframe, top to bottom, and the interactions.
+3. **Tablet layout** (iPad, portrait and landscape): an ASCII wireframe, and what it does with the extra space (columns, split view, side panel) instead of stretching the phone layout.
+4. **Web layout** (desktop browser): an ASCII wireframe, and what changes with a mouse and keyboard (hover, context menu, shortcuts, wide tables).
+5. **Reuse**: the existing components, styles and screens it builds on, with their paths. A new component needs one line of justification.
+6. **States**: loading, empty, error, success and no permission.
+7. **Texts**: the labels and messages, as the app would show them.
+8. **Accessibility** that matters here.
+9. **Open questions** the human should decide. If there are none, say so.
+"""
+
+
+def run_design(path, task_id):
+    """Has the designer propose the UI/UX of a task and records the proposal for the human to approve. Never raises: a
+    design that cannot be made leaves a note and the task waiting."""
+    try:
+        board = load_board(path)
+        config = automation_config(board, path)
+        if config is None:
+            raise KanvasError("Automation is not enabled for this board")
+        task = find_task(board, task_id)
+        role = config["agents"].get("designer")
+        if role is None:
+            raise KanvasError("The board does not define the agent role designer")
+        before = design_of(task)
+        os.makedirs(config["runs"], exist_ok=True)
+        log = os.path.join(config["runs"], f"{automation_slug(task_id)}-design.jsonl")
+        prompt = design_prompt(task, config, before.get("text") if before.get("status") == DESIGN_CHANGES else "",
+                               before.get("feedback") or "")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        folders = [{"worktree": config["root"]}] + [{"worktree": config["repositories"][i]["path"]}
+                                                   for i in config["design"]["repositories"] if i in config["repositories"]]
+        with open(log, "w", encoding="utf-8", newline="\n") as output:
+            proc = subprocess.run(claude_command(config, folders, role), input=prompt, text=True, encoding="utf-8",
+                                  errors="replace", stdout=output, stderr=subprocess.STDOUT, creationflags=flags,
+                                  cwd=config["root"], env=agent_environment())
+        result = read_result(log)
+        text = str((result or {}).get("result") or "").strip()
+        if result is None or proc.returncode or result.get("is_error") or not text:
+            detail = text or f"it exited with code {proc.returncode}. See {log}"
+            raise KanvasError(f"the designer could not make the proposal: {_clip(detail, 300)}")
+    except Exception as e:
+        def fail(board):
+            t = find_task(board, task_id)
+            if design_applies(t, automation_config(board, path)):
+                t.setdefault("work", {})["design"] = {**design_of(t), "status": DESIGN_FAILED, "at": now_iso()}
+                add_note(t, f"Design failed: {e}", "kanvas-runner")
+            return t
+        try:
+            mutate(path, fail)
+        except Exception:
+            pass
+        return "failed", str(e)
+
+    def record(board):
+        t = find_task(board, task_id)
+        if not design_applies(t, automation_config(board, path)):
+            return None
+        design = design_of(t)
+        if design.get("status") in (DESIGN_PENDING, DESIGN_APPROVED):
+            return None
+        t.setdefault("work", {})["design"] = {"status": DESIGN_PENDING, "text": text, "round": int(design.get("round") or 0) + 1,
+                                              "by": "designer", "at": now_iso()}
+        add_note(t, "Design proposal ready: approve it or ask for changes before the implementation starts.", "designer")
+        return t
+    return ("pending", text) if mutate(path, record) else ("stale", "The task moved on while the design was made.")
+
+
+def set_design(path, task_id, approve, feedback=""):
+    """The human's answer to a design proposal: approve it, or ask for changes, which makes the designer try again."""
+    def op(board):
+        t = find_task(board, task_id)
+        design = design_of(t)
+        if t.get("state") != "doing" or design.get("status") not in (DESIGN_PENDING, DESIGN_FAILED, DESIGN_CHANGES):
+            raise KanvasError(f"{t['id']} has no design waiting for an answer")
+        if approve:
+            if design.get("status") != DESIGN_PENDING:
+                raise KanvasError(f"{t['id']} has no design proposal to approve")
+            t["work"]["design"] = {**design, "status": DESIGN_APPROVED, "by": "human", "at": now_iso(), "feedback": ""}
+            add_note(t, "Design approved.", "human")
+        else:
+            t["work"]["design"] = {**design, "status": DESIGN_CHANGES, "feedback": feedback, "at": now_iso()}
+            add_note(t, f"Design changes requested: {feedback}" if feedback else "Design requested again.", "human")
+        return t
+    return mutate(path, op)
 
 
 CHANGES_LIMIT = 30000
@@ -2106,6 +2254,21 @@ def cmd_retry(args):
     print(f"Queued retry for {t['id']}; the Kanvas server will reuse its isolated worktree.")
 
 
+def cmd_design(args):
+    path = board_path(args)
+    board = load_board(path)
+    task = find_task(board, args.id)
+    if args.approve:
+        set_design(path, task["id"], True)
+        print(f"Design approved for {task['id']}; the implementation starts")
+    elif args.changes is not None or args.again:
+        set_design(path, task["id"], False, (args.changes or "").strip())
+        print(f"The designer will propose {task['id']} again")
+    else:
+        design = design_of(task)
+        print(f"{task['id']}: design {design.get('status') or 'not made yet'}" + (f"\n\n{design['text']}" if design.get("text") else ""))
+
+
 def cmd_review(args):
     path = board_path(args)
     board = load_board(path)
@@ -2145,7 +2308,7 @@ def usage_runs(board, config):
         if result is None:
             continue
         stem, reviewer = name[:-len(".jsonl")], None
-        for suffix, role in (("-review-strong", "reviewer-strong"), ("-review", "reviewer")):
+        for suffix, role in (("-review-strong", "reviewer-strong"), ("-review", "reviewer"), ("-design", "designer")):
             if stem.endswith(suffix):
                 stem, reviewer = stem[:-len(suffix)], role
                 break
@@ -3025,6 +3188,12 @@ class AutomationDispatcher:
             if (task.get("state") != "doing" or not work.get("plan") or not task_repository_ids(task)
                     or (run.get("status") and not sent_back)):
                 continue
+            if design_applies(task, config):
+                design = design_of(task)
+                if design.get("status") in (None, "", DESIGN_CHANGES):
+                    self._start_design(path, task["id"])
+                if design.get("status") != DESIGN_APPROVED:
+                    continue
             token = (os.path.normcase(os.path.abspath(path)), task["id"].upper())
             with self.lock:
                 if token in self.active:
@@ -3079,6 +3248,23 @@ class AutomationDispatcher:
                         self.active.discard(key)
 
             threading.Thread(target=execute, name=f"kanvas-{task['id']}", daemon=True).start()
+
+    def _start_design(self, path, task_id):
+        """Has the designer propose the UI/UX of a task that is about to start, unless it is already doing so."""
+        token = ("design", os.path.normcase(os.path.abspath(path)), task_id.upper())
+        with self.lock:
+            if token in self.active:
+                return
+            self.active.add(token)
+
+        def execute():
+            try:
+                run_design(path, task_id)
+            finally:
+                with self.lock:
+                    self.active.discard(token)
+
+        threading.Thread(target=execute, name=f"kanvas-design-{task_id}", daemon=True).start()
 
     def _start_review(self, path, task_id):
         """Has the reviewer look at a task that reached Review, unless it is already doing so. The task keeps no
@@ -4303,6 +4489,11 @@ def build_parser():
     text_sources(p, "note")
     p = add("retry", cmd_retry, "retry failed automation in its existing isolated worktree")
     p.add_argument("id")
+    p = add("design", cmd_design, "show, approve or ask for changes to the UI/UX design a front task needs before it is built")
+    p.add_argument("id")
+    p.add_argument("--approve", action="store_true", help="approve the proposal so the implementation can start")
+    p.add_argument("--changes", metavar="TEXT", help="ask the designer for these changes")
+    p.add_argument("--again", action="store_true", help="have the designer try again (after a failure)")
     p = add("review", cmd_review, "have the reviewer agent review a task in review now, and record its verdict")
     p.add_argument("id")
     p = add("usage", cmd_usage, "turns, cost and tokens of every automated run, per task, agent role and model")

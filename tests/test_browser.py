@@ -424,6 +424,23 @@ class BrowserSmokeTests(unittest.TestCase):
         self.assertIn("Which clubs first?", self.page.js("document.querySelector('dialog .assist-questions').innerText"))
         self.assertEqual(self.page.logged(), [])
 
+    def test_the_human_approves_the_design_a_task_waits_for(self):
+        def waiting(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "doing"
+            task["work"] = {"by": "human", "plan": "Build it", "design": {
+                "status": "pending", "text": "## Goal\nA filter\n\n[ city v ]", "by": "designer", "round": 1}}
+        kanvas.mutate(self.path, waiting)
+        self.load("#BE-03")
+        self.until("the design of BE-03", "document.querySelector('#panel').textContent.includes('UI/UX design')")
+        panel = self.page.js("document.querySelector('#panel').textContent")
+        self.assertIn("A filter", panel)
+        self.assertIn("waiting for you", panel)
+        self.page.js("[...document.querySelectorAll('#panel button')].find((b) => b.textContent.includes('Approve design')).click()")
+        self.wait_for("the approved design in kanvas.json", lambda: kanvas.find_task(
+            kanvas.load_board(self.path), "BE-03")["work"]["design"]["status"] == "approved")
+        self.assertEqual(self.page.logged(), [])
+
     def test_a_task_without_evidence_shows_no_evidence_section(self):
         self.load("#BE-03")
         self.until("the panel of BE-03", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")
