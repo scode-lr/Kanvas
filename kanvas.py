@@ -789,6 +789,9 @@ def automation_config(board, path):
         "branch_pattern": str(config.get("branch_pattern") or "kanvas/{id_slug}-{title_slug}"),
         "model": config.get("model"),
         "reasoning": config.get("reasoning"),
+        "lean": _flag(config.get("lean"), True, "automation.lean"),
+        "agents": agent_roles(config.get("agents")),
+        "assist": assist_settings(config.get("assist")),
         "max_rounds": _positive_int(config.get("max_rounds"), 3, "automation.max_rounds"),
         "max_turns": config.get("max_turns"),
         "max_budget_usd": config.get("max_budget_usd"),
@@ -1001,22 +1004,94 @@ def _tool_list(value, default):
     return list(value)
 
 
-def claude_command(config, worktrees):
-    """Claude Code in headless mode: the prompt arrives on stdin and the run is logged as stream-json."""
+def _flag(value, default, name):
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise KanvasError(f"{name} must be true or false")
+    return value
+
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_AGENT = "implementer"
+# The agent roles Kanvas knows without configuration, so that each kind of work runs on the cheapest model that does it
+# well. A role may set model, effort, max_turns, max_budget_usd, allowed_tools and disallowed_tools, which win over the
+# same keys of `automation`. A task picks its role with `definition.agent`; without one it runs as the implementer.
+# kanvas.html repeats these roles to fill the Agent choice of the product definition: change both together.
+DEFAULT_AGENTS = {
+    "implementer": {"model": "sonnet", "effort": "medium"},
+    "complex": {"model": "opus", "effort": "high"},
+    "reviewer": {"model": "haiku", "effort": "low", "max_turns": 12,
+                 "allowed_tools": ["Read", "Glob", "Grep", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+                                   "Bash(git status:*)"]},
+}
+
+
+def agent_roles(value):
+    """The agent roles of a board: the built-in ones, with the changes and additions of `automation.agents`."""
+    roles = {name: dict(role) for name, role in DEFAULT_AGENTS.items()}
+    if value is None:
+        return roles
+    if not isinstance(value, dict):
+        raise KanvasError("automation.agents must be an object with one entry per role")
+    for name, given in value.items():
+        if not isinstance(given, dict):
+            raise KanvasError(f"automation.agents.{name} must be an object")
+        role = {**roles.get(name, {}), **given}
+        if role.get("model") is not None and not isinstance(role["model"], str):
+            raise KanvasError(f"automation.agents.{name}.model must be a model name")
+        if role.get("effort") is not None and role["effort"] not in EFFORT_LEVELS:
+            raise KanvasError(f"automation.agents.{name}.effort must be one of {', '.join(EFFORT_LEVELS)}")
+        if role.get("max_turns") is not None:
+            role["max_turns"] = _positive_int(role["max_turns"], None, f"automation.agents.{name}.max_turns")
+        for key in ("allowed_tools", "disallowed_tools"):
+            if key in given:
+                role[key] = _tool_list(given[key], ())
+        roles[name] = role
+    return roles
+
+
+def task_agent_name(task):
+    """The role that implements a task: the one its product definition names, or the implementer."""
+    work = task.get("work") if isinstance(task.get("work"), dict) else {}
+    definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
+    return str(work.get("agent") or definition.get("agent") or DEFAULT_AGENT)
+
+
+def claude_command(config, worktrees, role=None):
+    """Claude Code in headless mode: the prompt arrives on stdin and the run is logged as stream-json. `role` holds the
+    model, effort, limits and tools of the agent role it runs as, which win over the same keys of `automation`.
+
+    Unless `automation.lean` is false, the agent starts with only what it needs: no MCP servers, only the project's
+    settings and only its own tools. Every turn of a run re-reads that start, so a smaller one makes each turn cheaper."""
+    role = role or {}
+
+    def pick(key):
+        return role[key] if role.get(key) is not None else config.get(key)
+
     command = [shutil.which("claude") or "claude", "-p", "--output-format", "stream-json", "--verbose",
                "--permission-mode", "acceptEdits"]
     for extra in worktrees[1:]:
         command += ["--add-dir", extra["worktree"]]
-    if config.get("model"):
-        command += ["--model", str(config["model"])]
-    if config.get("max_turns"):
-        command += ["--max-turns", str(config["max_turns"])]
-    if config.get("max_budget_usd"):
-        command += ["--max-budget-usd", str(config["max_budget_usd"])]
-    if config["allowed_tools"]:
-        command += ["--allowedTools", *config["allowed_tools"]]
-    if config["disallowed_tools"]:
-        command += ["--disallowedTools", *config["disallowed_tools"]]
+    if pick("model"):
+        command += ["--model", str(pick("model"))]
+    if pick("effort"):
+        command += ["--effort", str(pick("effort"))]
+    if pick("max_turns"):
+        command += ["--max-turns", str(pick("max_turns"))]
+    if pick("max_budget_usd"):
+        command += ["--max-budget-usd", str(pick("max_budget_usd"))]
+    allowed = role["allowed_tools"] if "allowed_tools" in role else config["allowed_tools"]
+    disallowed = role["disallowed_tools"] if "disallowed_tools" in role else config["disallowed_tools"]
+    if config.get("lean", True):
+        command += ["--strict-mcp-config", "--setting-sources", "project,local"]
+        tools = list(dict.fromkeys(t.split("(")[0] for t in allowed))
+        if tools:
+            command += ["--tools", ",".join(tools)]
+    if allowed:
+        command += ["--allowedTools", *allowed]
+    if disallowed:
+        command += ["--disallowedTools", *disallowed]
     return command
 
 
@@ -1144,18 +1219,23 @@ def run_automation(path, task_id):
         config = automation_config(board, path)
         if config is None:
             raise KanvasError("Automation is not enabled for this board")
+        role_name = task_agent_name(task)
+        role = config["agents"].get(role_name)
+        if role is None:
+            raise KanvasError(f"{task_id} asks for the agent role {role_name}, which the board does not define "
+                              f"(it defines {', '.join(config['agents'])})")
         worktrees = prepare_automation_worktrees(task, config)
         previous = (task.get("work") or {}).get("automation") or {}
         round_no = int(previous.get("round") or 1)
         feedback = automation_feedback(task, previous, config["root"]) if round_no > 1 else ""
         os.makedirs(config["runs"], exist_ok=True)
         log = os.path.join(config["runs"], f"{automation_slug(task_id)}.jsonl")
-        update_automation(path, task_id, "running", started=now_iso(), log=log, executor="claude",
+        update_automation(path, task_id, "running", started=now_iso(), log=log, executor="claude", agent=role_name,
                           worktrees=[{k: x[k] for k in ("id", "path", "worktree", "branch", "commit")} for x in worktrees])
         prompt = automation_prompt(board, task, config, worktrees, round_no, feedback)
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         with open(log, "w", encoding="utf-8", newline="\n") as output:
-            proc = subprocess.run(claude_command(config, worktrees), input=prompt, text=True, encoding="utf-8",
+            proc = subprocess.run(claude_command(config, worktrees, role), input=prompt, text=True, encoding="utf-8",
                                   errors="replace", stdout=output, stderr=subprocess.STDOUT, creationflags=flags,
                                   cwd=worktrees[0]["worktree"], env=agent_environment())
         ok, summary = claude_outcome(proc, log)
@@ -1677,6 +1757,78 @@ def cmd_retry(args):
 
     t = mutate(path, op)
     print(f"Queued retry for {t['id']}; the Kanvas server will reuse its isolated worktree.")
+
+
+def usage_runs(board, config):
+    """One row per run log in the runs folder: the task, its agent role and model, turns, cost and tokens. A log holds
+    the last round of its task."""
+    rows = []
+    folder = config["runs"]
+    tasks = {automation_slug(t["id"]): t for t in board["tasks"]}
+    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        if not name.endswith(".jsonl"):
+            continue
+        result = None
+        try:
+            with open(os.path.join(folder, name), encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(event, dict) and event.get("type") == "result":
+                        result = event
+        except OSError:
+            continue
+        if result is None:
+            continue
+        task = tasks.get(name[:-len(".jsonl")])
+        run = ((task or {}).get("work") or {}).get("automation") or {}
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        models = result.get("modelUsage") if isinstance(result.get("modelUsage"), dict) else {}
+        rows.append({
+            "task": task["id"] if task else name[:-len(".jsonl")],
+            "agent": run.get("agent") or "-",
+            "model": ", ".join(models) or "-",
+            "turns": result.get("num_turns") or 0,
+            "cost": float(result.get("total_cost_usd") or 0),
+            "output": usage.get("output_tokens") or 0,
+            "cache_read": usage.get("cache_read_input_tokens") or 0,
+            "cache_write": usage.get("cache_creation_input_tokens") or 0,
+            "seconds": round((result.get("duration_ms") or 0) / 1000),
+        })
+    return rows
+
+
+def cmd_usage(args):
+    path = board_path(args)
+    board = load_board(path)
+    config = automation_config(board, path)
+    if config is None:
+        raise KanvasError("Automation is not enabled for this board, so there are no runs to measure")
+    rows = usage_runs(board, config)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        print("No finished runs yet.")
+        return
+    width = max(len(r["task"]) for r in rows + [{"task": "TASK"}])
+    agent_w = max(len(r["agent"]) for r in rows + [{"agent": "AGENT"}])
+    model_w = max(len(r["model"]) for r in rows + [{"model": "MODEL"}])
+    print(f"{'TASK':<{width}}  {'AGENT':<{agent_w}}  {'MODEL':<{model_w}}  {'TURNS':>5}  {'COST':>7}  {'OUTPUT':>7}  "
+          f"{'CACHE READ':>10}  {'CACHE WRITE':>11}  {'TIME':>5}")
+    for r in rows:
+        print(f"{r['task']:<{width}}  {r['agent']:<{agent_w}}  {r['model']:<{model_w}}  {r['turns']:>5}  "
+              f"${r['cost']:>6.2f}  {r['output']:>7,}  {r['cache_read']:>10,}  {r['cache_write']:>11,}  {r['seconds']:>4}s")
+    total = sum(r["cost"] for r in rows)
+    print(f"\n{len(rows)} runs, ${total:.2f} in total, ${total / len(rows):.2f} each, "
+          f"{sum(r['turns'] for r in rows) / len(rows):.1f} turns each.")
+    by_model = {}
+    for r in rows:
+        by_model.setdefault(r["model"], []).append(r["cost"])
+    for model, costs in sorted(by_model.items(), key=lambda kv: -sum(kv[1])):
+        print(f"  {model}: {len(costs)} runs, ${sum(costs):.2f}")
 
 
 def cmd_note(args):
@@ -2568,6 +2720,8 @@ class BoardServer(ThreadingHTTPServer):
         self.boards = share.boards if share else {}  # name -> path, in the order the boards were opened
         self.boards_lock = share.boards_lock if share else threading.Lock()
         self.dispatcher = share.dispatcher if share else AutomationDispatcher(self)
+        self.assist = share.assist if share else {}  # job id -> the agents' help running or finished, oldest first
+        self.assist_lock = share.assist_lock if share else threading.Lock()
         if path:
             self.add_board(path)
 
@@ -2688,6 +2842,66 @@ class BoardServer(ThreadingHTTPServer):
         with self.boards_lock:
             return self.boards.get(name)
 
+    def start_assist(self, name, kind, task_id, fields):
+        """Starts the agents of a dialog's help in the background and returns its job."""
+        path = self.board_path(name)
+        if kind not in ASSIST_KINDS:
+            raise KanvasError(f"Expected the kind of help to be one of: {', '.join(ASSIST_KINDS)}")
+        if not shutil.which("claude"):
+            raise KanvasError("Claude Code (claude) is not installed or not on PATH; the agents need it")
+        task = find_task(load_board(path), task_id) if kind != "task" else None
+        if kind == "plan" and not (isinstance(task.get("definition"), dict) and task["definition"].get("approved")):
+            raise KanvasError(f"{task['id']} has no approved product definition yet")
+        with self.assist_lock:
+            if sum(1 for j in self.assist.values() if j["status"] == "running") >= ASSIST_MAX_RUNNING:
+                raise AssistBusy(f"{ASSIST_MAX_RUNNING} agent conversations are already running; wait for one to finish")
+            job = {"id": os.urandom(8).hex(), "board": name, "kind": kind, "status": "running",
+                   "working": ASSIST_AGENTS[kind][0], "messages": [], "result": None, "error": "", "cost": 0.0, "turns": 0}
+            self.assist[job["id"]] = job
+            for old in [k for k, j in self.assist.items() if j["status"] != "running"][:-ASSIST_KEEP]:
+                del self.assist[old]
+        threading.Thread(target=self._run_assist, args=(job, path, kind, task_id, fields), daemon=True).start()
+        return job
+
+    def assist_status(self, name, job_id):
+        with self.assist_lock:
+            job = self.assist.get(job_id)
+            return dict(job, messages=list(job["messages"])) if job and job["board"] == name else None
+
+    def _run_assist(self, job, path, kind, task_id, fields):
+        def change(**fresh):
+            with self.assist_lock:
+                job.update(fresh)
+
+        try:
+            board, root, settings = assist_context(path)
+            config = automation_config(board, path)
+            repositories = {r["id"]: r["name"] for r in config["repositories"].values()} if config else {}
+            roles = config["agents"] if config else agent_roles(None)
+            task = find_task(board, task_id) if kind != "task" else None
+            said, data = [], None
+            for step, agent in enumerate(ASSIST_AGENTS[kind]):
+                change(working=agent)
+                prompt = assist_prompt(kind, step, board, task, fields, root, repositories, roles, said)
+                reply, cost, turns = assist_step(agent, prompt, root, settings)
+                prose, found = split_assist_reply(reply)
+                said.append(prose)
+                data = found if found is not None else data
+                with self.assist_lock:
+                    job["messages"].append({"agent": agent, "text": prose or "(no text)"})
+                    job["cost"] += cost
+                    job["turns"] += turns
+            result = clean_assist(kind, data, board, list(repositories), list(roles))
+            if result is None:
+                raise KanvasError("The agents did not return a draft the board could use")
+            change(status="done", working="", result=result)
+        except subprocess.TimeoutExpired:
+            change(status="failed", working="", error="An agent took too long and was stopped")
+        except (KanvasError, OSError, ValueError) as e:
+            change(status="failed", working="", error=str(e))
+        except Exception as e:
+            change(status="failed", working="", error=f"{type(e).__name__}: {e}")
+
     def board_list(self):
         with self.boards_lock:
             boards = list(self.boards.items())
@@ -2699,6 +2913,170 @@ class BoardServer(ThreadingHTTPServer):
                 title = name
             out.append({"name": name, "title": title, "path": path})
         return out
+
+
+# ---------------------------------------------------------------------------
+# Help from the agents in the dialogs: the product owner for a new task and for its product definition, and the
+# architect and the senior developer, talking, for its construction plan. They only read the project and draft the
+# form; the human edits the draft and approves.
+
+ASSIST_KINDS = ("task", "definition", "plan")
+# Who speaks in each kind of help. The plan is a conversation: the architect proposes, the senior developer checks the
+# proposal against the code, and the architect settles it with the final plan.
+ASSIST_AGENTS = {"task": ("product-owner",), "definition": ("product-owner",),
+                 "plan": ("architect", "senior-dev", "architect")}
+ASSIST_TOOLS = ("Read", "Glob", "Grep")
+ASSIST_MAX_RUNNING = 2
+ASSIST_KEEP = 20
+ASSIST_STEP_TIMEOUT = 300
+
+
+class AssistBusy(KanvasError):
+    pass
+
+
+def assist_settings(value):
+    """`automation.assist`: the limits of every step an agent takes in a dialog."""
+    if value is None:
+        return {"max_turns": 10, "max_budget_usd": None}
+    if not isinstance(value, dict):
+        raise KanvasError("automation.assist must be an object")
+    return {"max_turns": _positive_int(value.get("max_turns"), 10, "automation.assist.max_turns"),
+            "max_budget_usd": value.get("max_budget_usd")}
+
+
+def assist_context(path):
+    """The board, the project folder the agents read and their limits: those of `automation`, or the board's folder
+    and the defaults when automation is off."""
+    board = load_board(path)
+    config = board.get("automation") if isinstance(board.get("automation"), dict) else {}
+    root = os.path.abspath(os.path.join(os.path.dirname(path), config.get("project_root") or "."))
+    return board, root, assist_settings(config.get("assist"))
+
+
+def _clip(value, limit=4000):
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def split_assist_reply(text):
+    """The prose of an agent's reply and the JSON object that ends it, which is None when there is none."""
+    found = list(re.finditer(r"```json\s*(.*?)```", text, re.S))
+    if not found:
+        return text.strip(), None
+    last = found[-1]
+    try:
+        data = json.loads(last.group(1))
+    except ValueError:
+        data = None
+    return (text[:last.start()] + text[last.end():]).strip(), data
+
+
+def clean_assist(kind, data, board, repository_ids, role_names):
+    """The part of an agent's JSON the page can use, with every value checked; None when there is no draft."""
+    if not isinstance(data, dict):
+        return None
+    questions = [_clip(q, 400) for q in data.get("questions") or [] if isinstance(q, str) and q.strip()][:8]
+    out = {"questions": questions}
+    draft = data.get("draft") if isinstance(data.get("draft"), dict) else data
+    if kind == "task":
+        groups = {g["id"] for g in board["groups"]}
+        known = {t["id"] for t in board["tasks"]}
+        out["draft"] = {"title": _clip(draft.get("title"), 200), "desc": _clip(draft.get("desc")),
+                        "group": draft.get("group") if draft.get("group") in groups else ""}
+        out["duplicates"] = [d for d in data.get("duplicates") or [] if isinstance(d, str) and d in known][:5]
+        return out if out["draft"]["title"] else None
+    if kind == "definition":
+        agent = draft.get("agent")
+        out["draft"] = {**{k: _clip(draft.get(k)) for k in ("outcome", "needs", "acceptance", "non_goals")},
+                        "repositories": [r for r in draft.get("repositories") or [] if r in repository_ids],
+                        "agent": agent if agent in role_names and agent != "reviewer" else DEFAULT_AGENT}
+        return out if out["draft"]["outcome"] else None
+    out["draft"] = {"plan": _clip(draft.get("plan"), 8000)}
+    return out if out["draft"]["plan"] else None
+
+
+def assist_prompt(kind, step, board, task, fields, root, repositories, roles, earlier):
+    """What one agent is asked in one step of a dialog's help. Every step starts a new session, so each prompt brings
+    what that agent needs."""
+    head = (f"You help the owner of the Kanvas board \"{board['title']}\" fill in a dialog. The project is in {root}: read "
+            "what you need there (the documentation in docs/ and the repositories) and change nothing. Be brief and "
+            "concrete, ask only what changes what gets built, and answer in the language the owner writes in.\n\n")
+    ids = lambda: ", ".join(f"{k}: {v}" for k, v in repositories.items()) or "none"
+    if kind == "task":
+        groups = "\n".join(f"- {g['id']}: {g['name']}" for g in board["groups"]) or "(none)"
+        open_tasks = [t for t in board["tasks"] if t["state"] not in ("done", "production")]
+        listed = "\n".join(f"- {t['id']} [{t['state']}] {t['title']}" for t in open_tasks[:80]) or "(none)"
+        return head + (
+            f"The owner is creating a task and has written:\nTitle: {fields.get('title') or '(empty)'}\n"
+            f"Description: {fields.get('desc') or '(empty)'}\n\nGroups:\n{groups}\n\nOpen tasks:\n{listed}\n\n"
+            "Turn it into a good task: a short title that says what changes, and a description in 2 to 5 lines of "
+            "markdown that says what it achieves and what finished means. Choose the group that fits, or an empty one "
+            "if none does, and list the open tasks it duplicates. Ask at most 5 questions.\n\n"
+            "End your reply with one fenced json block and nothing after it:\n"
+            "```json\n{\"title\": \"...\", \"group\": \"<group id or empty>\", \"desc\": \"...\", "
+            "\"duplicates\": [\"<task id>\"], \"questions\": [\"...\"]}\n```\n")
+    definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
+    notes = "\n".join(f"- {_clip(n.get('text'), 300)}" for n in (task.get("notes") or [])[-3:]) or "(none)"
+    about = f"task {task['id']}: {task['title']}\nDescription: {_clip(task.get('desc'), 1500) or '(none)'}\nRecent notes:\n{notes}\n"
+    if kind == "definition":
+        return head + (
+            f"The owner is defining the product need of {about}\nWhat the form holds so far:\n"
+            f"Outcome: {fields.get('outcome') or '(empty)'}\nNeeds and constraints: {fields.get('needs') or '(empty)'}\n"
+            f"Acceptance criteria: {fields.get('acceptance') or '(empty)'}\nNon-goals: {fields.get('non_goals') or '(empty)'}\n\n"
+            f"Repositories (id: name): {ids()}\n"
+            f"Agent roles: {', '.join(r for r in roles if r != 'reviewer')}. The implementer is the default; choose "
+            "complex only for security, multi-club isolation, permissions or data migrations.\n\n"
+            "Look in docs/modules and docs/adr for what already exists about this, then question what is missing or "
+            "ambiguous and draft the form: the outcome for users or the business, needs and constraints, acceptance "
+            "criteria a person can check, non-goals, the repositories the change may touch and the agent role.\n\n"
+            "End your reply with one fenced json block and nothing after it:\n```json\n{\"questions\": [\"...\"], "
+            "\"draft\": {\"outcome\": \"...\", \"needs\": \"...\", \"acceptance\": \"...\", \"non_goals\": \"...\", "
+            "\"repositories\": [\"<repository id>\"], \"agent\": \"implementer\"}}\n```\n")
+    spec = (f"{about}\nProduct definition:\nOutcome: {definition.get('outcome') or '(none)'}\n"
+            f"Needs and constraints: {definition.get('needs') or '(none)'}\n"
+            f"Acceptance criteria: {definition.get('acceptance') or '(none)'}\n"
+            f"Non-goals: {definition.get('non_goals') or '(none)'}\n"
+            f"Repositories it may change: {', '.join(definition.get('repositories') or []) or 'none chosen'} "
+            f"(available: {ids()})\nThe owner's plan so far: {fields.get('plan') or '(empty)'}\n\n")
+    if step == 0:
+        return head + ("The architect speaks first. " + spec +
+                       "Propose the technical construction plan, grounded in the real documentation and code. Reply in plain "
+                       "text, up to 350 words: the plan by repository and layer, data and API, isolation and security, "
+                       "tests, rollout and rollback, and your assumptions and open questions. The senior developer reviews "
+                       "your proposal next.\n")
+    if step == 1:
+        return head + ("The senior developer speaks second. " + spec + f"The architect proposed:\n{earlier[0]}\n\n"
+                       "Check it against the real code. Correct what is wrong, name what the architect missed (risks, "
+                       "files, reuse, mobile, tests) and what you would cut. Reply in plain text, up to 300 words, to the "
+                       "architect.\n")
+    return head + ("The architect speaks last. " + spec + f"Your proposal was:\n{earlier[0]}\n\nThe senior developer answered:\n"
+                   f"{earlier[1]}\n\nSettle it: write the final construction plan, taking what is right in the review, and "
+                   "the questions only the owner can answer.\n\nEnd your reply with one fenced json block and nothing "
+                   "after it:\n```json\n{\"questions\": [\"...\"], \"draft\": {\"plan\": \"<the final plan, in plain text>\"}}\n```\n")
+
+
+def assist_step(agent, prompt, root, settings):
+    """Runs one agent for one step, read only, and returns its reply, cost and turns."""
+    command = [shutil.which("claude") or "claude", "-p", "--output-format", "json", "--agent", agent,
+               "--no-session-persistence", "--permission-mode", "acceptEdits", "--strict-mcp-config",
+               "--setting-sources", "project,local", "--tools", ",".join(ASSIST_TOOLS),
+               "--max-turns", str(settings["max_turns"])]
+    if settings["max_budget_usd"]:
+        command += ["--max-budget-usd", str(settings["max_budget_usd"])]
+    command += ["--allowedTools", *ASSIST_TOOLS]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    proc = subprocess.run(command, input=prompt, text=True, encoding="utf-8", errors="replace", capture_output=True,
+                          cwd=root, env=agent_environment(), timeout=ASSIST_STEP_TIMEOUT, creationflags=flags)
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        data = None
+    if isinstance(data, list):
+        data = next((e for e in reversed(data) if isinstance(e, dict) and e.get("type") == "result"), None)
+    if not isinstance(data, dict) or proc.returncode or data.get("is_error"):
+        detail = (data.get("result") if isinstance(data, dict) else None) or proc.stderr.strip() or proc.stdout.strip()
+        raise KanvasError(f"{agent} could not answer: {_clip(detail, 300) or 'no output'}")
+    return str(data.get("result") or ""), float(data.get("total_cost_usd") or 0), int(data.get("num_turns") or 0)
 
 
 def evidence_root(path):
@@ -2902,6 +3280,11 @@ class BoardHandler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"files": files}).encode("utf-8"))
         if len(rest) >= 3 and rest[0] == "evidence":
             return self._evidence(path, rest[1], rest[2:])
+        if len(rest) == 3 and rest[:2] == ["api", "assist"]:
+            job = self.server.assist_status(name, rest[2])
+            if job is None:
+                return self._error(404, "Not found")
+            return self._send(200, json.dumps(job, ensure_ascii=False).encode("utf-8"))
         return self._error(404, "Not found")
 
     def _evidence(self, board, task_id, parts):
@@ -2957,6 +3340,21 @@ class BoardHandler(BaseHTTPRequestHandler):
             if fresh and not self.server.quiet:
                 print(f"[{time.strftime('%H:%M:%S')}] opened to phones on Tailscale: {'  or  '.join(urls)}", flush=True)
             return self._phone(parts[0])
+        if parts[1:] == ["api", "assist"] and self.server.board_path(parts[0]) is not None:
+            if not self._from_this_computer():
+                return self._error(403, "The agents answer only requests from the computer running Kanvas")
+            text = self._read_json()
+            if text is None:
+                return
+            try:
+                request = json.loads(text)
+                fields = {str(k): _clip(v) for k, v in (request.get("fields") or {}).items() if isinstance(v, str)}
+                job = self.server.start_assist(parts[0], request.get("kind"), request.get("id"), fields)
+            except AssistBusy as e:
+                return self._error(429, str(e))
+            except (KanvasError, ValueError, AttributeError) as e:
+                return self._error(400, str(e) or "Expected a JSON object")
+            return self._send(202, json.dumps({"job": job["id"]}).encode("utf-8"))
         if parts != ["api", "boards"]:
             return self._error(404, "Not found")
         if not self._may_manage():
@@ -3502,6 +3900,8 @@ def build_parser():
     text_sources(p, "note")
     p = add("retry", cmd_retry, "retry failed automation in its existing isolated worktree")
     p.add_argument("id")
+    p = add("usage", cmd_usage, "turns, cost and tokens of every automated run, per task, agent role and model")
+    p.add_argument("--json", action="store_true", help="print the rows as JSON")
     p = add("note", cmd_note, "append a note to a task (keeps the description intact)")
     p.add_argument("id")
     p.add_argument("text", nargs="?")

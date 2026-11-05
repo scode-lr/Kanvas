@@ -27,6 +27,29 @@ import kanvas  # noqa: E402
 SCRIPT = os.path.join(ROOT, "kanvas.py")
 CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
 
+# A stand-in for `claude`, which the agents' help in the dialogs runs: it answers by what the prompt asks.
+FAKE_CLAUDE = '''
+import json, sys
+prompt = sys.stdin.read()
+def out(text):
+    print(json.dumps({"type": "result", "result": text, "total_cost_usd": 0.01, "num_turns": 2, "is_error": False}))
+def fenced(data):
+    return "```json\\n" + json.dumps(data) + "\\n```"
+if "The architect speaks first" in prompt:
+    out("Architect proposes the service layer.")
+elif "The senior developer speaks second" in prompt:
+    out("Senior: reuse the access service.")
+elif "The architect speaks last" in prompt:
+    out("Settled.\\n" + fenced({"questions": ["Which clubs first?"], "draft": {"plan": "Final plan from the conversation."}}))
+elif "defining the product need" in prompt:
+    out("Questions below.\\n" + fenced({"questions": ["Which roles?"], "draft": {"outcome": "Outcome from the agent",
+        "needs": "Needs from the agent", "acceptance": "Acceptance from the agent", "non_goals": "", "repositories": [],
+        "agent": "implementer"}}))
+else:
+    out("A bug.\\n" + fenced({"title": "Fix the login crash", "group": "", "desc": "It no longer crashes.",
+        "duplicates": [], "questions": ["Which phones?"]}))
+'''
+
 
 def chrome_paths():
     yield "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -211,8 +234,26 @@ class BrowserSmokeTests(unittest.TestCase):
         shutil.copyfile(os.path.join(ROOT, "examples", "sample.json"), self.path)
         self.env = dict(os.environ, KANVAS_STATE_DIR=os.path.join(self.dir, "state"), PYTHONUNBUFFERED="1")
         self.env.pop("KANVAS_BOARD", None)
+        self.install_fake_claude()
         self.url = self.start_server()
         self.page = self.start_chrome()
+
+    def install_fake_claude(self):
+        """Puts a fake `claude` first on the PATH of the server, so the agents' help never reaches the real one."""
+        folder = os.path.join(self.dir, "bin")
+        os.mkdir(folder)
+        script = os.path.join(folder, "fake_claude.py")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(FAKE_CLAUDE)
+        if os.name == "nt":
+            with open(os.path.join(folder, "claude.bat"), "w", encoding="ascii", newline="\r\n") as f:
+                f.write(f'@echo off\n"{sys.executable}" "{script}"\n')
+        else:
+            launcher = os.path.join(folder, "claude")
+            with open(launcher, "w", encoding="utf-8") as f:
+                f.write(f'#!/bin/sh\nexec "{sys.executable}" "{script}"\n')
+            os.chmod(launcher, 0o755)
+        self.env["PATH"] = folder + os.pathsep + self.env.get("PATH", "")
 
     def wait_for(self, what, check, timeout=10, details=lambda: ""):
         deadline = time.monotonic() + timeout
@@ -340,6 +381,48 @@ class BrowserSmokeTests(unittest.TestCase):
         self.until("the screenshot to load", "document.querySelector('#panel .ev-grid img').naturalWidth === 1")
         self.assertTrue(self.page.js("document.querySelector('#panel .ev-grid').parentElement"
                                      ".querySelector('.section-head').textContent.startsWith('Evidence')"))
+
+    def use_the_draft(self):
+        self.until("the agents' draft", "[...document.querySelectorAll('dialog .assist button')].some(b => b.textContent === 'Use the draft')", timeout=30)
+        self.page.js("[...document.querySelectorAll('dialog .assist button')].find(b => b.textContent === 'Use the draft').click()")
+
+    def test_the_product_owner_drafts_a_new_task_from_its_dialog(self):
+        self.load()
+        self.page.js("document.querySelector('#new-task').click()")
+        self.until("the New task dialog", "!!document.querySelector('dialog .assist')")
+        self.page.js("document.querySelector('dialog input[name=title]').value = 'app crashes on login'")
+        self.page.js("document.querySelector('dialog .assist-bar button').click()")
+        self.until("the questions", "!!document.querySelector('dialog .assist-questions')", timeout=30)
+        self.assertIn("Which phones?", self.page.js("document.querySelector('dialog .assist-questions').innerText"))
+        self.assertEqual(self.page.js("document.querySelector('dialog input[name=title]').value"), "app crashes on login")
+        self.use_the_draft()
+        self.assertEqual(self.page.js("document.querySelector('dialog input[name=title]').value"), "Fix the login crash")
+        self.assertEqual(self.page.js("document.querySelector('dialog textarea[name=desc]').value"), "It no longer crashes.")
+        self.assertEqual(self.page.logged(), [])
+
+    def test_the_product_owner_drafts_a_definition_from_its_dialog(self):
+        self.load("#BE-05")
+        self.until("the panel of BE-05", "document.querySelector('#panel .cid')?.textContent === 'BE-05'")
+        self.page.js("[...document.querySelectorAll('#panel button')].find(b => b.textContent.includes('PO/TL Grill me')).click()")
+        self.until("the definition dialog", "!!document.querySelector('dialog textarea[name=outcome]')")
+        self.page.js("document.querySelector('dialog .assist-bar button').click()")
+        self.use_the_draft()
+        self.assertEqual(self.page.js("document.querySelector('dialog textarea[name=outcome]').value"), "Outcome from the agent")
+        self.assertEqual(self.page.js("document.querySelector('dialog textarea[name=acceptance]').value"), "Acceptance from the agent")
+        self.assertEqual(self.page.logged(), [])
+
+    def test_the_architect_and_the_senior_talk_in_the_plan_dialog(self):
+        self.load("#FE-04")
+        self.until("the panel of FE-04", "document.querySelector('#panel .cid')?.textContent === 'FE-04'")
+        self.page.js("[...document.querySelectorAll('#panel button')].find(b => b.textContent.includes('Architect/Senior Grill me')).click()")
+        self.until("the plan dialog", "!!document.querySelector('dialog textarea[name=plan]')")
+        self.page.js("document.querySelector('dialog .assist-bar button').click()")
+        self.use_the_draft()
+        speakers = self.page.js("[...document.querySelectorAll('dialog .assist-msg > b')].map(b => b.textContent)")
+        self.assertEqual(speakers, ["Architect", "Senior developer", "Architect", "For you"])
+        self.assertEqual(self.page.js("document.querySelector('dialog textarea[name=plan]').value"), "Final plan from the conversation.")
+        self.assertIn("Which clubs first?", self.page.js("document.querySelector('dialog .assist-questions').innerText"))
+        self.assertEqual(self.page.logged(), [])
 
     def test_a_task_without_evidence_shows_no_evidence_section(self):
         self.load("#BE-03")

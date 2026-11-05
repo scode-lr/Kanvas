@@ -1,5 +1,9 @@
 # Changelog
 ## Unreleased
+- Let the dialogs ask the agents for help from a button: the product owner in *New task* and in *PO + TL Grill me*, and a conversation between the architect and the senior developer in *Architect + Senior Grill me*. They read the project, ask what is missing and draft the form; the draft is only applied when you press *Use the draft*. They run read only, only for requests from the computer running Kanvas, at most two conversations at a time, with `automation.assist` limits
+- Start agent runs lean to spend fewer tokens: no MCP servers, only the project's settings and only the allowed tools, which cut the start of a typical run from about 41,000 to about 15,000 tokens; set `automation.lean` to `false` to go back
+- Run each task as an agent role with its own model, effort, limits and tools: `implementer` (sonnet), `complex` (opus) and `reviewer` (haiku, read-only) come built in, `automation.agents` changes and adds roles, the product Grill me chooses the role of a task (`definition.agent`), and the role is recorded on the run
+- Add `kanvas usage`, which lists the turns, cost and tokens of every run per task, agent role and model
 - Keep GitHub credentials away from the agent: it runs without `KANVAS_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` and `SSH_AUTH_SOCK`, and the tools it is refused now also cover pushes and merges that put an option first (`git -C . push`, `git --no-pager push`), which the plain prefixes missed
 - Let Kanvas use a GitHub token of its own: with `KANVAS_GITHUB_TOKEN` set, its `git push` and `gh` calls use only that token, over HTTPS; without it they keep using the computer's credentials
 - Never push to `dev`, `main`, `master` or the branch a pull request goes into, and refuse to start a task whose `branch_pattern` names one

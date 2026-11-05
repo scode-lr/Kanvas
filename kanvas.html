@@ -347,6 +347,18 @@ button.say { padding: 1px 6px; gap: 5px; font: 600 12px var(--mono); vertical-al
 .ev-clip { margin: 0; display: flex; flex-direction: column; gap: 3px; }
 .ev-clip video { width: 100%; max-height: 340px; border-radius: 6px; background: #000; }
 .ev-clip figcaption { font-size: 12px; color: var(--faint); overflow-wrap: anywhere; }
+.assist { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.assist-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.assist-bar .hint { flex: 1; min-width: 14ch; }
+.assist-log { display: flex; flex-direction: column; gap: 6px; }
+.assist-log:empty { display: none; }
+.assist-msg { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.assist-msg > b { font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.assist-msg > div { white-space: pre-wrap; font-size: 13px; line-height: 1.45; max-height: 13em; overflow: auto; overflow-wrap: anywhere; }
+.assist-questions { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.45; }
+.assist-status { margin: 0; font-size: 12.5px; color: var(--muted); }
+.assist-status:empty { display: none; }
+.assist-error { color: #b42318; }
 .section-head { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 .section-head .count { color: var(--faint); font-weight: 600; letter-spacing: 0; }
 .section-head .lane-bar { width: 36px; }
@@ -3746,32 +3758,114 @@ function depRow(d, onRemove) {
 const moveTo = (t, state) => undoable(ops.state(t.id, seenOf(t), state), moveWords(t.state, state)[0].replace("%", t.id));
 const unlink = (id, dep) => undoable(ops.removeDep(id, dep), `${id} no longer waits for ${dep}`);
 
+// The built-in agent roles, which kanvas.py has too; the board's automation.agents changes and adds to them.
+const DEFAULT_AGENT_ROLES = { implementer: { model: "sonnet" }, complex: { model: "opus" }, reviewer: { model: "haiku" } };
+
+function agentRoles() {
+  const given = board.automation?.agents && typeof board.automation.agents === "object" ? board.automation.agents : {};
+  return Object.fromEntries([...new Set([...Object.keys(DEFAULT_AGENT_ROLES), ...Object.keys(given)])]
+    .map((name) => [name, { ...DEFAULT_AGENT_ROLES[name], ...given[name] }]));
+}
+
+// Asks the agents to question the owner and draft the fields of a dialog: the product owner for a task and its product
+// definition, and the architect and the senior developer, talking, for the construction plan. Nothing changes in the
+// dialog until the owner presses "Use the draft", and the owner still edits and approves.
+const AGENT_NAMES = { "product-owner": "Product owner", architect: "Architect", "senior-dev": "Senior developer" };
+
+function assistPanel({ kind, id, label, hint, fields, apply }) {
+  const log = h("div", { class: "assist-log" });
+  const status = h("p", { class: "assist-status", role: "status" });
+  const goLabel = h("span", {}, label);
+  const go = h("button", { type: "button", class: "primary" }, icon("spark"), goLabel);
+  const panel = h("div", { class: "assist" }, h("div", { class: "assist-bar" }, go, h("span", { class: "hint" }, hint)), log, status);
+  const fail = (message) => { status.className = "assist-status assist-error"; status.textContent = message; go.disabled = false; };
+  const said = (job) => log.replaceChildren(...job.messages.map((m) => h("div", { class: "assist-msg" }, h("b", {}, AGENT_NAMES[m.agent] || m.agent), h("div", {}, m.text))));
+  const finish = (job) => {
+    const { questions = [], duplicates = [], draft = {} } = job.result || {};
+    status.className = "assist-status";
+    status.textContent = `${job.messages.length} ${job.messages.length === 1 ? "answer" : "answers"} · ${job.turns} turns · $${Number(job.cost).toFixed(2)}`;
+    goLabel.textContent = "Ask again";
+    go.disabled = false;
+    log.append(...compact(
+      questions.length || duplicates.length ? h("div", { class: "assist-msg" }, h("b", {}, "For you"),
+        duplicates.length ? h("div", {}, `May duplicate ${duplicates.join(", ")}.`) : null,
+        questions.length ? h("ol", { class: "assist-questions" }, questions.map((q) => h("li", {}, q))) : null) : null,
+      h("button", { type: "button", class: "primary", onclick: (e) => { apply(draft); e.currentTarget.textContent = "Draft applied"; e.currentTarget.disabled = true; } }, "Use the draft")));
+  };
+  go.addEventListener("click", async () => {
+    go.disabled = true;
+    status.className = "assist-status";
+    status.textContent = "Starting…";
+    log.replaceChildren();
+    try {
+      const r = await fetch("api/assist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, id, fields: fields() }) });
+      const started = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(started.error || "The agents could not start.");
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        if (!panel.isConnected) return;
+        const poll = await fetch(`api/assist/${started.job}`, { cache: "no-store" });
+        const job = await poll.json().catch(() => ({}));
+        if (!poll.ok) throw new Error(job.error || "The conversation was lost.");
+        said(job);
+        if (job.status === "running") { status.textContent = `${AGENT_NAMES[job.working] || job.working} is working…`; continue; }
+        return job.status === "failed" ? fail(job.error || "The agents failed.") : finish(job);
+      }
+    } catch (e) {
+      fail(e.message === "Failed to fetch" ? "The agents need `kanvas serve` running on this computer." : e.message);
+    }
+  });
+  return panel;
+}
+
 async function approveDefinition(t) {
   const d = t.definition || {};
   const repositories = Array.isArray(board.automation?.repositories) ? board.automation.repositories : [];
   const selected = new Set(d.repositories || []);
+  const outcome = h("textarea", { name: "outcome", rows: 3, required: true, value: d.outcome || "", placeholder: "What changes for the user or the business?" });
+  const needs = h("textarea", { name: "needs", rows: 4, required: true, value: d.needs || "", placeholder: "Business rules, dependencies, platforms, privacy, operational constraints…" });
+  const acceptance = h("textarea", { name: "acceptance", rows: 4, required: true, value: d.acceptance || "", placeholder: "Observable conditions that prove the task is complete." });
+  const nonGoals = h("textarea", { name: "non_goals", rows: 2, value: d.non_goals || "", placeholder: "What is explicitly outside this task?" });
+  const repoSelect = repositories.length ? h("select", { name: "repositories", multiple: true, size: Math.min(6, repositories.length), required: true },
+    ...repositories.map((r) => h("option", { value: r.id, selected: selected.has(r.id) }, r.name || r.id))) : null;
+  const agentSelect = repositories.length ? h("select", { name: "agent" }, ...Object.entries(agentRoles()).filter(([name]) => name !== "reviewer").map(([name, r]) =>
+    h("option", { value: name, selected: name === (d.agent || "implementer") }, `${name} · ${r.model || "default model"}`))) : null;
   const data = await modal(`PO + TL Grill me · ${t.id}`, [
     h("p", {}, "Define the product need before making this task available for development."),
-    h("label", { class: "field" }, "Outcome", h("textarea", { name: "outcome", rows: 3, required: true, value: d.outcome || "", placeholder: "What changes for the user or the business?" })),
-    h("label", { class: "field" }, "Needs and constraints", h("textarea", { name: "needs", rows: 4, required: true, value: d.needs || "", placeholder: "Business rules, dependencies, platforms, privacy, operational constraints…" })),
-    h("label", { class: "field" }, "Acceptance criteria", h("textarea", { name: "acceptance", rows: 4, required: true, value: d.acceptance || "", placeholder: "Observable conditions that prove the task is complete." })),
-    h("label", { class: "field" }, "Non-goals", h("textarea", { name: "non_goals", rows: 2, value: d.non_goals || "", placeholder: "What is explicitly outside this task?" })),
-    repositories.length ? h("label", { class: "field" }, "Repositories",
-      h("select", { name: "repositories", multiple: true, size: Math.min(6, repositories.length), required: true },
-        ...repositories.map((r) => h("option", { value: r.id, selected: selected.has(r.id) }, r.name || r.id))),
-      h("span", { class: "hint" }, "Select every repository the implementation may change.")) : null,
+    store.readOnly ? null : assistPanel({
+      kind: "definition", id: t.id, label: "Ask the product owner", hint: "Asks what is missing and drafts the form.",
+      fields: () => ({ outcome: outcome.value, needs: needs.value, acceptance: acceptance.value, non_goals: nonGoals.value }),
+      apply: (draft) => {
+        outcome.value = draft.outcome; needs.value = draft.needs; acceptance.value = draft.acceptance; nonGoals.value = draft.non_goals;
+        if (repoSelect) for (const o of repoSelect.options) o.selected = (draft.repositories || []).includes(o.value);
+        if (agentSelect && draft.agent) agentSelect.value = draft.agent;
+      },
+    }),
+    h("label", { class: "field" }, "Outcome", outcome),
+    h("label", { class: "field" }, "Needs and constraints", needs),
+    h("label", { class: "field" }, "Acceptance criteria", acceptance),
+    h("label", { class: "field" }, "Non-goals", nonGoals),
+    repoSelect ? h("label", { class: "field" }, "Repositories", repoSelect, h("span", { class: "hint" }, "Select every repository the implementation may change.")) : null,
+    agentSelect ? h("label", { class: "field" }, "Agent", agentSelect,
+      h("span", { class: "hint" }, "Who implements it. Leave the implementer unless the task needs a stronger model.")) : null,
   ], { ok: "Approve definition" });
   if (!data) return;
   const definition = Object.fromEntries(["outcome", "needs", "acceptance", "non_goals"].map((k) => [k, data.get(k).trim()]));
   if (repositories.length) definition.repositories = data.getAll("repositories").map(String);
+  if (data.get("agent") && data.get("agent") !== "implementer") definition.agent = data.get("agent");
   undoable(ops.define(t.id, seenOf(t), definition), `Approved the product definition of ${t.id}`, { onFail: () => approveDefinition(t) });
 }
 
 async function startWorkDialog(t) {
+  const planField = h("textarea", { name: "plan", rows: 8, required: true,
+    placeholder: "Architecture, repositories, API/data changes, security, tests, observability, rollout and rollback…" });
   const data = await modal(`Architect + Senior Grill me · ${t.id}`, [
     h("p", {}, "Record the construction plan before a worktree or implementation starts."),
-    h("label", { class: "field" }, "Technical construction plan", h("textarea", { name: "plan", rows: 8, required: true,
-      placeholder: "Architecture, repositories, API/data changes, security, tests, observability, rollout and rollback…" })),
+    store.readOnly ? null : assistPanel({
+      kind: "plan", id: t.id, label: "Ask the architect and the senior", hint: "They talk it over, then give you their questions and a draft plan.",
+      fields: () => ({ plan: planField.value }), apply: (draft) => { planField.value = draft.plan; },
+    }),
+    h("label", { class: "field" }, "Technical construction plan", planField),
   ], { ok: "Start construction" });
   if (!data) return;
   const plan = data.get("plan").trim();
@@ -4032,7 +4126,8 @@ function fillPanel(panel, t) {
       h("p", {}, h("b", {}, "Needs: "), t.definition.needs || "—"),
       h("p", {}, h("b", {}, "Acceptance: "), t.definition.acceptance || "—"),
       t.definition.non_goals ? h("p", {}, h("b", {}, "Non-goals: "), t.definition.non_goals) : null,
-      t.definition.repositories?.length ? h("p", {}, h("b", {}, "Repositories: "), t.definition.repositories.join(", ")) : null)));
+      t.definition.repositories?.length ? h("p", {}, h("b", {}, "Repositories: "), t.definition.repositories.join(", ")) : null,
+      t.definition.agent ? h("p", {}, h("b", {}, "Agent: "), t.definition.agent) : null)));
   if (t.work) workflow.push(h("section", { class: "p-sec" },
     h("div", { class: "section-head" }, "Construction plan", h("span", { class: "count" }, t.work.by || "?")),
     h("div", { class: "md" },
@@ -4629,11 +4724,18 @@ async function newTaskDialog(group, { deps, blocks = [], title = "", desc = "" }
   };
   where = h("p", { class: "dlg-where" });
   sayWhere();
+  const titleField = h("input", { name: "title", required: true, autocomplete: "off", value: title, placeholder: "What needs to happen?" });
+  const descField = h("textarea", { name: "desc", rows: 4, value: desc });
   const data = await modal("New task", [
     where,
-    h("label", { class: "field" }, "Title", h("input", { name: "title", required: true, autocomplete: "off", value: title, placeholder: "What needs to happen?" })),
+    h("label", { class: "field" }, "Title", titleField),
     h("label", { class: "field" }, "Group", groupField),
-    h("label", { class: "field" }, h("span", {}, "Description ", h("span", { class: "hint" }, "Markdown")), h("textarea", { name: "desc", rows: 4, value: desc })),
+    h("label", { class: "field" }, h("span", {}, "Description ", h("span", { class: "hint" }, "Markdown")), descField),
+    assistPanel({
+      kind: "task", label: "Ask the product owner", hint: "Sharpens the title and description, picks the group and asks what is missing.",
+      fields: () => ({ title: titleField.value, desc: descField.value }),
+      apply: (draft) => { titleField.value = draft.title; descField.value = draft.desc; groupField.value = draft.group; sayWhere(); },
+    }),
     h("div", { class: "field" }, h("span", {}, "Blocked by ", h("span", { class: "hint" }, "must be done first")), depPick.el),
     h("div", { class: "field" }, h("span", {}, "Blocks ", h("span", { class: "hint" }, "wait for this task")), blockPick.el),
   ], { ok: "Create task" });

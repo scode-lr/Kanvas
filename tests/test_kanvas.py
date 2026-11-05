@@ -1406,9 +1406,11 @@ class AutomationTests(TempBoard):
         return [{"id": "front", "name": "Frontend", "path": repo, "base": "origin/dev",
                  "branch": "feature/DV-02", "worktree": repo, "commit": "a" * 40}]
 
-    def run_claude(self, repo, events, returncode=0, pulls=None, publish_error=None, **extra):
+    def run_claude(self, repo, events, returncode=0, pulls=None, publish_error=None, agent=None, **extra):
         board = self.automated_board(repo)
         board["automation"].update(extra)
+        if agent:
+            kanvas.find_task(board, "DV-02")["definition"]["agent"] = agent
         write_board(self.path, board)
 
         def completed(command, **kwargs):
@@ -1477,6 +1479,142 @@ class AutomationTests(TempBoard):
                                           kanvas.automation_config(board, self.path), self.fake_worktrees(repo))
         self.assertIn("Do not push, open pull requests, merge or deploy", prompt)
         self.assertNotIn("open a pull request targeting", prompt)
+
+    def roles_of(self, **automation):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo, exist_ok=True)
+        board = self.automated_board(repo)
+        board["automation"].update(automation)
+        return board, kanvas.automation_config(board, self.path)
+
+    def test_agent_roles_start_with_the_built_in_ones_and_the_board_changes_them(self):
+        _, config = self.roles_of()
+        roles = config["agents"]
+        self.assertEqual([roles[r]["model"] for r in ("implementer", "complex", "reviewer")], ["sonnet", "opus", "haiku"])
+        self.assertEqual(roles["reviewer"]["max_turns"], 12)
+        self.assertNotIn("Edit", roles["reviewer"]["allowed_tools"])
+        _, config = self.roles_of(agents={"complex": {"model": "fable"}, "docs": {"model": "haiku", "effort": "low", "max_turns": 5}})
+        roles = config["agents"]
+        self.assertEqual(roles["complex"], {"model": "fable", "effort": "high"})
+        self.assertEqual(roles["docs"], {"model": "haiku", "effort": "low", "max_turns": 5})
+        self.assertEqual(roles["implementer"], {"model": "sonnet", "effort": "medium"})
+
+    def test_invalid_agent_roles_and_lean_flag_are_refused(self):
+        for bad in ([], {"x": "opus"}, {"x": {"model": 3}}, {"x": {"effort": "huge"}}, {"x": {"max_turns": 0}},
+                    {"x": {"allowed_tools": 5}}):
+            with self.subTest(agents=bad), self.assertRaises(kanvas.KanvasError):
+                self.roles_of(agents=bad)
+        with self.assertRaises(kanvas.KanvasError):
+            self.roles_of(lean="yes")
+
+    def test_a_task_runs_as_the_role_its_definition_names_and_as_the_implementer_otherwise(self):
+        task = {"definition": {"approved": True}}
+        self.assertEqual(kanvas.task_agent_name(task), "implementer")
+        self.assertEqual(kanvas.task_agent_name({"definition": {"agent": "complex"}}), "complex")
+        self.assertEqual(kanvas.task_agent_name({"definition": {"agent": "complex"}, "work": {"agent": "docs"}}), "docs")
+        self.assertEqual(kanvas.task_agent_name({}), "implementer")
+
+    def test_the_agent_starts_lean_by_default(self):
+        board, config = self.roles_of()
+        worktrees = self.fake_worktrees(os.path.join(self.dir, "front"))
+        command = kanvas.claude_command(config, worktrees, config["agents"]["implementer"])
+        self.assertIn("--strict-mcp-config", command)
+        self.assertEqual(command[command.index("--setting-sources") + 1], "project,local")
+        self.assertEqual(command[command.index("--tools") + 1], "Bash,Edit,Write,Read,Glob,Grep")
+        self.assertEqual(command[command.index("--model") + 1], "sonnet")
+        self.assertEqual(command[command.index("--effort") + 1], "medium")
+        _, config = self.roles_of(lean=False)
+        command = kanvas.claude_command(config, worktrees, config["agents"]["implementer"])
+        for flag in ("--strict-mcp-config", "--setting-sources", "--tools"):
+            self.assertNotIn(flag, command)
+
+    def test_a_role_sets_the_model_effort_limits_and_tools_over_the_automation_ones(self):
+        board, config = self.roles_of(model="haiku", max_turns=40, max_budget_usd=2)
+        worktrees = self.fake_worktrees(os.path.join(self.dir, "front"))
+        complex_run = kanvas.claude_command(config, worktrees, config["agents"]["complex"])
+        self.assertEqual((complex_run[complex_run.index("--model") + 1], complex_run[complex_run.index("--effort") + 1]), ("opus", "high"))
+        self.assertEqual(complex_run[complex_run.index("--max-turns") + 1], "40")
+        review = kanvas.claude_command(config, worktrees, config["agents"]["reviewer"])
+        self.assertEqual(review[review.index("--max-turns") + 1], "12")
+        self.assertEqual(review[review.index("--tools") + 1], "Read,Glob,Grep,Bash")
+        allowed = review[review.index("--allowedTools") + 1:review.index("--disallowedTools")]
+        self.assertIn("Bash(git diff:*)", allowed)
+        self.assertNotIn("Edit", allowed)
+        plain = kanvas.claude_command(config, worktrees)
+        self.assertEqual(plain[plain.index("--model") + 1], "haiku")
+        self.assertNotIn("--effort", plain)
+        _, no_model = self.roles_of(model="haiku", agents={"docs": {"effort": "low"}})
+        docs = kanvas.claude_command(no_model, worktrees, no_model["agents"]["docs"])
+        self.assertEqual(docs[docs.index("--model") + 1], "haiku")
+
+    def agent_pull(self):
+        return {"id": "front", "name": "Frontend", "branch": "feature/DV-02", "base": "dev", "commits": 1,
+                "url": "https://github.com/acme/front/pull/7"}
+
+    def success_events(self):
+        return [{"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "total_cost_usd": 0.05, "result": "Done"}]
+
+    def test_a_run_uses_the_model_of_the_role_its_task_names_and_records_it(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        for agent, model in ((None, "sonnet"), ("complex", "opus")):
+            with self.subTest(agent=agent):
+                run, _ = self.run_claude(repo, self.success_events(), pulls=[self.agent_pull()], agent=agent)
+                command = run.call_args.args[0]
+                self.assertEqual(command[command.index("--model") + 1], model)
+                self.assertEqual(self.get("DV-02")["work"]["automation"]["agent"], agent or "implementer")
+
+    def test_a_task_that_names_an_unknown_role_fails_before_anything_runs(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        run, _ = self.run_claude(repo, self.success_events(), pulls=[self.agent_pull()], agent="ghost")
+        self.assertEqual(run.call_count, 0)
+        automation = self.get("DV-02")["work"]["automation"]
+        self.assertEqual(automation["status"], "failed")
+        self.assertIn("ghost", automation["summary"])
+        self.assertIn("implementer", automation["summary"])
+
+    def write_run_log(self, name, **result):
+        runs = os.path.join(self.dir, ".kanvas", "runs")
+        os.makedirs(runs, exist_ok=True)
+        event = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 12, "total_cost_usd": 0.25,
+                 "duration_ms": 90500, "usage": {"output_tokens": 3000, "cache_read_input_tokens": 400000,
+                                                 "cache_creation_input_tokens": 30000},
+                 "modelUsage": {"claude-sonnet-5-5": {"costUSD": 0.25}}}
+        with open(os.path.join(runs, name), "w", encoding="utf-8") as f:
+            f.write("not json\n" + json.dumps({"type": "system"}) + "\n" + json.dumps({**event, **result}) + "\n")
+
+    def test_usage_reports_turns_cost_and_tokens_per_run_and_model(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        kanvas.find_task(board, "DV-02")["work"]["automation"] = {"status": "completed", "agent": "complex"}
+        write_board(self.path, board)
+        self.write_run_log("dv-02.jsonl")
+        self.write_run_log("other-run.jsonl", total_cost_usd=0.5, modelUsage={"claude-opus-5-5": {}})
+        with open(os.path.join(self.dir, ".kanvas", "runs", "empty.jsonl"), "w") as f:
+            f.write("no result here\n")
+        rows = {r["task"]: r for r in kanvas.usage_runs(kanvas.load_board(self.path), kanvas.automation_config(self.board(), self.path))}
+        self.assertEqual(set(rows), {"DV-02", "other-run"})
+        self.assertEqual((rows["DV-02"]["agent"], rows["DV-02"]["model"], rows["DV-02"]["turns"], rows["DV-02"]["seconds"]),
+                         ("complex", "claude-sonnet-5-5", 12, 90))
+        self.assertEqual((rows["DV-02"]["output"], rows["DV-02"]["cache_read"], rows["DV-02"]["cache_write"]), (3000, 400000, 30000))
+        _, out, _ = self.run_cli("usage")
+        self.assertIn("DV-02", out)
+        self.assertIn("2 runs, $0.75 in total", out)
+        self.assertIn("claude-opus-5-5: 1 runs, $0.50", out)
+        _, out, _ = self.run_cli("usage", "--json")
+        self.assertEqual({r["task"] for r in json.loads(out)}, {"DV-02", "other-run"})
+
+    def test_the_page_offers_the_same_built_in_roles_as_the_server(self):
+        with open(os.path.join(ROOT, "kanvas.html"), encoding="utf-8") as f:
+            html = f.read()
+        declared = re.search(r"const DEFAULT_AGENT_ROLES = \{(.*?)\};", html).group(1)
+        in_page = dict(re.findall(r"(\w+): \{ model: \"(\w+)\" \}", declared))
+        self.assertEqual(in_page, {name: role["model"] for name, role in kanvas.DEFAULT_AGENTS.items()})
+
+    def test_usage_needs_automation(self):
+        self.assertIn("Automation is not enabled", self.fails("usage"))
 
     def publish_calls(self, branch="feature/DV-02", base="origin/dev", env=None):
         """Runs publish_pull_requests with git and gh faked, and with only the GitHub tokens in `env` in the environment."""
@@ -2787,6 +2925,174 @@ class ServerTests(TempBoard):
         for path in (f"/{self.name}/api/evidence/DV-02", f"/{self.name}/evidence/DV-02/a.png"):
             with self.subTest(path=path):
                 self.assertEqual(self.request("GET", path, headers={"Host": "evil.example:8765"})[0], 403)
+
+    def fake_agents(self, replies, gate=None):
+        """Replaces the claude process of the agents' help: each call takes the next reply, which may be text, a
+        (return code, stdout) pair or an exception. `gate`, an Event, holds every call until it is set."""
+        self.agent_calls = []
+        queue = list(replies)
+
+        def run(command, **kwargs):
+            self.agent_calls.append({"command": command, "prompt": kwargs.get("input"), "cwd": kwargs.get("cwd"),
+                                     "env": kwargs.get("env")})
+            if gate:
+                gate.wait(10)
+            reply = queue.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            if isinstance(reply, tuple):
+                return mock.Mock(returncode=reply[0], stdout=reply[1], stderr="")
+            stdout = json.dumps({"type": "result", "result": reply, "total_cost_usd": 0.01, "num_turns": 2, "is_error": False})
+            return mock.Mock(returncode=0, stdout=stdout, stderr="")
+        return contextlib.ExitStack(), [mock.patch.object(kanvas.subprocess, "run", side_effect=run),
+                                        mock.patch.object(kanvas.shutil, "which", return_value="claude")]
+
+    def ask_agents(self, replies, kind, task_id=None, fields=None, gate=None, env=None):
+        """Asks for the agents' help with their replies faked, and returns the finished job."""
+        stack, patches = self.fake_agents(replies, gate)
+        with stack:
+            for p in patches:
+                stack.enter_context(p)
+            stack.enter_context(mock.patch.dict(os.environ, env or {}))
+            status, _, body = self.post_json("api/assist", {"kind": kind, "id": task_id, "fields": fields or {}})
+            self.assertEqual(status, 202, body)
+            return self.finished_job(json.loads(body)["job"])
+
+    def post_json(self, path, data, headers=None):
+        return self.request("POST", f"/{self.name}/{path}", json.dumps(data).encode("utf-8"),
+                            {"Content-Type": "application/json", **(headers or {})})
+
+    def finished_job(self, job_id):
+        deadline = time.monotonic() + 10
+        while True:
+            status, _, body = self.request("GET", f"/{self.name}/api/assist/{job_id}")
+            job = json.loads(body)
+            if status != 200 or job["status"] != "running" or time.monotonic() > deadline:
+                return job
+            time.sleep(0.05)
+
+    @staticmethod
+    def reply(prose, data):
+        return f"{prose}\n\n```json\n{json.dumps(data)}\n```"
+
+    def test_the_product_owner_drafts_a_new_task_read_only(self):
+        draft = {"title": "Fix the crash on login", "group": "DV", "desc": "Login no longer crashes.", "duplicates": ["DV-02", "XX-9"],
+                 "questions": ["Which phones?", 7]}
+        job = self.ask_agents([self.reply("This is a bug.", draft)], "task", fields={"title": "app crashes on login"},
+                              env={"GH_TOKEN": "secret", "KANVAS_GITHUB_TOKEN": "secret"})
+        self.assertEqual(job["status"], "done", job)
+        self.assertEqual(job["result"]["draft"], {"title": "Fix the crash on login", "group": "DV", "desc": "Login no longer crashes."})
+        self.assertEqual((job["result"]["duplicates"], job["result"]["questions"]), (["DV-02"], ["Which phones?"]))
+        self.assertEqual([m["agent"] for m in job["messages"]], ["product-owner"])
+        self.assertEqual(job["messages"][0]["text"], "This is a bug.")
+        call = self.agent_calls[0]
+        command = call["command"]
+        self.assertEqual(command[command.index("--agent") + 1], "product-owner")
+        self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertNotIn("Edit", command)
+        self.assertNotIn("Bash", command)
+        self.assertIn("--strict-mcp-config", command)
+        self.assertIn("app crashes on login", call["prompt"])
+        self.assertIn("- DV: Development", call["prompt"])
+        self.assertIn("DV-02", call["prompt"])
+        self.assertEqual(call["cwd"], self.dir)
+        self.assertNotIn("GH_TOKEN", call["env"])
+        self.assertNotIn("KANVAS_GITHUB_TOKEN", call["env"])
+
+    def test_a_group_the_board_does_not_have_is_dropped_from_the_draft(self):
+        job = self.ask_agents([self.reply("ok", {"title": "T", "group": "ZZ", "desc": ""})], "task")
+        self.assertEqual(job["result"]["draft"]["group"], "")
+
+    def test_the_product_owner_drafts_a_definition_with_only_what_the_board_has(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.board()
+        board["automation"] = {"enabled": True, "project_root": self.dir,
+                               "repositories": [{"id": "front", "name": "Frontend", "path": repo, "base": "HEAD"}]}
+        write_board(self.path, board)
+        draft = {"outcome": "Clubs see X", "needs": "Per club", "acceptance": "Y works", "non_goals": "",
+                 "repositories": ["front", "ghost"], "agent": "complex"}
+        job = self.ask_agents([self.reply("Questions below.", {"questions": ["Which club?"], "draft": draft})], "definition",
+                              "DV-04", {"outcome": "mine"})
+        self.assertEqual(job["status"], "done", job)
+        self.assertEqual(job["result"]["draft"]["repositories"], ["front"])
+        self.assertEqual(job["result"]["draft"]["agent"], "complex")
+        self.assertEqual(job["result"]["questions"], ["Which club?"])
+        prompt = self.agent_calls[0]["prompt"]
+        self.assertIn("Task DV-04", prompt)
+        self.assertIn("Outcome: mine", prompt)
+        self.assertIn("front: Frontend", prompt)
+        job = self.ask_agents([self.reply("x", {"draft": dict(draft, agent="reviewer")})], "definition", "DV-04")
+        self.assertEqual(job["result"]["draft"]["agent"], "implementer")
+
+    def test_the_architect_and_the_senior_developer_talk_before_the_plan(self):
+        final = {"questions": ["Who may do it?"], "draft": {"plan": "1. Add the endpoint. 2. Test the club case."}}
+        job = self.ask_agents(["Architect: use the service layer.", "Senior: reuse ClubAccessService.",
+                               self.reply("Settled.", final)], "plan", "DV-02", {"plan": "my idea"})
+        self.assertEqual(job["status"], "done", job)
+        self.assertEqual([m["agent"] for m in job["messages"]], ["architect", "senior-dev", "architect"])
+        agents = [c["command"][c["command"].index("--agent") + 1] for c in self.agent_calls]
+        self.assertEqual(agents, ["architect", "senior-dev", "architect"])
+        self.assertIn("my idea", self.agent_calls[0]["prompt"])
+        self.assertIn("Architect: use the service layer.", self.agent_calls[1]["prompt"])
+        self.assertIn("Senior: reuse ClubAccessService.", self.agent_calls[2]["prompt"])
+        self.assertIn("Architect: use the service layer.", self.agent_calls[2]["prompt"])
+        self.assertEqual(job["result"]["draft"], {"plan": "1. Add the endpoint. 2. Test the club case."})
+        self.assertEqual(job["result"]["questions"], ["Who may do it?"])
+        self.assertEqual((job["turns"], round(job["cost"], 2)), (6, 0.03))
+        for call in self.agent_calls:
+            self.assertEqual(call["command"][call["command"].index("--tools") + 1], "Read,Glob,Grep")
+
+    def test_the_agents_failures_reach_the_page_instead_of_hanging(self):
+        for replies, expected in (([(1, "")], "could not answer"), ([(0, "not json")], "could not answer"),
+                                  (["No draft here."], "did not return a draft"),
+                                  ([subprocess.TimeoutExpired("claude", 1)], "took too long"),
+                                  ([self.reply("x", {"title": ""})], "did not return a draft")):
+            with self.subTest(expected=expected):
+                job = self.ask_agents(replies, "task")
+                self.assertEqual(job["status"], "failed")
+                self.assertIn(expected, job["error"])
+                self.assertEqual(job["working"], "")
+
+    def test_the_agents_help_is_refused_for_what_it_cannot_do(self):
+        stack, patches = self.fake_agents([])
+        with stack:
+            for p in patches:
+                stack.enter_context(p)
+            for body, expected in (({"kind": "story"}, 400), ({"kind": "definition", "id": "NOPE"}, 400),
+                                   ({"kind": "plan", "id": "DV-04"}, 400), ({"kind": "plan"}, 400)):
+                with self.subTest(body=body):
+                    self.assertEqual(self.post_json("api/assist", body)[0], expected)
+            self.assertEqual(self.request("POST", f"/{self.name}/api/assist", b"{}", {"Content-Type": "text/plain"})[0], 415)
+            self.assertEqual(self.post_json("api/assist", {"kind": "task"}, {"Host": "evil.example:8765"})[0], 403)
+            self.assertEqual(self.post_json("api/assist", {"kind": "task"}, {"X-Forwarded-For": "100.64.0.9"})[0], 403)
+            self.assertEqual(self.request("POST", "/nope/api/assist", b"{}", {"Content-Type": "application/json"})[0], 404)
+            self.assertEqual(self.request("GET", f"/{self.name}/api/assist/missing")[0], 404)
+        with mock.patch.object(kanvas.shutil, "which", return_value=None):
+            status, _, body = self.post_json("api/assist", {"kind": "task"})
+        self.assertEqual(status, 400)
+        self.assertIn("not installed", json.loads(body)["error"])
+        self.assertEqual(self.agent_calls, [])
+
+    def test_only_two_agent_conversations_run_at_a_time(self):
+        gate = threading.Event()
+        stack, patches = self.fake_agents([self.reply(x, {"title": x.upper()}) for x in "abc"], gate)
+        with stack:
+            for p in patches:
+                stack.enter_context(p)
+            ids = []
+            for _ in range(2):
+                status, _, body = self.post_json("api/assist", {"kind": "task"})
+                self.assertEqual(status, 202)
+                ids.append(json.loads(body)["job"])
+            status, _, body = self.post_json("api/assist", {"kind": "task"})
+            self.assertEqual(status, 429)
+            self.assertIn("already running", json.loads(body)["error"])
+            gate.set()
+            self.assertEqual([self.finished_job(i)["status"] for i in ids], ["done", "done"])
+            status, _, body = self.post_json("api/assist", {"kind": "task"})
+            self.assertEqual(status, 202)
+            self.assertEqual(self.finished_job(json.loads(body)["job"])["status"], "done")
 
     def test_compare_and_swap(self):
         _, headers, body = self.request("GET", self.api)
