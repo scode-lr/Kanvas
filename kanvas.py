@@ -792,6 +792,7 @@ def automation_config(board, path):
         "lean": _flag(config.get("lean"), True, "automation.lean"),
         "agents": agent_roles(config.get("agents")),
         "assist": assist_settings(config.get("assist")),
+        "review": review_settings(config.get("review")),
         "max_rounds": _positive_int(config.get("max_rounds"), 3, "automation.max_rounds"),
         "max_turns": config.get("max_turns"),
         "max_budget_usd": config.get("max_budget_usd"),
@@ -1021,9 +1022,12 @@ DEFAULT_AGENT = "implementer"
 DEFAULT_AGENTS = {
     "implementer": {"model": "sonnet", "effort": "medium"},
     "complex": {"model": "opus", "effort": "high"},
-    "reviewer": {"model": "haiku", "effort": "low", "max_turns": 12,
-                 "allowed_tools": ["Read", "Glob", "Grep", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
-                                   "Bash(git status:*)"]},
+    # The reviewers read the diff in their prompt and open other files only when it is not enough, so they need no shell.
+    # `agent` runs them as the project's agent of that name. The strong one looks again at what the first could not decide.
+    "reviewer": {"agent": "reviewer", "model": "haiku", "effort": "low", "max_turns": 12,
+                 "allowed_tools": ["Read", "Glob", "Grep"]},
+    "reviewer-strong": {"agent": "reviewer", "model": "sonnet", "effort": "medium", "max_turns": 16,
+                        "allowed_tools": ["Read", "Glob", "Grep"]},
 }
 
 
@@ -1040,6 +1044,8 @@ def agent_roles(value):
         role = {**roles.get(name, {}), **given}
         if role.get("model") is not None and not isinstance(role["model"], str):
             raise KanvasError(f"automation.agents.{name}.model must be a model name")
+        if role.get("agent") is not None and not isinstance(role["agent"], str):
+            raise KanvasError(f"automation.agents.{name}.agent must be the name of a Claude Code agent")
         if role.get("effort") is not None and role["effort"] not in EFFORT_LEVELS:
             raise KanvasError(f"automation.agents.{name}.effort must be one of {', '.join(EFFORT_LEVELS)}")
         if role.get("max_turns") is not None:
@@ -1049,6 +1055,21 @@ def agent_roles(value):
                 role[key] = _tool_list(given[key], ())
         roles[name] = role
     return roles
+
+
+def review_settings(value):
+    """`automation.review`: whether an agent reviews every task that reaches Review, and how many times in a row it may
+    send the work back to the implementer on its own before it leaves the findings to the human."""
+    if value is None:
+        return {"enabled": True, "rounds": 2}
+    if isinstance(value, bool):
+        return {"enabled": value, "rounds": 2}
+    if not isinstance(value, dict):
+        raise KanvasError("automation.review must be true, false or an object")
+    rounds = value.get("rounds", 2)
+    if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 0:
+        raise KanvasError("automation.review.rounds must be a whole number, 0 or more")
+    return {"enabled": _flag(value.get("enabled"), True, "automation.review.enabled"), "rounds": rounds}
 
 
 def task_agent_name(task):
@@ -1073,6 +1094,8 @@ def claude_command(config, worktrees, role=None):
                "--permission-mode", "acceptEdits"]
     for extra in worktrees[1:]:
         command += ["--add-dir", extra["worktree"]]
+    if role.get("agent"):
+        command += ["--agent", str(role["agent"])]
     if pick("model"):
         command += ["--model", str(pick("model"))]
     if pick("effort"):
@@ -1095,8 +1118,8 @@ def claude_command(config, worktrees, role=None):
     return command
 
 
-def claude_outcome(proc, log):
-    """The final `result` event of the stream-json log holds Claude's closing summary and whether it failed."""
+def read_result(log):
+    """The final `result` event of a stream-json log, or None when the run left none."""
     result = None
     try:
         with open(log, encoding="utf-8", errors="replace") as f:
@@ -1109,6 +1132,12 @@ def claude_outcome(proc, log):
                     result = event
     except OSError:
         pass
+    return result
+
+
+def claude_outcome(proc, log):
+    """The final `result` event of the stream-json log holds Claude's closing summary and whether it failed."""
+    result = read_result(log)
     if result is None:
         return False, ""
     summary = str(result.get("result") or "").strip()
@@ -1209,6 +1238,232 @@ def publish_pull_requests(task, worktrees, summary, round_no=1):
     if not pulls:
         raise KanvasError("The agent made no commits, so there is no pull request to open")
     return pulls
+
+
+# ---------------------------------------------------------------------------
+# The reviewer: when a task reaches Review an agent reads the diff of its branches against the acceptance criteria. It
+# approves, asks the implementer for changes (which the dispatcher runs as the next round, and reviews again), or leaves
+# its findings for the human when it cannot decide or has already sent the work back too many times in a row. A human
+# who sends the task back starts the cycle again.
+
+REVIEW_DIFF_LIMIT = 60000
+REVIEW_VERDICTS = ("approve", "changes", "escalate")
+CHANGES_NOTE = "Agent review changes requested"
+
+
+def review_worktrees(config, run):
+    """The worktrees of a task's last run that still exist, with their repository's name and base."""
+    found = []
+    for item in run.get("worktrees") or []:
+        repo = config["repositories"].get(item.get("id"))
+        if repo and os.path.isdir(item.get("worktree") or ""):
+            found.append({**repo, "worktree": item["worktree"], "branch": item.get("branch") or ""})
+    if not found:
+        raise KanvasError("The worktrees of this task no longer exist, so there is nothing to review")
+    return found
+
+
+def review_diff(worktree, base):
+    """The commits, the files and the diff of a task's branch against its base, cut when the diff is very long."""
+    log = _git(worktree, "log", "--oneline", f"{base}..HEAD")
+    stat = _git(worktree, "diff", "--stat", f"{base}...HEAD")
+    diff = _git(worktree, "diff", "--no-color", f"{base}...HEAD")
+    if len(diff) > REVIEW_DIFF_LIMIT:
+        diff = diff[:REVIEW_DIFF_LIMIT] + f"\n... (diff cut, {len(diff) - REVIEW_DIFF_LIMIT} more characters: open the files for the rest)"
+    return log, stat, diff
+
+
+def consecutive_agent_changes(task):
+    """How many times in a row the reviewer sent the task back with no human note in between."""
+    count = 0
+    for note in reversed(task.get("notes") or []):
+        if note.get("by") == "kanvas-runner":
+            continue
+        if not str(note.get("text") or "").startswith(CHANGES_NOTE):
+            break
+        count += 1
+    return count
+
+
+def sent_back_by_agent(task):
+    """Whether the last thing said about the task, apart from the runner, was the reviewer asking for changes."""
+    return consecutive_agent_changes(task) > 0
+
+
+def last_review_findings(task):
+    for note in reversed(task.get("notes") or []):
+        text = str(note.get("text") or "")
+        if text.startswith(CHANGES_NOTE):
+            return text[len(CHANGES_NOTE):].lstrip(": ").strip()
+    return ""
+
+
+def review_prompt(task, run, worktrees, changes, previous, strong=False):
+    definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
+    work = task.get("work") if isinstance(task.get("work"), dict) else {}
+    sections = "\n\n".join(
+        f"## Repository {w['id']} ({w['name']})\nWorktree: {w['worktree']}\nBranch {w['branch']} against {w['base']}\n"
+        f"Commits:\n{log or '(none)'}\n\nFiles changed:\n{stat or '(none)'}\n\n```diff\n{diff}\n```"
+        for w, (log, stat, diff) in zip(worktrees, changes))
+    again = (f"\nYour previous review asked for these changes; check that each one was fixed:\n{previous}\n"
+             if previous else "")
+    undecided = ('A first reviewer could not decide and sent this to you, so do not escalate: decide "approve" or '
+                 '"changes". What the diff cannot show, such as how the backend behaves, goes in a finding to check, and '
+                 'you ask for changes only for what you can point at. The human reads the pull request after you.'
+                 if strong else
+                 'Use "escalate" when the change touches authentication, permissions, multi-club isolation, migrations or '
+                 'money, or when you cannot tell whether it is correct.')
+    return f"""You review the work of an automated implementation agent for Kanvas task {task['id']}: {task['title']}. You did not write it and you must not edit it.
+
+Product outcome: {definition.get('outcome') or task.get('desc') or '(not supplied)'}
+Needs and constraints: {definition.get('needs') or '(not supplied)'}
+Acceptance criteria: {definition.get('acceptance') or '(not supplied)'}
+Non-goals: {definition.get('non_goals') or '(none)'}
+Technical plan: {_clip(work.get('plan'), 3000) or '(not supplied)'}
+
+What the implementer reported about its last round:
+{_clip(run.get('summary'), 3000) or '(nothing)'}
+{again}
+{sections}
+
+Judge the diff against the acceptance criteria, one by one, and against the rules of the project (the CLAUDE.md of the repository, only for what changed). Open other files only when the diff is not enough, and run no builds or tests. If the report says the e2e did not run because its environment is missing, that alone is not a reason to ask for changes. Ask for changes only for problems you can point at in the diff; do not invent findings. {undecided} Answer in the language the task is written in.
+
+End your reply with one fenced json block and nothing after it:
+```json
+{{"verdict": "approve", "summary": "<one line>", "findings": [{{"where": "path/to/file:line", "text": "..."}}]}}
+```
+"""
+
+
+def clean_review(data):
+    """A reviewer's JSON checked: {"verdict", "summary", "findings"} with at most 8 findings, or None."""
+    if not isinstance(data, dict) or data.get("verdict") not in REVIEW_VERDICTS:
+        return None
+    findings = []
+    for item in data.get("findings") or []:
+        if isinstance(item, dict):
+            where, text = _clip(item.get("where"), 200), _clip(item.get("text"), 600)
+            if text:
+                findings.append(f"`{where}`: {text}" if where else text)
+        elif isinstance(item, str) and item.strip():
+            findings.append(_clip(item, 600))
+    return {"verdict": data["verdict"], "summary": _clip(data.get("summary"), 400) or data["verdict"], "findings": findings[:8]}
+
+
+def ask_reviewer(config, task, run, worktrees, changes, previous, role_name):
+    """Runs one reviewer role over the diffs and returns its checked verdict, what it cost and the model that answered."""
+    role = config["agents"].get(role_name)
+    if role is None:
+        raise KanvasError(f"The board does not define the agent role {role_name}")
+    os.makedirs(config["runs"], exist_ok=True)
+    log = os.path.join(config["runs"], f"{automation_slug(task['id'])}-{role_name.replace('reviewer', 'review', 1)}.jsonl")
+    prompt = review_prompt(task, run, worktrees, changes, previous, strong=role_name != "reviewer")
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    # It runs from the project folder, where the project's agents live, and may read every worktree.
+    command = claude_command(config, [{"worktree": config["root"]}] + worktrees, role)
+    with open(log, "w", encoding="utf-8", newline="\n") as output:
+        proc = subprocess.run(command, input=prompt, text=True, encoding="utf-8", errors="replace", stdout=output,
+                              stderr=subprocess.STDOUT, creationflags=flags, cwd=config["root"], env=agent_environment())
+    result = read_result(log)
+    if result is None or proc.returncode or result.get("is_error"):
+        detail = str((result or {}).get("result") or f"it exited with code {proc.returncode}. See {log}")
+        raise KanvasError(f"{role_name} could not review: {_clip(detail, 300)}")
+    review = clean_review(split_assist_reply(str(result.get("result") or ""))[1])
+    if review is None:
+        raise KanvasError(f"{role_name} did not return a verdict")
+    models = result.get("modelUsage") if isinstance(result.get("modelUsage"), dict) else {}
+    return review, float(result.get("total_cost_usd") or 0), ", ".join(models)
+
+
+def record_review(path, task_id, round_no, rounds_allowed, role_name, review, force=False):
+    """Writes a reviewer's verdict on the task and returns what became of it: "approved", "changes" (the task goes back
+    to Doing), "left" (the findings are left for the human) or None when the task had moved on while it was reviewed."""
+    text = review["summary"] + "".join(f"\n- {f}" for f in review["findings"])
+
+    def op(board):
+        t = find_task(board, task_id)
+        run = t.setdefault("work", {}).setdefault("automation", {})
+        gate = (t.get("review") or {}).get("agent") or {}
+        if t.get("state") != "review" or int(run.get("round") or 1) != round_no or (gate.get("status") != "pending" and not force):
+            return None
+        run["reviewed_round"] = round_no
+        record = t.setdefault("review", {})
+        record.setdefault("manual", {"status": "pending"})
+        if review["verdict"] == "approve":
+            record["agent"] = {"status": "approved", "by": role_name, "at": now_iso(), "summary": text}
+            add_note(t, f"Agent review approved: {text}", role_name)
+            return "approved"
+        cycles = consecutive_agent_changes(t)
+        if review["verdict"] == "changes" and cycles < rounds_allowed:
+            record["agent"] = {"status": "changes_requested", "by": role_name, "at": now_iso(), "summary": text}
+            record["manual"] = {"status": "pending"}
+            t["state"] = "doing"
+            add_note(t, f"{CHANGES_NOTE}: {text}", role_name)
+            return "changes"
+        why = "it could not decide" if review["verdict"] == "escalate" else f"it has asked for changes {cycles} times in a row"
+        add_note(t, f"Automatic review left this to you ({why}): {text}", role_name)
+        return "left"
+    return mutate(path, op)
+
+
+def review_comment(role_name, model, round_no, outcome, review):
+    """The comment the reviewer leaves on each pull request, for the human who reads it next."""
+    heading = {"approved": "Approved", "changes": "Changes requested", "left": "Needs your attention"}[outcome]
+    tail = {"approved": "No blocking findings: ready for your review.",
+            "changes": "The implementer will fix this in the next round and Kanvas will review it again.",
+            "left": "The automatic review stops here: the points above are left for you."}[outcome]
+    lines = [f"**Kanvas review** · {role_name}" + (f" ({model})" if model else "") + f" · round {round_no}", "",
+             f"**{heading}.** {review['summary']}"]
+    if review["findings"]:
+        lines += [""] + [f"- {f}" for f in review["findings"]]
+    return "\n".join(lines + ["", tail])
+
+
+def run_review(path, task_id, force=False):
+    """Has the reviewer agent look at a task that reached Review and records its verdict. Returns (outcome, text) and
+    never raises: a review that cannot run leaves a note and the task for the human. A stronger reviewer looks again
+    at what the first could not decide."""
+    round_no = 1
+    try:
+        board = load_board(path)
+        config = automation_config(board, path)
+        if config is None:
+            raise KanvasError("Automation is not enabled for this board")
+        task = find_task(board, task_id)
+        run = ((task.get("work") or {}).get("automation")) or {}
+        round_no = int(run.get("round") or 1)
+        worktrees = review_worktrees(config, run)
+        changes = [review_diff(w["worktree"], w["base"]) for w in worktrees]
+        previous = last_review_findings(task)
+        role_name = "reviewer"
+        review, cost, model = ask_reviewer(config, task, run, worktrees, changes, previous, role_name)
+        if review["verdict"] == "escalate":
+            role_name = "reviewer-strong"
+            review, more, model = ask_reviewer(config, task, run, worktrees, changes, previous, role_name)
+            cost += more
+        outcome = record_review(path, task_id, round_no, config["review"]["rounds"], role_name, review, force)
+        if outcome is None:
+            return "stale", "The task moved on while it was being reviewed."
+        body = review_comment(role_name, model, round_no, outcome, review)
+        for pull in run.get("pull_requests") or []:
+            try:
+                _gh(config["root"], "pr", "comment", pull["url"], "--body", body)
+            except (KanvasError, KeyError):
+                pass
+        return outcome, review["summary"]
+    except Exception as e:
+        def fail(board):
+            t = find_task(board, task_id)
+            run = t.setdefault("work", {}).setdefault("automation", {})
+            if t.get("state") == "review" and int(run.get("round") or 1) == round_no:
+                run["reviewed_round"] = round_no
+                add_note(t, f"Automatic review failed: {e}", "kanvas-runner")
+            return t
+        try:
+            mutate(path, fail)
+        except Exception:
+            pass
+        return "failed", str(e)
 
 
 def run_automation(path, task_id):
@@ -1746,7 +2001,7 @@ def cmd_retry(args):
         run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
         if run.get("status") != "failed":
             raise KanvasError(f"{t['id']} automation is {run.get('status') or 'not started'}; only failed automation can be retried")
-        kept = {k: run[k] for k in ("round", "since", "pull_requests") if k in run}
+        kept = {k: run[k] for k in ("round", "since", "pull_requests", "cycle_start") if k in run}
         if kept:
             work["automation"] = kept
         else:
@@ -1757,6 +2012,21 @@ def cmd_retry(args):
 
     t = mutate(path, op)
     print(f"Queued retry for {t['id']}; the Kanvas server will reuse its isolated worktree.")
+
+
+def cmd_review(args):
+    path = board_path(args)
+    board = load_board(path)
+    task = find_task(board, args.id)
+    if task["state"] != "review":
+        raise KanvasError(f"{task['id']} is {view_state(task, task_map(board))}; only tasks in review can be reviewed")
+    outcome, text = run_review(path, task["id"], force=True)
+    if outcome == "failed":
+        raise KanvasError(f"The review of {task['id']} failed: {text}")
+    print({"approved": f"The reviewer approved {task['id']}: ",
+           "changes": f"The reviewer asked for changes on {task['id']} (review -> doing): ",
+           "left": f"The reviewer left {task['id']} for you: ",
+           "stale": f"{task['id']}: "}[outcome] + text)
 
 
 def usage_runs(board, config):
@@ -1782,13 +2052,18 @@ def usage_runs(board, config):
             continue
         if result is None:
             continue
-        task = tasks.get(name[:-len(".jsonl")])
+        stem, reviewer = name[:-len(".jsonl")], None
+        for suffix, role in (("-review-strong", "reviewer-strong"), ("-review", "reviewer")):
+            if stem.endswith(suffix):
+                stem, reviewer = stem[:-len(suffix)], role
+                break
+        task = tasks.get(stem)
         run = ((task or {}).get("work") or {}).get("automation") or {}
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
         models = result.get("modelUsage") if isinstance(result.get("modelUsage"), dict) else {}
         rows.append({
-            "task": task["id"] if task else name[:-len(".jsonl")],
-            "agent": run.get("agent") or "-",
+            "task": task["id"] if task else stem,
+            "agent": reviewer or run.get("agent") or "-",
             "model": ", ".join(models) or "-",
             "turns": result.get("num_turns") or 0,
             "cost": float(result.get("total_cost_usd") or 0),
@@ -2642,6 +2917,12 @@ class AutomationDispatcher:
         for task in board["tasks"]:
             work = task.get("work") if isinstance(task.get("work"), dict) else {}
             run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+            if (config["review"]["enabled"] and task.get("state") == "review" and run.get("status") == "completed"
+                    and any(os.path.isdir(w.get("worktree") or "") for w in run.get("worktrees") or [])
+                    and ((task.get("review") or {}).get("agent") or {}).get("status") == "pending"
+                    and run.get("reviewed_round") != int(run.get("round") or 1)):
+                self._start_review(path, task["id"])
+                continue
             # A completed run moves its task to Review, so a completed run on a task in Doing was sent back.
             sent_back = run.get("status") == "completed"
             if (task.get("state") != "doing" or not work.get("plan") or not task_repository_ids(task)
@@ -2662,19 +2943,26 @@ class AutomationDispatcher:
                     return False
                 rounds = int(fresh_run.get("round") or 1)
                 queued = {"status": "queued", "updated": now_iso(), "round": rounds}
+                start = int(fresh_run.get("cycle_start") or 1)
                 if again:
-                    if rounds >= config["max_rounds"]:
-                        message = (f"Stopped after {rounds} rounds (automation.max_rounds). Continue by hand, or raise "
+                    # The rounds the reviewer asks for count towards the limit; a human sending the work back starts a new cycle.
+                    if not sent_back_by_agent(fresh):
+                        start = rounds + 1
+                    done = rounds - start + 1
+                    if done >= config["max_rounds"]:
+                        message = (f"Stopped after {done} rounds (automation.max_rounds). Continue by hand, or raise "
                                    f"the limit and run `retry {fresh['id']}`.")
                         fresh_work["automation"] = {**fresh_run, "status": "failed", "updated": now_iso(),
                                                     "summary": message}
                         add_note(fresh, "Automation failed: " + message, "kanvas-runner")
                         fresh["work"] = fresh_work
                         return False
-                    queued.update(round=rounds + 1, since=fresh_run.get("updated") or "")
+                    queued.update(round=rounds + 1, since=fresh_run.get("updated") or "", cycle_start=start)
                 else:
                     if fresh_run.get("since"):
                         queued["since"] = fresh_run["since"]
+                    if fresh_run.get("cycle_start"):
+                        queued["cycle_start"] = fresh_run["cycle_start"]
                 if fresh_run.get("pull_requests"):
                     queued["pull_requests"] = fresh_run["pull_requests"]
                 fresh_work["automation"] = queued
@@ -2694,6 +2982,24 @@ class AutomationDispatcher:
                         self.active.discard(key)
 
             threading.Thread(target=execute, name=f"kanvas-{task['id']}", daemon=True).start()
+
+    def _start_review(self, path, task_id):
+        """Has the reviewer look at a task that reached Review, unless it is already doing so. The task keeps no
+        marker of a review in progress, so a review that a restart interrupted is simply started again."""
+        token = ("review", os.path.normcase(os.path.abspath(path)), task_id.upper())
+        with self.lock:
+            if token in self.active:
+                return
+            self.active.add(token)
+
+        def execute():
+            try:
+                run_review(path, task_id)
+            finally:
+                with self.lock:
+                    self.active.discard(token)
+
+        threading.Thread(target=execute, name=f"kanvas-review-{task_id}", daemon=True).start()
 
 
 class BoardServer(ThreadingHTTPServer):
@@ -2989,7 +3295,7 @@ def clean_assist(kind, data, board, repository_ids, role_names):
         agent = draft.get("agent")
         out["draft"] = {**{k: _clip(draft.get(k)) for k in ("outcome", "needs", "acceptance", "non_goals")},
                         "repositories": [r for r in draft.get("repositories") or [] if r in repository_ids],
-                        "agent": agent if agent in role_names and agent != "reviewer" else DEFAULT_AGENT}
+                        "agent": agent if agent in role_names and not str(agent).startswith("reviewer") else DEFAULT_AGENT}
         return out if out["draft"]["outcome"] else None
     out["draft"] = {"plan": _clip(draft.get("plan"), 8000)}
     return out if out["draft"]["plan"] else None
@@ -3024,7 +3330,7 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
             f"Outcome: {fields.get('outcome') or '(empty)'}\nNeeds and constraints: {fields.get('needs') or '(empty)'}\n"
             f"Acceptance criteria: {fields.get('acceptance') or '(empty)'}\nNon-goals: {fields.get('non_goals') or '(empty)'}\n\n"
             f"Repositories (id: name): {ids()}\n"
-            f"Agent roles: {', '.join(r for r in roles if r != 'reviewer')}. The implementer is the default; choose "
+            f"Agent roles: {', '.join(r for r in roles if not r.startswith('reviewer'))}. The implementer is the default; choose "
             "complex only for security, multi-club isolation, permissions or data migrations.\n\n"
             "Look in docs/modules and docs/adr for what already exists about this, then question what is missing or "
             "ambiguous and draft the form: the outcome for users or the business, needs and constraints, acceptance "
@@ -3899,6 +4205,8 @@ def build_parser():
     p.add_argument("-m", "--message", help="optional note on why")
     text_sources(p, "note")
     p = add("retry", cmd_retry, "retry failed automation in its existing isolated worktree")
+    p.add_argument("id")
+    p = add("review", cmd_review, "have the reviewer agent review a task in review now, and record its verdict")
     p.add_argument("id")
     p = add("usage", cmd_usage, "turns, cost and tokens of every automated run, per task, agent role and model")
     p.add_argument("--json", action="store_true", help="print the rows as JSON")

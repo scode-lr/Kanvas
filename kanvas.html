@@ -3759,7 +3759,7 @@ const moveTo = (t, state) => undoable(ops.state(t.id, seenOf(t), state), moveWor
 const unlink = (id, dep) => undoable(ops.removeDep(id, dep), `${id} no longer waits for ${dep}`);
 
 // The built-in agent roles, which kanvas.py has too; the board's automation.agents changes and adds to them.
-const DEFAULT_AGENT_ROLES = { implementer: { model: "sonnet" }, complex: { model: "opus" }, reviewer: { model: "haiku" } };
+const DEFAULT_AGENT_ROLES = { implementer: { model: "sonnet" }, complex: { model: "opus" }, reviewer: { model: "haiku" }, "reviewer-strong": { model: "sonnet" } };
 
 function agentRoles() {
   const given = board.automation?.agents && typeof board.automation.agents === "object" ? board.automation.agents : {};
@@ -3828,7 +3828,7 @@ async function approveDefinition(t) {
   const nonGoals = h("textarea", { name: "non_goals", rows: 2, value: d.non_goals || "", placeholder: "What is explicitly outside this task?" });
   const repoSelect = repositories.length ? h("select", { name: "repositories", multiple: true, size: Math.min(6, repositories.length), required: true },
     ...repositories.map((r) => h("option", { value: r.id, selected: selected.has(r.id) }, r.name || r.id))) : null;
-  const agentSelect = repositories.length ? h("select", { name: "agent" }, ...Object.entries(agentRoles()).filter(([name]) => name !== "reviewer").map(([name, r]) =>
+  const agentSelect = repositories.length ? h("select", { name: "agent" }, ...Object.entries(agentRoles()).filter(([name]) => !name.startsWith("reviewer")).map(([name, r]) =>
     h("option", { value: name, selected: name === (d.agent || "implementer") }, `${name} · ${r.model || "default model"}`))) : null;
   const data = await modal(`PO + TL Grill me · ${t.id}`, [
     h("p", {}, "Define the product need before making this task available for development."),

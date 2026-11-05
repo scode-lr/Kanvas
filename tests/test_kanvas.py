@@ -1536,10 +1536,13 @@ class AutomationTests(TempBoard):
         self.assertEqual(complex_run[complex_run.index("--max-turns") + 1], "40")
         review = kanvas.claude_command(config, worktrees, config["agents"]["reviewer"])
         self.assertEqual(review[review.index("--max-turns") + 1], "12")
-        self.assertEqual(review[review.index("--tools") + 1], "Read,Glob,Grep,Bash")
+        self.assertEqual(review[review.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertEqual(review[review.index("--agent") + 1], "reviewer")
         allowed = review[review.index("--allowedTools") + 1:review.index("--disallowedTools")]
-        self.assertIn("Bash(git diff:*)", allowed)
-        self.assertNotIn("Edit", allowed)
+        self.assertEqual(allowed, ["Read", "Glob", "Grep"])
+        strong = kanvas.claude_command(config, worktrees, config["agents"]["reviewer-strong"])
+        self.assertEqual((strong[strong.index("--agent") + 1], strong[strong.index("--model") + 1]), ("reviewer", "sonnet"))
+        self.assertNotIn("--agent", kanvas.claude_command(config, worktrees, config["agents"]["implementer"]))
         plain = kanvas.claude_command(config, worktrees)
         self.assertEqual(plain[plain.index("--model") + 1], "haiku")
         self.assertNotIn("--effort", plain)
@@ -1573,6 +1576,266 @@ class AutomationTests(TempBoard):
         self.assertEqual(automation["status"], "failed")
         self.assertIn("ghost", automation["summary"])
         self.assertIn("implementer", automation["summary"])
+
+    # --- the reviewer: Review -> verdict -> approval, another round, or the human ---
+
+    def review_board(self, repo, round_no=1, notes=(), **run):
+        """A task in Review whose last run left worktrees and a pull request, with its agent review pending."""
+        board = self.automated_board(repo)
+        board["automation"]["repositories"][0]["base"] = "origin/dev"
+        task = kanvas.find_task(board, "DV-02")
+        task["state"] = "review"
+        task["definition"].update(acceptance="A club admin can export players", outcome="Export")
+        task["work"]["automation"] = {"status": "completed", "updated": "2026-11-02T10:00:00Z", "round": round_no,
+                                      "summary": "Added the export. E2E: not run", "worktrees": [
+                                          {"id": "front", "path": repo, "worktree": repo, "branch": "feature/DV-02", "commit": "a" * 40}],
+                                      "pull_requests": [{"id": "front", "url": "https://github.com/acme/front/pull/7"}], **run}
+        task["review"] = {"agent": {"status": "pending"}, "manual": {"status": "pending"}}
+        task["notes"] = list(notes)
+        return board
+
+    def run_reviewers(self, board, verdicts, task_id="DV-02", force=False):
+        """Runs the reviewer over the board with git, claude and gh faked. Each verdict is a dict, a raw reply string or
+        an exception; returns the outcome, the commands it ran and the comments it left."""
+        write_board(self.path, board)
+        self.review_calls, self.comments = [], []
+        queue = list(verdicts)
+
+        def fake_run(command, **kwargs):
+            reply = queue.pop(0)
+            self.review_calls.append({"command": command, "prompt": kwargs["input"], "cwd": kwargs["cwd"], "env": kwargs["env"],
+                                      "log": kwargs["stdout"].name})
+            if isinstance(reply, Exception):
+                raise reply
+            text = reply if isinstance(reply, str) else "Looked at it.\n```json\n" + json.dumps(reply) + "\n```"
+            event = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "total_cost_usd": 0.02,
+                     "result": text, "modelUsage": {"claude-haiku-5-5": {}}}
+            kwargs["stdout"].write(json.dumps(event) + "\n")
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(kanvas, "review_diff", return_value=("abc feat: export", " a.ts | 2 +-", "+export()")), \
+             mock.patch.object(kanvas.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(kanvas, "_gh", side_effect=lambda path, *a: self.comments.append(a) or ""):
+            return kanvas.run_review(self.path, task_id, force)
+
+    def test_the_reviewer_approves_and_comments_on_the_pull_request(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        outcome = self.run_reviewers(self.review_board(repo), [{"verdict": "approve", "summary": "Meets the criteria", "findings": []}])
+        self.assertEqual(outcome, ("approved", "Meets the criteria"))
+        task = self.get("DV-02")
+        self.assertEqual(task["state"], "review")
+        self.assertEqual((task["review"]["agent"]["status"], task["review"]["agent"]["by"]), ("approved", "reviewer"))
+        self.assertEqual(task["review"]["manual"], {"status": "pending"})
+        self.assertEqual(task["work"]["automation"]["reviewed_round"], 1)
+        self.assertEqual(task["notes"][-1]["text"], "Agent review approved: Meets the criteria")
+        call = self.review_calls[0]
+        command = call["command"]
+        self.assertEqual((command[command.index("--agent") + 1], command[command.index("--model") + 1]), ("reviewer", "haiku"))
+        self.assertEqual(command[command.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertEqual(call["cwd"], self.dir)
+        self.assertTrue(call["log"].endswith("dv-02-review.jsonl"))
+        for text in ("A club admin can export players", "+export()", "Added the export. E2E: not run", "feature/DV-02 against origin/dev"):
+            self.assertIn(text, call["prompt"])
+        self.assertEqual(len(self.comments), 1)
+        self.assertEqual(self.comments[0][:3], ("pr", "comment", "https://github.com/acme/front/pull/7"))
+        self.assertIn("**Approved.** Meets the criteria", self.comments[0][4])
+        self.assertIn("ready for your review", self.comments[0][4])
+
+    def test_the_reviewer_sends_the_work_back_with_its_findings(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        verdict = {"verdict": "changes", "summary": "One criterion is missing",
+                   "findings": [{"where": "src/export.ts:12", "text": "No club check"}, "A string finding", {"text": ""}]}
+        outcome = self.run_reviewers(self.review_board(repo), [verdict])
+        self.assertEqual(outcome[0], "changes")
+        task = self.get("DV-02")
+        self.assertEqual(task["state"], "doing")
+        self.assertEqual(task["review"]["agent"]["status"], "changes_requested")
+        self.assertEqual(task["review"]["manual"], {"status": "pending"})
+        note = task["notes"][-1]
+        self.assertEqual(note["by"], "reviewer")
+        self.assertEqual(note["text"], "Agent review changes requested: One criterion is missing\n- `src/export.ts:12`: No club check\n- A string finding")
+        self.assertIn("will fix this in the next round", self.comments[0][4])
+        # The dispatcher then runs the next round, and the reviewer's note is its feedback.
+        launched = self.scan(kanvas.load_board(self.path))
+        self.assertEqual(launched, ["DV-02"])
+        run = self.get("DV-02")["work"]["automation"]
+        self.assertEqual((run["status"], run["round"], run["cycle_start"]), ("queued", 2, 1))
+
+    def test_the_reviewer_looks_again_at_what_it_fixed_and_leaves_the_task_to_the_human_after_two_rounds(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        asked = [{"at": "2026-11-02T0%d:00:00Z" % i, "by": "reviewer", "text": f"{kanvas.CHANGES_NOTE}: round {i} findings"} for i in (1, 2)]
+        runner = {"at": "2026-11-02T09:30:00Z", "by": "kanvas-runner", "text": "Automation completed: ok"}
+        board = self.review_board(repo, round_no=3, notes=[asked[0], runner, asked[1], runner])
+        outcome = self.run_reviewers(board, [{"verdict": "changes", "summary": "Still not fixed", "findings": ["x"]}])
+        self.assertEqual(outcome[0], "left")
+        self.assertIn("round 2 findings", self.review_calls[0]["prompt"])
+        task = self.get("DV-02")
+        self.assertEqual((task["state"], task["review"]["agent"]["status"]), ("review", "pending"))
+        self.assertIn("Automatic review left this to you (it has asked for changes 2 times in a row)", task["notes"][-1]["text"])
+        self.assertIn("**Needs your attention.**", self.comments[0][4])
+        self.assertEqual(task["work"]["automation"]["reviewed_round"], 3)
+
+    def test_a_human_note_starts_the_count_of_automatic_rounds_again(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        asked = {"at": "2026-11-02T01:00:00Z", "by": "reviewer", "text": f"{kanvas.CHANGES_NOTE}: old"}
+        human = {"at": "2026-11-02T02:00:00Z", "by": "human", "text": "Sent back: please also handle X"}
+        board = self.review_board(repo, notes=[asked, asked, human])
+        self.assertEqual(self.run_reviewers(board, [{"verdict": "changes", "summary": "s", "findings": []}])[0], "changes")
+
+    def test_a_stronger_reviewer_looks_again_when_the_first_cannot_decide(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        outcome = self.run_reviewers(self.review_board(repo), [{"verdict": "escalate", "summary": "Touches permissions"},
+                                                              {"verdict": "approve", "summary": "Checked, it is fine"}])
+        self.assertEqual(outcome[0], "approved")
+        first, second = self.review_calls
+        self.assertEqual(first["command"][first["command"].index("--model") + 1], "haiku")
+        self.assertEqual(second["command"][second["command"].index("--model") + 1], "sonnet")
+        self.assertTrue(second["log"].endswith("dv-02-review-strong.jsonl"))
+        self.assertIn('Use "escalate" when', first["prompt"])
+        self.assertIn("do not escalate", second["prompt"])
+        self.assertNotIn('Use "escalate" when', second["prompt"])
+        self.assertEqual(self.get("DV-02")["review"]["agent"]["by"], "reviewer-strong")
+        self.assertIn("reviewer-strong", self.comments[0][4])
+
+    def test_when_the_strong_reviewer_cannot_decide_either_the_human_decides(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        outcome = self.run_reviewers(self.review_board(repo), [{"verdict": "escalate", "summary": "?"},
+                                                              {"verdict": "escalate", "summary": "Still unsure about isolation"}])
+        self.assertEqual(outcome[0], "left")
+        task = self.get("DV-02")
+        self.assertEqual((task["state"], task["review"]["agent"]["status"]), ("review", "pending"))
+        self.assertIn("it could not decide", task["notes"][-1]["text"])
+
+    def test_a_review_that_cannot_run_leaves_a_note_and_the_task_for_the_human(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        for verdicts, expected in (([OSError("claude is gone")], "claude is gone"), (["No JSON here."], "did not return a verdict"),
+                                   ([{"verdict": "maybe"}], "did not return a verdict")):
+            with self.subTest(expected=expected):
+                outcome = self.run_reviewers(self.review_board(repo), verdicts)
+                self.assertEqual(outcome[0], "failed")
+                self.assertIn(expected, outcome[1])
+                task = self.get("DV-02")
+                self.assertEqual((task["state"], task["review"]["agent"]["status"]), ("review", "pending"))
+                self.assertEqual(task["work"]["automation"]["reviewed_round"], 1)
+                self.assertIn("Automatic review failed", task["notes"][-1]["text"])
+                self.assertEqual(self.comments, [])
+
+    def test_a_verdict_for_a_task_that_moved_on_is_dropped(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.review_board(repo)
+        original = kanvas.record_review
+
+        def human_sends_it_back(*args, **kwargs):
+            def op(b):
+                kanvas.find_task(b, "DV-02")["state"] = "doing"
+            kanvas.mutate(self.path, op)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(kanvas, "record_review", side_effect=human_sends_it_back):
+            outcome = self.run_reviewers(board, [{"verdict": "approve", "summary": "ok"}])
+        self.assertEqual(outcome[0], "stale")
+        task = self.get("DV-02")
+        self.assertEqual((task["state"], task["review"]["agent"]["status"]), ("doing", "pending"))
+        self.assertEqual(self.comments, [])
+
+    def test_the_review_command_reviews_now_and_a_missing_worktree_is_reported(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.review_board(repo)
+        kanvas.find_task(board, "DV-02")["work"]["automation"]["worktrees"][0]["worktree"] = os.path.join(self.dir, "gone")
+        write_board(self.path, board)
+        self.assertIn("nothing to review", self.fails("review", "DV-02"))
+        self.assertIn("only tasks in review", self.fails("review", "DV-01"))
+
+    def test_the_reviewer_can_be_turned_off_and_its_rounds_set(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        for value, expected in ((None, {"enabled": True, "rounds": 2}), (False, {"enabled": False, "rounds": 2}),
+                                ({"rounds": 0}, {"enabled": True, "rounds": 0}), ({"enabled": False, "rounds": 4}, {"enabled": False, "rounds": 4})):
+            with self.subTest(value=value):
+                _, config = self.roles_of(**({} if value is None else {"review": value}))
+                self.assertEqual(config["review"], expected)
+        for bad in ("yes", 3, {"rounds": -1}, {"rounds": True}, {"rounds": "2"}, {"enabled": "no"}):
+            with self.subTest(bad=bad), self.assertRaises(kanvas.KanvasError):
+                self.roles_of(review=bad)
+
+    def scan_launching(self, board_data):
+        """One dispatcher pass with the implementer and the reviewer faked; returns what it launched."""
+        write_board(self.path, board_data)
+        launched, done = [], threading.Event()
+        dispatcher = object.__new__(kanvas.AutomationDispatcher)
+        dispatcher.lock, dispatcher.active = threading.Lock(), set()
+
+        def note(kind):
+            def fake(path, task_id, *a, **k):
+                launched.append((kind, task_id))
+                done.set()
+            return fake
+
+        with mock.patch.object(kanvas, "run_automation", side_effect=note("run")), \
+             mock.patch.object(kanvas, "run_review", side_effect=note("review")):
+            dispatcher.scan(self.path)
+            done.wait(2)
+        return launched
+
+    def test_the_dispatcher_reviews_a_task_that_reached_review_once_per_round(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        self.assertEqual(self.scan_launching(self.review_board(repo)), [("review", "DV-02")])
+        self.assertEqual(self.scan_launching(self.review_board(repo, reviewed_round=1)), [])
+        self.assertEqual(self.scan_launching(self.review_board(repo, round_no=2, reviewed_round=1)), [("review", "DV-02")])
+        approved = self.review_board(repo)
+        kanvas.find_task(approved, "DV-02")["review"]["agent"] = {"status": "approved"}
+        self.assertEqual(self.scan_launching(approved), [])
+        off = self.review_board(repo)
+        off["automation"]["review"] = False
+        self.assertEqual(self.scan_launching(off), [])
+        no_worktrees = self.review_board(repo)
+        del kanvas.find_task(no_worktrees, "DV-02")["work"]["automation"]["worktrees"]
+        self.assertEqual(self.scan_launching(no_worktrees), [])
+        removed = self.review_board(repo)
+        kanvas.find_task(removed, "DV-02")["work"]["automation"]["worktrees"][0]["worktree"] = os.path.join(self.dir, "gone")
+        self.assertEqual(self.scan_launching(removed), [])
+        self.assertEqual(self.get("DV-02")["notes"], [])
+
+    def test_the_rounds_the_reviewer_asks_for_count_towards_the_limit_but_a_humans_start_a_new_cycle(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        agent_note = {"at": "2026-11-02T11:05:00Z", "by": "reviewer", "text": f"{kanvas.CHANGES_NOTE}: add a test"}
+        human_note = {"at": "2026-11-02T11:06:00Z", "by": "human", "text": "Sent back: also the empty city"}
+        stopped = self.sent_back_board(repo, round_no=3)
+        kanvas.find_task(stopped, "DV-02")["notes"] = [agent_note]
+        self.assertEqual(self.scan_launching(stopped), [])
+        self.assertIn("Stopped after 3 rounds", self.get("DV-02")["work"]["automation"]["summary"])
+        resumed = self.sent_back_board(repo, round_no=3)
+        kanvas.find_task(resumed, "DV-02")["notes"] = [agent_note, human_note]
+        self.assertEqual(self.scan_launching(resumed), [("run", "DV-02")])
+        run = self.get("DV-02")["work"]["automation"]
+        self.assertEqual((run["round"], run["cycle_start"]), (4, 4))
+        later = self.sent_back_board(repo, round_no=5, cycle_start=4)
+        kanvas.find_task(later, "DV-02")["notes"] = [human_note, agent_note]
+        self.assertEqual(self.scan_launching(later), [("run", "DV-02")])
+        self.assertEqual(self.get("DV-02")["work"]["automation"]["cycle_start"], 4)
+
+    def test_usage_counts_the_reviews_apart_from_the_implementation(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        kanvas.find_task(board, "DV-02")["work"]["automation"] = {"status": "completed", "agent": "implementer"}
+        write_board(self.path, board)
+        self.write_run_log("dv-02.jsonl")
+        self.write_run_log("dv-02-review.jsonl", total_cost_usd=0.01, modelUsage={"claude-haiku-5-5": {}})
+        self.write_run_log("dv-02-review-strong.jsonl", total_cost_usd=0.05, modelUsage={"claude-sonnet-5-5": {}})
+        rows = {(r["task"], r["agent"]) for r in kanvas.usage_runs(kanvas.load_board(self.path), kanvas.automation_config(self.board(), self.path))}
+        self.assertEqual(rows, {("DV-02", "implementer"), ("DV-02", "reviewer"), ("DV-02", "reviewer-strong")})
 
     def write_run_log(self, name, **result):
         runs = os.path.join(self.dir, ".kanvas", "runs")
@@ -1610,7 +1873,7 @@ class AutomationTests(TempBoard):
         with open(os.path.join(ROOT, "kanvas.html"), encoding="utf-8") as f:
             html = f.read()
         declared = re.search(r"const DEFAULT_AGENT_ROLES = \{(.*?)\};", html).group(1)
-        in_page = dict(re.findall(r"(\w+): \{ model: \"(\w+)\" \}", declared))
+        in_page = dict(re.findall(r"\"?([\w-]+)\"?: \{ model: \"(\w+)\" \}", declared))
         self.assertEqual(in_page, {name: role["model"] for name, role in kanvas.DEFAULT_AGENTS.items()})
 
     def test_usage_needs_automation(self):
