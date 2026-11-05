@@ -805,12 +805,58 @@ def task_repository_ids(task):
     return [str(x) for x in values if str(x).strip()]
 
 
-def _git(path, *args):
+# Only Kanvas pushes and opens pull requests, so the agent must not inherit any GitHub credential.
+GITHUB_TOKEN_VARS = ("KANVAS_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+# Branches Kanvas never pushes to, besides the branch each pull request goes into.
+PROTECTED_BRANCHES = ("dev", "main", "master")
+
+
+def agent_environment():
+    """The environment the agent runs in: Kanvas's own without GitHub tokens or the SSH agent."""
+    return {k: v for k, v in os.environ.items() if k.upper() not in GITHUB_TOKEN_VARS and k.upper() != "SSH_AUTH_SOCK"}
+
+
+def publisher_environment():
+    """The environment of Kanvas's own `git push` and `gh` calls, and whether it holds a GitHub token of its own.
+    With KANVAS_GITHUB_TOKEN set, that token is the only GitHub credential they use; without it they use the computer's."""
+    env = dict(os.environ)
+    token = env.get("KANVAS_GITHUB_TOKEN")
+    if token:
+        for name in [n for n in env if n.upper() in GITHUB_TOKEN_VARS]:
+            del env[name]
+        env["GH_TOKEN"] = token
+    env["GH_PROMPT_DISABLED"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env, bool(token)
+
+
+def check_task_branch(branch, repo):
+    """Kanvas only pushes branches it made for a task: never a protected one, nor the one a pull request goes into."""
+    name = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
+    refused = {b.lower() for b in PROTECTED_BRANCHES} | {pr_base_branch(repo).lower()}
+    if name.lower() in refused:
+        raise KanvasError(f"Refusing to use {name} as a task branch: Kanvas never pushes to {', '.join(PROTECTED_BRANCHES)} "
+                          "or to the branch a pull request goes into")
+
+
+def _git(path, *args, env=None):
     proc = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
+                          encoding="utf-8", errors="replace", env=env)
     if proc.returncode:
         raise KanvasError(proc.stderr.strip() or proc.stdout.strip() or f"git {' '.join(args)} failed")
     return proc.stdout.strip()
+
+
+def push_branch(folder, branch):
+    """Pushes a task branch with Kanvas's own credentials. With a token of its own the push goes over HTTPS, through
+    the GitHub CLI's credential helper, and uses only that token."""
+    env, token = publisher_environment()
+    options = []
+    if token:
+        options = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+                   "-c", "url.https://github.com/.insteadOf=git@github.com:",
+                   "-c", "url.https://github.com/.insteadOf=ssh://git@github.com/"]
+    _git(folder, *options, "push", "--set-upstream", "origin", branch, env=env)
 
 
 def automation_slug(text):
@@ -888,6 +934,7 @@ def prepare_automation_worktrees(task, config):
     for repo_id in selected:
         repo = config["repositories"][repo_id]
         branch = automation_branch(task, config)
+        check_task_branch(branch, repo)
         target = os.path.join(task_folder, repo_id)
         if os.path.exists(target):
             current = _git(target, "branch", "--show-current")
@@ -929,8 +976,11 @@ def finish_automation(path, task_id, success, summary, pull_requests=None):
 
 
 CLAUDE_ALLOWED_TOOLS = ("Bash", "Edit", "Write", "Read", "Glob", "Grep")
-# Kanvas pushes the branch and opens the pull request itself, so the agent needs no GitHub access.
-CLAUDE_DISALLOWED_TOOLS = ("Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)")
+# Kanvas pushes the branch and opens the pull request itself, so the agent needs no GitHub access. The `git -*`
+# patterns catch pushes and merges that put an option first (`git -C . push`, `git --no-pager push`), which the
+# plain prefixes miss, without refusing a commit message that happens to say push.
+CLAUDE_DISALLOWED_TOOLS = ("Bash(git push:*)", "Bash(git -* push*)", "Bash(git merge:*)", "Bash(git -* merge*)",
+                           "Bash(gh:*)")
 
 
 def _positive_int(value, default, name):
@@ -1041,7 +1091,8 @@ def _gh(path, *args):
     exe = shutil.which("gh")
     if not exe:
         raise KanvasError("The GitHub CLI (gh) is not installed or not on PATH; Kanvas needs it to open pull requests")
-    proc = subprocess.run([exe, *args], cwd=path, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.run([exe, *args], cwd=path, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          env=publisher_environment()[0])
     if proc.returncode:
         raise KanvasError("gh " + " ".join(args[:2]) + ": " + (proc.stderr.strip() or proc.stdout.strip() or "failed"))
     return proc.stdout.strip()
@@ -1063,13 +1114,14 @@ def publish_pull_requests(task, worktrees, summary, round_no=1):
     pulls = []
     for wt in worktrees:
         folder = wt["worktree"]
+        check_task_branch(wt["branch"], wt)
         ahead = int(_git(folder, "rev-list", "--count", f"{wt['base']}..HEAD") or 0)
         if not ahead:
             continue
         if _git(folder, "status", "--porcelain", "--untracked-files=no"):
             raise KanvasError(f"{wt['id']}: tracked files in {folder} have uncommitted changes; the agent must commit its work")
         base = pr_base_branch(wt)
-        _git(folder, "push", "--set-upstream", "origin", wt["branch"])
+        push_branch(folder, wt["branch"])
         url = _gh(folder, "pr", "list", "--head", wt["branch"], "--base", base, "--state", "open",
                   "--json", "url", "--jq", ".[0].url")
         if url and round_no > 1:
@@ -1105,7 +1157,7 @@ def run_automation(path, task_id):
         with open(log, "w", encoding="utf-8", newline="\n") as output:
             proc = subprocess.run(claude_command(config, worktrees), input=prompt, text=True, encoding="utf-8",
                                   errors="replace", stdout=output, stderr=subprocess.STDOUT, creationflags=flags,
-                                  cwd=worktrees[0]["worktree"])
+                                  cwd=worktrees[0]["worktree"], env=agent_environment())
         ok, summary = claude_outcome(proc, log)
         if not summary:
             summary = f"Claude exited with code {proc.returncode}. See {log}"

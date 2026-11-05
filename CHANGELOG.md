@@ -1,5 +1,8 @@
 # Changelog
 ## Unreleased
+- Keep GitHub credentials away from the agent: it runs without `KANVAS_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` and `SSH_AUTH_SOCK`, and the tools it is refused now also cover pushes and merges that put an option first (`git -C . push`, `git --no-pager push`), which the plain prefixes missed
+- Let Kanvas use a GitHub token of its own: with `KANVAS_GITHUB_TOKEN` set, its `git push` and `gh` calls use only that token, over HTTPS; without it they keep using the computer's credentials
+- Never push to `dev`, `main`, `master` or the branch a pull request goes into, and refuse to start a task whose `branch_pattern` names one
 - Show the evidence of a task in its panel: the screenshots and videos in `.kanvas/evidence/<task-id>/` (or `automation.evidence_root`) appear under *Evidence*, which `kanvas serve` lists and serves read-only, only images and videos and only from that folder
 - Run automated tasks with Claude Code headless (`claude -p`, stream-json log) in the task's worktrees, and take the task's summary, turns and cost from Claude's final result; Codex is no longer supported, and a board that sets `automation.executor` to anything but `claude` is refused
 - Kanvas pushes the branches and opens a GitHub pull request for every repository the agent changed, with the GitHub CLI, then moves the task to Review with the pull request links, which the task panel shows; a run with no commits, uncommitted tracked files or a failed push stays in Doing with the reason, and `retry` reuses an open pull request

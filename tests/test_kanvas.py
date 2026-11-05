@@ -1453,7 +1453,8 @@ class AutomationTests(TempBoard):
         self.assertEqual(command[command.index("--max-budget-usd") + 1], "2.5")
         self.assertEqual(command[command.index("--add-dir") + 1], "/work/api")
         denied = command[command.index("--disallowedTools") + 1:]
-        self.assertEqual(denied, ["Bash(git push:*)", "Bash(git merge:*)", "Bash(gh:*)"])
+        self.assertEqual(denied, ["Bash(git push:*)", "Bash(git -* push*)", "Bash(git merge:*)", "Bash(git -* merge*)",
+                                  "Bash(gh:*)"])
         self.assertIn("Edit", command[command.index("--allowedTools"):command.index("--disallowedTools")])
         self.assertNotIn("--dangerously-skip-permissions", command)
 
@@ -1476,6 +1477,81 @@ class AutomationTests(TempBoard):
                                           kanvas.automation_config(board, self.path), self.fake_worktrees(repo))
         self.assertIn("Do not push, open pull requests, merge or deploy", prompt)
         self.assertNotIn("open a pull request targeting", prompt)
+
+    def publish_calls(self, branch="feature/DV-02", base="origin/dev", env=None):
+        """Runs publish_pull_requests with git and gh faked, and with only the GitHub tokens in `env` in the environment."""
+        repo = os.path.join(self.dir, "front")
+        self.calls = []
+
+        def fake(command, **kwargs):
+            self.calls.append((command, kwargs.get("env")))
+            out = "2" if "rev-list" in command else "https://github.com/acme/front/pull/7" if "create" in command else ""
+            return mock.Mock(returncode=0, stdout=out, stderr="")
+
+        clean = {k: v for k, v in os.environ.items() if k.upper() not in kanvas.GITHUB_TOKEN_VARS}
+        worktree = dict(self.fake_worktrees(repo)[0], branch=branch, base=base)
+        with mock.patch.dict(os.environ, {**clean, **(env or {})}, clear=True), \
+             mock.patch.object(kanvas.shutil, "which", return_value="gh"), \
+             mock.patch.object(kanvas.subprocess, "run", side_effect=fake):
+            return kanvas.publish_pull_requests(self.get("DV-02"), [worktree], "Done")
+
+    def test_the_agent_runs_without_github_credentials(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        pull = {"id": "front", "name": "Frontend", "branch": "feature/DV-02", "base": "dev", "commits": 1,
+                "url": "https://github.com/acme/front/pull/7"}
+        events = [{"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "result": "Done"}]
+        secrets = {"GH_TOKEN": "one", "GITHUB_TOKEN": "two", "KANVAS_GITHUB_TOKEN": "three",
+                   "SSH_AUTH_SOCK": "/tmp/agent.sock", "KEEP_THIS": "yes"}
+        with mock.patch.dict(os.environ, secrets):
+            run, _ = self.run_claude(repo, events, pulls=[pull])
+        env = run.call_args.kwargs["env"]
+        for name in secrets:
+            if name != "KEEP_THIS":
+                self.assertNotIn(name, env)
+        self.assertEqual(env["KEEP_THIS"], "yes")
+
+    def test_kanvas_pushes_and_opens_pull_requests_with_a_token_of_its_own_and_nothing_else(self):
+        pulls, calls = self.publish_calls(env={"GH_TOKEN": "the-users", "KANVAS_GITHUB_TOKEN": "kanvas-only"}), self.calls
+        self.assertEqual(pulls[0]["url"], "https://github.com/acme/front/pull/7")
+        pushes = [c for c in calls if "push" in c[0]]
+        self.assertEqual(len(pushes), 1)
+        command = pushes[0][0]
+        self.assertEqual(command[command.index("push"):], ["push", "--set-upstream", "origin", "feature/DV-02"])
+        self.assertIn("url.https://github.com/.insteadOf=git@github.com:", command)
+        self.assertIn("credential.helper=!gh auth git-credential", command)
+        github = [c for c in calls if "push" in c[0] or c[0][0] == "gh"]
+        self.assertGreaterEqual(len(github), 3)
+        for _, env in github:
+            self.assertEqual(env["GH_TOKEN"], "kanvas-only")
+            self.assertNotIn("KANVAS_GITHUB_TOKEN", env)
+            self.assertEqual((env["GH_PROMPT_DISABLED"], env["GIT_TERMINAL_PROMPT"]), ("1", "0"))
+
+    def test_without_a_token_of_its_own_kanvas_uses_the_computers_credentials(self):
+        self.publish_calls(env={"GH_TOKEN": "the-users"})
+        command, env = next(c for c in self.calls if "push" in c[0])
+        self.assertEqual(command[3:], ["push", "--set-upstream", "origin", "feature/DV-02"])
+        self.assertEqual(env["GH_TOKEN"], "the-users")
+
+    def test_kanvas_never_pushes_to_a_protected_branch_or_the_one_a_pull_request_goes_into(self):
+        for branch, base in (("dev", "origin/dev"), ("main", "origin/dev"), ("MASTER", "origin/dev"),
+                             ("refs/heads/dev", "origin/dev"), ("release", "origin/release")):
+            with self.subTest(branch=branch):
+                with self.assertRaises(kanvas.KanvasError) as caught:
+                    self.publish_calls(branch=branch, base=base)
+                self.assertIn("Refusing", str(caught.exception))
+                self.assertEqual(self.calls, [])
+
+    def test_a_branch_pattern_that_names_a_protected_branch_is_refused_before_a_worktree_exists(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        board["automation"]["branch_pattern"] = "dev"
+        config = kanvas.automation_config(board, self.path)
+        with self.assertRaises(kanvas.KanvasError) as caught:
+            kanvas.prepare_automation_worktrees(kanvas.find_task(board, "DV-02"), config)
+        self.assertIn("Refusing", str(caught.exception))
+        self.assertFalse(os.path.exists(os.path.join(config["worktrees"], "dv-02", "front")))
 
     def test_successful_run_opens_the_pull_request_and_moves_the_task_to_review(self):
         repo = os.path.join(self.dir, "front")
@@ -1743,7 +1819,7 @@ class AutomationTests(TempBoard):
         unchanged = {"id": "api", "name": "API", "base": "origin/dev", "branch": "feature/DV-02",
                      "worktree": repo, "path": repo}
         # An API worktree with no commits ahead of its base is skipped.
-        with mock.patch.object(kanvas, "_git", side_effect=lambda path, *a: "0" if a[:1] == ("rev-list",) and path == "/api" else subprocess.run(
+        with mock.patch.object(kanvas, "_git", side_effect=lambda path, *a, **kw: "0" if a[:1] == ("rev-list",) and path == "/api" else subprocess.run(
                 ["git", "-C", path, *a], capture_output=True, text=True, check=True).stdout.strip()):
             front = {"id": "front", "name": "Frontend", "base": "origin/dev", "branch": "feature/DV-02", "worktree": repo}
             api = dict(unchanged, worktree="/api")
