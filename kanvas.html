@@ -457,6 +457,23 @@ button.say { padding: 1px 6px; gap: 5px; font: 600 12px var(--mono); vertical-al
 .assist-status { margin: 0; font-size: 12.5px; color: var(--muted); }
 .assist-status:empty { display: none; }
 .assist-error { color: #b42318; }
+/* A dialog in steps: a row that says where the owner is, then the step that is on. */
+.wiz-steps { display: flex; gap: 8px; margin: 2px 0 12px; padding: 0; list-style: none; }
+.wiz-steps li { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.wiz-steps li b { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--surface-2); font-size: 11px; }
+.wiz-steps li.on { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.wiz-steps li.on b { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.wiz-steps li.past b { background: var(--done); border-color: var(--done); color: #fff; }
+.wiz-step { display: flex; flex-direction: column; gap: 10px; }
+.wiz-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wiz-actions .hint { flex: 1; min-width: 14ch; }
+/* The questions of an agent, each with its own answer. */
+.qa-item { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.qa-item > .q { font-weight: 600; font-size: 13.5px; }
+.qa-item.priority { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.qa-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.qa-chips button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+.qa-item textarea, .qa-item input { width: 100%; }
 .section-head { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 .section-head .count { color: var(--faint); font-weight: 600; letter-spacing: 0; }
 .section-head .lane-bar { width: 36px; }
@@ -599,6 +616,9 @@ dialog.dlg::backdrop { background: rgb(10 12 18 / .38); backdrop-filter: blur(2p
 .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
 .dlg .field input, .dlg .field select, .dlg .field textarea { font-weight: 400; color: var(--text); font-size: 14px; }
 .dlg .field .hint { font-weight: 400; color: var(--faint); }
+.field.check-field { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; color: var(--text); font-size: 14px; }
+.field.check-field input { width: 18px; height: 18px; margin: 0; }
+.field.check-field .hint { grid-column: 2; font-size: 12px; }
 .dlg .check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); cursor: pointer; width: fit-content; }
 .dlg .check input { margin: 0; padding: 0; width: 15px; height: 15px; accent-color: var(--accent); }
 .dlg button.link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
@@ -4083,6 +4103,56 @@ function agentRoles() {
 // dialog until the owner presses "Use the draft", and the owner still edits and approves.
 const AGENT_NAMES = { "product-owner": "Product owner", architect: "Architect", "senior-dev": "Senior developer" };
 
+// Runs one phase of the agents' help and resolves with the finished job, or null when `alive()` says the dialog is gone.
+// `onJob` sees every poll. Rejects with the reason, already worded for the owner.
+async function assistRun(request, { onJob = () => {}, alive = () => true } = {}) {
+  try {
+    const r = await fetch("api/assist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) });
+    const started = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(started.error || "The agents could not start.");
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      if (!alive()) return null;
+      const poll = await fetch(`api/assist/${started.job}`, { cache: "no-store" });
+      const job = await poll.json().catch(() => ({}));
+      if (!poll.ok) throw new Error(job.error || "The conversation was lost.");
+      onJob(job);
+      if (job.status === "running") continue;
+      if (job.status === "failed") throw new Error(job.error || "The agents failed.");
+      return job;
+    }
+  } catch (e) {
+    throw new Error(e.message === "Failed to fetch" ? "The agents need `kanvas serve` running on this computer." : e.message);
+  }
+}
+
+// The row that says which step of a dialog is on.
+function wizardSteps(names) {
+  const items = names.map((name, i) => h("li", {}, h("b", {}, String(i + 1)), h("span", {}, name)));
+  return {
+    el: h("ol", { class: "wiz-steps" }, ...items),
+    show: (n) => items.forEach((li, i) => { li.classList.toggle("on", i === n); li.classList.toggle("past", i < n); }),
+  };
+}
+
+// One question of an agent with its answer: the likely answers as buttons, and a box for any other. `fixed` leaves out the box.
+function questionItem(q, { fixed = false } = {}) {
+  let picked = q.default || "";
+  const box = q.options?.length && fixed ? null : h(q.options?.length ? "input" : "textarea", {
+    type: q.options?.length ? "text" : undefined, rows: 2, placeholder: q.options?.length ? "Or write another answer…" : "Your answer…" });
+  const buttons = (q.options || []).map((o) => h("button", { type: "button", "aria-pressed": String(o === picked), onclick: () => {
+    picked = picked === o && !fixed ? "" : o;
+    buttons.forEach((b) => b.setAttribute("aria-pressed", String(b.textContent === picked)));
+    if (box) box.value = "";
+  } }, o));
+  if (box && buttons.length) box.addEventListener("input", () => { if (box.value.trim()) { picked = ""; buttons.forEach((b) => b.setAttribute("aria-pressed", "false")); } });
+  return {
+    el: h("div", { class: `qa-item${q.id === "priority" ? " priority" : ""}` }, h("div", { class: "q" }, q.text),
+      buttons.length ? h("div", { class: "qa-chips" }, ...buttons) : null, box),
+    answer: () => ({ id: q.id, q: q.text, a: (box?.value.trim() || picked || "").trim() }),
+  };
+}
+
 function assistPanel({ kind, id, label, hint, fields, apply }) {
   const log = h("div", { class: "assist-log" });
   const status = h("p", { class: "assist-status", role: "status" });
@@ -4091,8 +4161,10 @@ function assistPanel({ kind, id, label, hint, fields, apply }) {
   const panel = h("div", { class: "assist" }, h("div", { class: "assist-bar" }, go, h("span", { class: "hint" }, hint)), log, status);
   const fail = (message) => { status.className = "assist-status assist-error"; status.textContent = message; go.disabled = false; };
   const said = (job) => log.replaceChildren(...job.messages.map((m) => h("div", { class: "assist-msg" }, h("b", {}, AGENT_NAMES[m.agent] || m.agent), h("div", {}, m.text))));
+  let asked = [];
   const finish = (job) => {
     const { questions = [], duplicates = [], draft = {} } = job.result || {};
+    asked = questions.map((q, i) => questionItem({ id: `q${i + 1}`, text: q }));
     status.className = "assist-status";
     status.textContent = `${job.messages.length} ${job.messages.length === 1 ? "answer" : "answers"} · ${job.turns} turns · $${Number(job.cost).toFixed(2)}`;
     goLabel.textContent = "Ask again";
@@ -4100,16 +4172,19 @@ function assistPanel({ kind, id, label, hint, fields, apply }) {
     log.append(...compact(
       questions.length || duplicates.length ? h("div", { class: "assist-msg" }, h("b", {}, "For you"),
         duplicates.length ? h("div", {}, `May duplicate ${duplicates.join(", ")}.`) : null,
-        questions.length ? h("ol", { class: "assist-questions" }, questions.map((q) => h("li", {}, q))) : null) : null,
+        asked.length ? h("div", { class: "qa-list assist-questions" }, asked.map((q) => q.el)) : null,
+        asked.length ? h("div", { class: "hint" }, "Answer what you can, then press “Ask again with my answers”.") : null) : null,
       h("button", { type: "button", class: "primary", onclick: (e) => { apply(draft); e.currentTarget.textContent = "Draft applied"; e.currentTarget.disabled = true; } }, "Use the draft")));
+    if (asked.length) goLabel.textContent = "Ask again with my answers";
   };
   go.addEventListener("click", async () => {
     go.disabled = true;
     status.className = "assist-status";
     status.textContent = "Starting…";
+    const answers = asked.map((q) => q.answer()).filter((a) => a.a);
     log.replaceChildren();
     try {
-      const r = await fetch("api/assist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, id, fields: fields() }) });
+      const r = await fetch("api/assist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, id, fields: fields(), answers }) });
       const started = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(started.error || "The agents could not start.");
       for (;;) {
@@ -4129,6 +4204,10 @@ function assistPanel({ kind, id, label, hint, fields, apply }) {
   return panel;
 }
 
+const PRIORITY_NAMES = { urgent: "Urgent", high: "High", normal: "Normal", low: "Low" };
+
+// The product definition in two steps. First the product owner asks what is missing, one answer per question, and the owner
+// answers; then it reformulates the definition with those answers, and the owner reads it, edits it and approves.
 async function approveDefinition(t) {
   // An idea that came through the inbox already has the product owner's draft: the dialog starts from it.
   const d = t.definition || t.inbox?.draft || {};
@@ -4138,31 +4217,98 @@ async function approveDefinition(t) {
   const needs = h("textarea", { name: "needs", rows: 4, required: true, value: d.needs || "", placeholder: "Business rules, dependencies, platforms, privacy, operational constraints…" });
   const acceptance = h("textarea", { name: "acceptance", rows: 4, required: true, value: d.acceptance || "", placeholder: "Observable conditions that prove the task is complete." });
   const nonGoals = h("textarea", { name: "non_goals", rows: 2, value: d.non_goals || "", placeholder: "What is explicitly outside this task?" });
+  const priority = h("select", { name: "priority" }, ...Object.entries(PRIORITY_NAMES).map(([k, v]) => h("option", { value: k, selected: k === (d.priority || "normal") }, v)));
   const repoSelect = repositories.length ? h("select", { name: "repositories", multiple: true, size: Math.min(6, repositories.length), required: true },
     ...repositories.map((r) => h("option", { value: r.id, selected: selected.has(r.id) }, r.name || r.id))) : null;
   const agentSelect = repositories.length ? h("select", { name: "agent" }, ...Object.entries(agentRoles()).filter(([name]) => !name.startsWith("reviewer") && !["curator", "designer", "po"].includes(name)).map(([name, r]) =>
     h("option", { value: name, selected: name === (d.agent || "implementer") }, `${name} · ${r.model || "default model"}`))) : null;
-  const data = await modal(`PO + TL Grill me · ${t.id}`, [
-    h("p", {}, "Define the product need before making this task available for development."),
-    store.readOnly ? null : assistPanel({
-      kind: "definition", id: t.id, label: "Ask the product owner", hint: "Asks what is missing and drafts the form.",
-      fields: () => ({ outcome: outcome.value, needs: needs.value, acceptance: acceptance.value, non_goals: nonGoals.value }),
-      apply: (draft) => {
-        outcome.value = draft.outcome; needs.value = draft.needs; acceptance.value = draft.acceptance; nonGoals.value = draft.non_goals;
-        if (repoSelect) for (const o of repoSelect.options) o.selected = (draft.repositories || []).includes(o.value);
-        if (agentSelect && draft.agent) agentSelect.value = draft.agent;
-      },
-    }),
+  const fields = () => ({ outcome: outcome.value, needs: needs.value, acceptance: acceptance.value, non_goals: nonGoals.value });
+  // One plain check decides whether the designer proposes the UI before anything is built. It starts on when the task
+  // changes an application repository, and stays as the owner leaves it.
+  const designRepositories = board.automation?.design?.repositories || ["front"];
+  const needsDesign = h("input", { type: "checkbox", name: "design", checked: typeof d.design === "boolean" ? d.design : [...selected].some((r) => designRepositories.includes(r)) });
+  if (repoSelect && typeof d.design !== "boolean") repoSelect.addEventListener("change", () => {
+    needsDesign.checked = [...repoSelect.selectedOptions].some((o) => designRepositories.includes(o.value));
+  });
+
+  // Step 1: the questions and the answers.
+  const steps = wizardSteps(["Refine with the product owner", "Definition"]);
+  const status = h("p", { class: "assist-status", role: "status" });
+  const list = h("div", { class: "qa-list wiz-step" });
+  const ask = h("button", { type: "button", class: "primary" }, icon("spark"), "Ask the product owner");
+  const reformulate = h("button", { type: "button", class: "primary", hidden: true }, icon("spark"), "Reformulate with my answers");
+  const skip = h("button", { type: "button", class: "ghost" }, "Skip, I will write it");
+  let asked = [], okBtn = null, open = true;
+  const step1 = h("div", { class: "wiz-step" },
+    h("p", {}, "The product owner reads the documentation and asks what is missing. Answer each question, then it reformulates the task."),
+    h("div", { class: "wiz-actions" }, ask, reformulate, skip), status, list);
+  const openQuestions = h("div", { class: "assist-msg", hidden: true });
+  const step2 = h("div", { class: "wiz-step", hidden: true },
+    h("p", {}, "Read the definition, correct what is off and approve it."), openQuestions,
+    h("label", { class: "field" }, "Priority", priority),
     h("label", { class: "field" }, "Outcome", outcome),
     h("label", { class: "field" }, "Needs and constraints", needs),
     h("label", { class: "field" }, "Acceptance criteria", acceptance),
     h("label", { class: "field" }, "Non-goals", nonGoals),
     repoSelect ? h("label", { class: "field" }, "Repositories", repoSelect, h("span", { class: "hint" }, "Select every repository the implementation may change.")) : null,
+    h("label", { class: "field check-field" }, needsDesign, h("span", {}, "Requires design (designer)"),
+      h("span", { class: "hint" }, "The designer proposes the screens and you approve them before anything is built.")),
     agentSelect ? h("label", { class: "field" }, "Agent", agentSelect,
       h("span", { class: "hint" }, "Who implements it. Leave the implementer unless the task needs a stronger model.")) : null,
-  ], { ok: "Approve definition" });
+    store.readOnly ? null : h("div", { class: "wiz-actions" }, h("button", { type: "button", class: "ghost", onclick: () => goTo(0) }, "Back to the questions")));
+  const goTo = (n) => {
+    step1.hidden = n !== 0; step2.hidden = n !== 1; steps.show(n);
+    if (okBtn) okBtn.hidden = n !== 1;
+  };
+  const carryPriority = () => {
+    const chosen = asked.find((q) => q.id === "priority")?.answer().a.toLowerCase();
+    const key = Object.keys(PRIORITY_NAMES).find((k) => chosen === k || chosen === PRIORITY_NAMES[k].toLowerCase());
+    if (key) priority.value = key;
+  };
+  const busy = (on, text = "") => { ask.disabled = on; reformulate.disabled = on; skip.disabled = on; status.className = "assist-status"; status.textContent = text; };
+  const failed = (e) => { busy(false); status.className = "assist-status assist-error"; status.textContent = e.message; };
+  const working = (job) => { status.textContent = `${AGENT_NAMES[job.working] || job.working} is working…`; };
+  ask.addEventListener("click", async () => {
+    busy(true, "Starting…");
+    try {
+      const job = await assistRun({ kind: "definition", id: t.id, phase: "questions", fields: fields() }, { onJob: working, alive: () => open });
+      if (!job) return;
+      asked = job.result.questions.map((q) => questionItem(q, { fixed: q.id === "priority" }));
+      list.replaceChildren(...asked.map((q) => q.el));
+      ask.hidden = true; reformulate.hidden = false;
+      busy(false, `${asked.length} ${asked.length === 1 ? "question" : "questions"} · $${Number(job.cost).toFixed(2)}`);
+    } catch (e) { failed(e); }
+  });
+  reformulate.addEventListener("click", async () => {
+    busy(true, "Starting…");
+    try {
+      const answers = asked.map((q) => q.answer()).filter((a) => a.a);
+      const job = await assistRun({ kind: "definition", id: t.id, phase: "draft", fields: fields(), answers }, { onJob: working, alive: () => open });
+      if (!job) return;
+      const { draft = {}, questions = [] } = job.result;
+      outcome.value = draft.outcome; needs.value = draft.needs; acceptance.value = draft.acceptance; nonGoals.value = draft.non_goals;
+      if (repoSelect) for (const o of repoSelect.options) o.selected = (draft.repositories || []).includes(o.value);
+      if (agentSelect && draft.agent) agentSelect.value = draft.agent;
+      if (draft.priority) priority.value = draft.priority;
+      openQuestions.hidden = !questions.length;
+      openQuestions.replaceChildren(...compact(questions.length ? h("b", {}, "Still open for you") : null, questions.length ? h("ol", { class: "assist-questions" }, questions.map((q) => h("li", {}, q))) : null));
+      busy(false);
+      goTo(1);
+    } catch (e) { failed(e); }
+  });
+  skip.addEventListener("click", () => { carryPriority(); goTo(1); });
+
+  const body = [steps.el, store.readOnly ? null : step1, step2];
+  const data = await modal(`PO + TL Grill me · ${t.id}`, body, { ok: "Approve definition", onOpen: (btns) => {
+    okBtn = btns.okBtn;
+    // A task that already has a definition or an inbox draft opens on it; a new one opens on the questions.
+    goTo(store.readOnly || t.definition || t.inbox?.draft ? 1 : 0);
+  } });
+  open = false;
   if (!data) return;
   const definition = Object.fromEntries(["outcome", "needs", "acceptance", "non_goals"].map((k) => [k, data.get(k).trim()]));
+  if (data.get("priority")) definition.priority = data.get("priority");
+  definition.design = data.get("design") !== null;
   if (repositories.length) definition.repositories = data.getAll("repositories").map(String);
   if (data.get("agent") && data.get("agent") !== "implementer") definition.agent = data.get("agent");
   undoable(ops.define(t.id, seenOf(t), definition), `Approved the product definition of ${t.id}`, { onFail: () => approveDefinition(t) });
@@ -4575,6 +4721,7 @@ function fillPanel(panel, t) {
   if (t.definition) workflow.push(h("section", { class: "p-sec" },
     h("div", { class: "section-head" }, "Product definition", h("span", { class: "count" }, t.definition.approved ? "approved" : "draft")),
     h("div", { class: "md" },
+      t.definition.priority ? h("p", {}, h("b", {}, "Priority: "), PRIORITY_NAMES[t.definition.priority] || t.definition.priority) : null,
       h("p", {}, h("b", {}, "Outcome: "), t.definition.outcome || "—"),
       h("p", {}, h("b", {}, "Needs: "), t.definition.needs || "—"),
       h("p", {}, h("b", {}, "Acceptance: "), t.definition.acceptance || "—"),
@@ -4914,9 +5061,10 @@ async function removeMany(tasks) {
 
 // Dialogs ---------------------------------------------------------------------
 
-function modal(title, content, { ok = "Save", danger = false, cancel = "Cancel", okClass = "" } = {}) {
+function modal(title, content, { ok = "Save", danger = false, cancel = "Cancel", okClass = "", onOpen = null } = {}) {
   return new Promise((resolve) => {
     const okBtn = h("button", { value: "ok", class: okClass || (danger ? "danger primary" : "primary") }, ok);
+    if (onOpen) onOpen({ okBtn });
     const form = h("form", { method: "dialog" }, h("h3", {}, title), content,
       h("div", { class: "dlg-actions" }, okBtn, cancel ? h("button", { value: "cancel", formnovalidate: true }, cancel) : null));
     const dlg = h("dialog", { class: "dlg", tabindex: "-1" }, form);

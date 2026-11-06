@@ -4214,14 +4214,16 @@ class ServerTests(TempBoard):
         return contextlib.ExitStack(), [mock.patch.object(kanvas.subprocess, "run", side_effect=run),
                                         mock.patch.object(kanvas.shutil, "which", return_value="claude")]
 
-    def ask_agents(self, replies, kind, task_id=None, fields=None, gate=None, env=None):
+    def ask_agents(self, replies, kind, task_id=None, fields=None, gate=None, env=None, phase=None, answers=None):
         """Asks for the agents' help with their replies faked, and returns the finished job."""
         stack, patches = self.fake_agents(replies, gate)
         with stack:
             for p in patches:
                 stack.enter_context(p)
             stack.enter_context(mock.patch.dict(os.environ, env or {}))
-            status, _, body = self.post_json("api/assist", {"kind": kind, "id": task_id, "fields": fields or {}})
+            request = {"kind": kind, "id": task_id, "fields": fields or {}, **({"phase": phase} if phase else {}),
+                       **({"answers": answers} if answers is not None else {})}
+            status, _, body = self.post_json("api/assist", request)
             self.assertEqual(status, 202, body)
             return self.finished_job(json.loads(body)["job"])
 
@@ -4291,6 +4293,53 @@ class ServerTests(TempBoard):
         self.assertIn("front: Frontend", prompt)
         job = self.ask_agents([self.reply("x", {"draft": dict(draft, agent="reviewer")})], "definition", "DV-04")
         self.assertEqual(job["result"]["draft"]["agent"], "implementer")
+
+    def test_the_product_owner_asks_before_drafting_and_always_asks_the_priority(self):
+        asked = {"questions": [{"text": "Which club?", "options": ["All", "Voltrega", "", 3]}, "What about old data?", {"text": " "}, 9]}
+        job = self.ask_agents([self.reply("Need a few answers.", asked)], "definition", "DV-04", phase="questions")
+        self.assertEqual(job["status"], "done", job)
+        self.assertEqual(job["phase"], "questions")
+        questions = job["result"]["questions"]
+        self.assertEqual([q["id"] for q in questions], ["priority", "q1", "q2"])
+        self.assertEqual(questions[0]["options"], ["Urgent", "High", "Normal", "Low"])
+        self.assertEqual(questions[1], {"id": "q1", "text": "Which club?", "options": ["All", "Voltrega"]})
+        self.assertEqual(questions[2]["options"], [])
+        self.assertEqual(len(self.agent_calls), 1)
+        self.assertIn("Do not draft the definition yet", self.agent_calls[0]["prompt"])
+        job = self.ask_agents([self.reply("Nothing to ask.", {"questions": []})], "definition", "DV-04", phase="questions")
+        self.assertEqual([q["id"] for q in job["result"]["questions"]], ["priority"])
+
+    def test_the_answers_reach_the_definition_and_set_its_priority(self):
+        draft = {"outcome": "O", "needs": "N", "acceptance": "A", "non_goals": "", "repositories": [], "agent": "implementer"}
+        answers = [{"id": "priority", "q": "How urgent is this?", "a": "High"}, {"id": "q1", "q": "Which club?", "a": "Only Voltrega"},
+                   {"id": "q2", "q": "Old data?", "a": "   "}]
+        job = self.ask_agents([self.reply("Done.", {"questions": ["Push too?"], "draft": draft})], "definition", "DV-04",
+                              phase="draft", answers=answers)
+        self.assertEqual(job["status"], "done", job)
+        self.assertEqual(job["result"]["draft"]["priority"], "high")
+        self.assertEqual(job["result"]["questions"], ["Push too?"])
+        prompt = self.agent_calls[0]["prompt"]
+        self.assertIn("Which club?" + chr(10) + "  Answer: Only Voltrega", prompt)
+        self.assertNotIn("Old data?", prompt)
+        job = self.ask_agents([self.reply("Done.", {"draft": draft})], "definition", "DV-04", phase="draft")
+        self.assertEqual(job["result"]["draft"]["priority"], "")
+
+    def test_a_phase_the_help_does_not_have_is_refused(self):
+        stack, patches = self.fake_agents([])
+        with stack:
+            for p in patches:
+                stack.enter_context(p)
+            for body in ({"kind": "definition", "id": "DV-04", "phase": "later"}, {"kind": "plan", "id": "DV-04", "phase": "questions"},
+                         {"kind": "task", "phase": "questions"}):
+                with self.subTest(body=body):
+                    self.assertEqual(self.post_json("api/assist", body)[0], 400)
+
+    def test_the_priority_is_kept_with_the_definition_and_shown_by_the_cli(self):
+        board = self.board()
+        board["tasks"][3]["definition"] = {"outcome": "O", "needs": "N", "acceptance": "A", "priority": "urgent", "approved": True}
+        write_board(self.path, board)
+        _, out, _ = self.run_cli("show", "DV-04")
+        self.assertIn("Priority: Urgent", out)
 
     def test_the_architect_and_the_senior_developer_talk_before_the_plan(self):
         final = {"questions": ["Who may do it?"], "draft": {"plan": "1. Add the endpoint. 2. Test the club case."}}
@@ -5682,6 +5731,29 @@ class LayoutTests(unittest.TestCase):
             with self.subTest(board=os.path.basename(path), vertical=vertical):
                 self.assertEqual(m["misordered"], 0)
                 self.assertEqual(m["behind"], 0)
+
+
+class DesignCheckTests(unittest.TestCase):
+    config = {"design": {"enabled": True, "repositories": ["front"]}}
+
+    def task(self, **definition):
+        return {"id": "X-1", "state": "doing", "definition": {"repositories": ["api"], **definition}}
+
+    def test_the_check_decides_when_it_is_set(self):
+        self.assertTrue(kanvas.design_applies(self.task(design=True), self.config))
+        self.assertFalse(kanvas.design_applies({**self.task(design=False), "work": {"repositories": ["front"]}}, self.config))
+
+    def test_a_task_without_the_check_follows_its_repositories(self):
+        self.assertFalse(kanvas.design_applies(self.task(), self.config))
+        self.assertTrue(kanvas.design_applies(self.task(repositories=["front"]), self.config))
+
+    def test_the_answers_of_the_owner_reach_the_plan_prompt(self):
+        board = {"title": "T", "groups": [], "tasks": []}
+        task = {"id": "X-1", "title": "t", "state": "todo"}
+        prompt = kanvas.assist_prompt("plan", 0, board, task, {}, "/x", {}, {}, [], "draft",
+                                      [{"id": "q1", "q": "Which clubs first?", "a": "Only Voltrega"}])
+        self.assertIn("Which clubs first?", prompt)
+        self.assertIn("Only Voltrega", prompt)
 
 
 if __name__ == "__main__":

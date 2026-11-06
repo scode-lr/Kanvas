@@ -1807,8 +1807,13 @@ def design_applies(task, config):
     has not run yet and changes a repository that needs a design."""
     work = task.get("work") if isinstance(task.get("work"), dict) else {}
     run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
-    return (config["design"]["enabled"] and task.get("state") == "doing" and not run.get("status")
-            and bool(set(task_repository_ids(task)) & set(config["design"]["repositories"])))
+    definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
+    if not (config["design"]["enabled"] and task.get("state") == "doing" and not run.get("status")):
+        return False
+    # The "Requires design" check of the product definition decides; a task defined before it existed follows its repositories.
+    if isinstance(definition.get("design"), bool):
+        return definition["design"]
+    return bool(set(task_repository_ids(task)) & set(config["design"]["repositories"]))
 
 
 def design_prompt(task, config, previous, feedback):
@@ -2178,9 +2183,9 @@ def print_task(board, task):
     print(_indent(task.get("desc") or "(none)"))
     if task.get("definition"):
         print("\nProduct definition:")
-        for key in ("outcome", "needs", "acceptance", "non_goals"):
+        for key in ("outcome", "needs", "acceptance", "non_goals", "priority"):
             if task["definition"].get(key):
-                print(f"  {key.replace('_', ' ').title()}: {task['definition'][key]}")
+                print(f"  {key.replace('_', ' ').title()}: {PRIORITIES.get(task['definition'][key], task['definition'][key])}")
     if task.get("work"):
         print("\nConstruction:")
         print(f"  {task['work'].get('by', '?')} · {task['work'].get('at', '')}")
@@ -2703,7 +2708,7 @@ def task_detail(t, tasks):
     detail = {**task_brief(t, tasks), "description": _clip(t.get("desc"), 3000)}
     if isinstance(t.get("definition"), dict):
         detail["definition"] = {k: v for k, v in t["definition"].items() if k in
-                                ("outcome", "needs", "acceptance", "non_goals", "repositories", "approved")}
+                                ("outcome", "needs", "acceptance", "non_goals", "priority", "repositories", "approved")}
     if work.get("plan"):
         detail["plan"] = _clip(work["plan"], 3000)
     if run:
@@ -4720,11 +4725,13 @@ class BoardServer(ThreadingHTTPServer):
         with self.boards_lock:
             return self.boards.get(name)
 
-    def start_assist(self, name, kind, task_id, fields):
+    def start_assist(self, name, kind, task_id, fields, phase="draft", answers=()):
         """Starts the agents of a dialog's help in the background and returns its job."""
         path = self.board_path(name)
         if kind not in ASSIST_KINDS:
             raise KanvasError(f"Expected the kind of help to be one of: {', '.join(ASSIST_KINDS)}")
+        if phase not in ASSIST_PHASES or (phase == "questions" and kind != "definition"):
+            raise KanvasError(f"There is no {phase} phase for the {kind} help")
         if not shutil.which("claude"):
             raise KanvasError("Claude Code (claude) is not installed or not on PATH; the agents need it")
         task = find_task(load_board(path), task_id) if kind != "task" else None
@@ -4734,11 +4741,11 @@ class BoardServer(ThreadingHTTPServer):
             if sum(1 for j in self.assist.values() if j["status"] == "running") >= ASSIST_MAX_RUNNING:
                 raise AssistBusy(f"{ASSIST_MAX_RUNNING} agent conversations are already running; wait for one to finish")
             job = {"id": os.urandom(8).hex(), "board": name, "kind": kind, "status": "running",
-                   "working": ASSIST_AGENTS[kind][0], "messages": [], "result": None, "error": "", "cost": 0.0, "turns": 0}
+                   "phase": phase, "working": ASSIST_AGENTS[kind][0], "messages": [], "result": None, "error": "", "cost": 0.0, "turns": 0}
             self.assist[job["id"]] = job
             for old in [k for k, j in self.assist.items() if j["status"] != "running"][:-ASSIST_KEEP]:
                 del self.assist[old]
-        threading.Thread(target=self._run_assist, args=(job, path, kind, task_id, fields), daemon=True).start()
+        threading.Thread(target=self._run_assist, args=(job, path, kind, task_id, fields, phase, answers), daemon=True).start()
         return job
 
     def start_telegram(self, path=None):
@@ -4820,7 +4827,7 @@ class BoardServer(ThreadingHTTPServer):
             job = self.assist.get(job_id)
             return dict(job, messages=list(job["messages"])) if job and job["board"] == name else None
 
-    def _run_assist(self, job, path, kind, task_id, fields):
+    def _run_assist(self, job, path, kind, task_id, fields, phase="draft", answers=()):
         def change(**fresh):
             with self.assist_lock:
                 job.update(fresh)
@@ -4832,9 +4839,9 @@ class BoardServer(ThreadingHTTPServer):
             roles = config["agents"] if config else agent_roles(None)
             task = find_task(board, task_id) if kind != "task" else None
             said, data = [], None
-            for step, agent in enumerate(ASSIST_AGENTS[kind]):
+            for step, agent in enumerate(ASSIST_AGENTS[kind][:1] if phase == "questions" else ASSIST_AGENTS[kind]):
                 change(working=agent)
-                prompt = assist_prompt(kind, step, board, task, fields, root, repositories, roles, said)
+                prompt = assist_prompt(kind, step, board, task, fields, root, repositories, roles, said, phase, answers)
                 reply, cost, turns = assist_step(agent, prompt, root, settings)
                 prose, found = split_assist_reply(reply)
                 said.append(prose)
@@ -4843,7 +4850,7 @@ class BoardServer(ThreadingHTTPServer):
                     job["messages"].append({"agent": agent, "text": prose or "(no text)"})
                     job["cost"] += cost
                     job["turns"] += turns
-            result = clean_assist(kind, data, board, list(repositories), list(roles))
+            result = clean_assist(kind, data, board, list(repositories), list(roles), phase, answers)
             if result is None:
                 raise KanvasError("The agents did not return a draft the board could use")
             change(status="done", working="", result=result)
@@ -4873,6 +4880,11 @@ class BoardServer(ThreadingHTTPServer):
 # form; the human edits the draft and approves.
 
 ASSIST_KINDS = ("task", "definition", "plan")
+# Each help runs in up to two phases: "questions" asks the owner what is missing and waits for the answers, "draft" writes the
+# form once they are given. The task help has no questions phase.
+ASSIST_PHASES = ("questions", "draft")
+# How urgent a task is, asked of the owner while the product owner refines it and kept in its product definition.
+PRIORITIES = {"urgent": "Urgent", "high": "High", "normal": "Normal", "low": "Low"}
 # Who speaks in each kind of help. The plan is a conversation: the architect proposes, the senior developer checks the
 # proposal against the code, and the architect settles it with the final plan.
 ASSIST_AGENTS = {"task": ("product-owner",), "definition": ("product-owner",),
@@ -4923,8 +4935,43 @@ def split_assist_reply(text):
     return (text[:last.start()] + text[last.end():]).strip(), data
 
 
-def clean_assist(kind, data, board, repository_ids, role_names):
+def clean_answers(value):
+    """The owner's answers to the agent's questions as [{"id", "q", "a"}], with every value clipped; unanswered ones are dropped."""
+    out = []
+    for item in value if isinstance(value, list) else []:
+        if isinstance(item, dict) and isinstance(item.get("a"), str) and item["a"].strip():
+            out.append({"id": _clip(item.get("id"), 40), "q": _clip(item.get("q"), 400), "a": _clip(item["a"], 1500)})
+    return out[:12]
+
+
+def priority_question():
+    """The question about urgency that Factory always asks, whatever else the product owner asks."""
+    return {"id": "priority", "text": "How urgent is this?", "options": [PRIORITIES[k] for k in PRIORITIES], "default": PRIORITIES["normal"]}
+
+
+def priority_of(answers):
+    """The priority key the owner chose among their answers, or "" when they did not say."""
+    chosen = next((a["a"].strip().lower() for a in answers if a.get("id") == "priority"), "")
+    return next((k for k, v in PRIORITIES.items() if chosen in (k, v.lower())), "")
+
+
+def clean_questions(data):
+    """The questions of the product owner as [{"id", "text", "options"}], the urgency question first. An agent with nothing to
+    ask still gets the urgency question, so the owner always has one thing to answer."""
+    asked = []
+    for q in (data.get("questions") if isinstance(data, dict) else None) or []:
+        text = _clip(q.get("text") if isinstance(q, dict) else q, 400)
+        if not text:
+            continue
+        options = [_clip(o, 120) for o in (q.get("options") if isinstance(q, dict) else None) or [] if isinstance(o, str) and o.strip()][:5]
+        asked.append({"id": f"q{len(asked) + 1}", "text": text, "options": options})
+    return [priority_question(), *asked[:6]]
+
+
+def clean_assist(kind, data, board, repository_ids, role_names, phase="draft", answers=()):
     """The part of an agent's JSON the page can use, with every value checked; None when there is no draft."""
+    if kind == "definition" and phase == "questions":
+        return {"questions": clean_questions(data)} if isinstance(data, dict) else None
     if not isinstance(data, dict):
         return None
     questions = [_clip(q, 400) for q in data.get("questions") or [] if isinstance(q, str) and q.strip()][:8]
@@ -4941,19 +4988,21 @@ def clean_assist(kind, data, board, repository_ids, role_names):
         agent = draft.get("agent")
         out["draft"] = {**{k: _clip(draft.get(k)) for k in ("outcome", "needs", "acceptance", "non_goals")},
                         "repositories": [r for r in draft.get("repositories") or [] if r in repository_ids],
-                        "agent": agent if agent in role_names and not str(agent).startswith(("reviewer", "curator")) else DEFAULT_AGENT}
+                        "agent": agent if agent in role_names and not str(agent).startswith(("reviewer", "curator")) else DEFAULT_AGENT,
+                        "priority": priority_of(answers)}
         return out if out["draft"]["outcome"] else None
     out["draft"] = {"plan": _clip(draft.get("plan"), 8000)}
     return out if out["draft"]["plan"] else None
 
 
-def assist_prompt(kind, step, board, task, fields, root, repositories, roles, earlier):
+def assist_prompt(kind, step, board, task, fields, root, repositories, roles, earlier, phase="draft", answers=()):
     """What one agent is asked in one step of a dialog's help. Every step starts a new session, so each prompt brings
     what that agent needs."""
     head = (f"You help the owner of the Factory board \"{board['title']}\" fill in a dialog. The project is in {root}: read "
             "what you need there (the documentation in the brain repository, modules and adr, and the repositories) and change nothing. Be brief and "
             "concrete, ask only what changes what gets built, and answer in the language the owner writes in.\n\n")
     ids = lambda: ", ".join(f"{k}: {v}" for k, v in repositories.items()) or "none"
+    heard = "".join(f"- {a['q'] or a['id']}\n  Answer: {a['a']}\n" for a in answers)
     if kind == "task":
         groups = "\n".join(f"- {g['id']}: {g['name']}" for g in board["groups"]) or "(none)"
         open_tasks = [t for t in board["tasks"] if t["state"] not in ("develop", "done", "production")]
@@ -4961,6 +5010,7 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
         return head + (
             f"The owner is creating a task and has written:\nTitle: {fields.get('title') or '(empty)'}\n"
             f"Description: {fields.get('desc') or '(empty)'}\n\nGroups:\n{groups}\n\nOpen tasks:\n{listed}\n\n"
+            + (f"The owner answered your last questions:\n{heard}\nTake the answers as decided.\n\n" if heard else "") +
             "Turn it into a good task: a short title that says what changes, and a description in 2 to 5 lines of "
             "markdown that says what it achieves and what finished means. Choose the group that fits, or an empty one "
             "if none does, and list the open tasks it duplicates. Ask at most 5 questions.\n\n"
@@ -4970,11 +5020,24 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
     definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
     notes = "\n".join(f"- {_clip(n.get('text'), 300)}" for n in (task.get("notes") or [])[-3:]) or "(none)"
     about = f"task {task['id']}: {task['title']}\nDescription: {_clip(task.get('desc'), 1500) or '(none)'}\nRecent notes:\n{notes}\n"
+    if kind == "definition" and phase == "questions":
+        return head + (
+            f"The owner is defining the product need of {about}\nWhat the form holds so far:\n"
+            f"Outcome: {fields.get('outcome') or '(empty)'}\nNeeds and constraints: {fields.get('needs') or '(empty)'}\n"
+            f"Acceptance criteria: {fields.get('acceptance') or '(empty)'}\nNon-goals: {fields.get('non_goals') or '(empty)'}\n\n"
+            "Look in the brain repository (modules and adr) for what already exists about this. Do not draft the definition "
+            "yet: first ask the owner what is missing or ambiguous, so that their answers let you write it. Ask between 2 and 6 "
+            "short questions, one thing each, and only what changes what gets built. When a question has a few likely answers, "
+            "list them as options. Do not ask how urgent it is: Factory asks that itself.\n\n"
+            "End your reply with one fenced json block and nothing after it:\n```json\n{\"questions\": "
+            "[{\"text\": \"...\", \"options\": [\"...\"]}]}\n```\n")
     if kind == "definition":
         return head + (
             f"The owner is defining the product need of {about}\nWhat the form holds so far:\n"
             f"Outcome: {fields.get('outcome') or '(empty)'}\nNeeds and constraints: {fields.get('needs') or '(empty)'}\n"
             f"Acceptance criteria: {fields.get('acceptance') or '(empty)'}\nNon-goals: {fields.get('non_goals') or '(empty)'}\n\n"
+            + (f"The owner answered your questions:\n{heard}\nReformulate the definition with those answers; ask again only what "
+               "is still open.\n\n" if heard else "") +
             f"Repositories (id: name): {ids()}\n"
             f"Agent roles: {', '.join(r for r in roles if not r.startswith('reviewer'))}. The implementer is the default; choose "
             "complex only for security, multi-club isolation, permissions or data migrations.\n\n"
@@ -4989,7 +5052,9 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
             f"Acceptance criteria: {definition.get('acceptance') or '(none)'}\n"
             f"Non-goals: {definition.get('non_goals') or '(none)'}\n"
             f"Repositories it may change: {', '.join(definition.get('repositories') or []) or 'none chosen'} "
-            f"(available: {ids()})\nThe owner's plan so far: {fields.get('plan') or '(empty)'}\n\n")
+            f"(available: {ids()})\nThe owner's plan so far: {fields.get('plan') or '(empty)'}\n\n"
+            + (f"The owner answered the questions of the last round:\n{heard}\nTake the answers as decided and ask again "
+               "only what is still open.\n\n" if heard else ""))
     if step == 0:
         return head + ("The architect speaks first. " + spec +
                        "Propose the technical construction plan, grounded in the real documentation and code. Reply in plain "
@@ -5397,7 +5462,8 @@ class BoardHandler(BaseHTTPRequestHandler):
             try:
                 request = json.loads(text)
                 fields = {str(k): _clip(v) for k, v in (request.get("fields") or {}).items() if isinstance(v, str)}
-                job = self.server.start_assist(parts[0], request.get("kind"), request.get("id"), fields)
+                job = self.server.start_assist(parts[0], request.get("kind"), request.get("id"), fields,
+                                               request.get("phase") or "draft", clean_answers(request.get("answers")))
             except AssistBusy as e:
                 return self._error(429, str(e))
             except (KanvasError, ValueError, AttributeError) as e:
