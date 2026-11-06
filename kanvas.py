@@ -48,7 +48,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HTML_FILE = os.path.join(HERE, "kanvas.html")
 SNAPSHOT_TAG = '<script id="kanvas-snapshot" type="application/json"></script>'
 
-STATES = ("proposed", "todo", "doing", "review", "done", "production")
+STATES = ("proposed", "todo", "doing", "review", "develop", "done", "production")
 ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
 PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}$")
 UNGROUPED_PREFIX = "G"
@@ -389,7 +389,7 @@ def group_label(board, gid):
 
 def is_complete(task):
     """A dependency is complete once merged to dev, whether or not it is in production."""
-    return bool(task) and task.get("state") in ("done", "production")
+    return bool(task) and task.get("state") in ("develop", "done", "production")
 
 
 def unmet_deps(task, tasks):
@@ -404,7 +404,7 @@ def unmet_deps(task, tasks):
 
 def yolo_active(task):
     """A YOLO mark counts until its task goes to review: the chain is finished then."""
-    return bool(task.get("yolo")) and task.get("state") not in ("review", "done", "production")
+    return bool(task.get("yolo")) and task.get("state") not in ("review", "develop", "done", "production")
 
 
 def yolo_cover(board):
@@ -669,7 +669,7 @@ def problems(board):
                 errors.append(f"{tid} depends on itself")
             elif dep.upper() not in tasks:
                 errors.append(f"{tid} depends on missing task {dep}")
-        if t.get("state") in ("doing", "review", "done", "production"):
+        if t.get("state") in ("doing", "review", "develop", "done", "production"):
             pending = [d for d in unmet_deps(t, tasks) if d.upper() in tasks]
             if pending:
                 warnings.append(f"{tid} is {t['state']} but depends on unfinished {', '.join(pending)}")
@@ -2155,7 +2155,7 @@ def print_task(board, task):
     via = cover.get(task["id"].upper())
     if via and task["state"] == "proposed":
         print(f"YOLO:   joins the chain of {via} once a human approves it")
-    elif via and task["state"] not in ("review", "done", "production"):
+    elif via and task["state"] not in ("review", "develop", "done", "production"):
         if via == task["id"]:
             print("YOLO:   set on this task; all workflow gates still apply")
         else:
@@ -2224,7 +2224,8 @@ STATE_HINTS = {
     "proposed": "it is a proposal; a human must approve it first",
     "doing": "it is already in progress",
     "review": "it is waiting for agent and manual review",
-    "done": "it is merged to dev",
+    "develop": "it is merged to dev",
+    "done": "it is done",
     "production": "it is in production",
     "blocked": "it is blocked",
 }
@@ -2806,7 +2807,7 @@ def mcp_call(path, name, arguments, read_only=False):
 
         def note(fresh):
             t = find_task(fresh, str(args.get("id") or ""))
-            if t["state"] in ("done", "production"):
+            if t["state"] in ("develop", "done", "production"):
                 raise KanvasError(f"{t['id']} is {t['state']}; propose a follow-up task instead")
             add_note(t, text, actor_name)
             return t
@@ -2932,7 +2933,7 @@ def inbox_thread(task):
 def inbox_prompt(board, task, config):
     groups = "\n".join(f"- {g['id']}: {g['name']}" for g in board["groups"]) or "(none)"
     open_tasks = "\n".join(f"- {t['id']} [{t['state']}] {t['title']}" for t in board["tasks"]
-                           if t["state"] not in ("done", "production") and t["id"] != task["id"])[:6000] or "(none)"
+                           if t["state"] not in ("develop", "done", "production") and t["id"] != task["id"])[:6000] or "(none)"
     repos = ", ".join(f"{k}: {v['name']}" for k, v in config["repositories"].items() if k != CURATOR_REPOSITORY) or "none"
     roles = ", ".join(r for r in config["agents"] if r not in ("reviewer", "reviewer-strong", "curator", "designer", "po"))
     brain = config["repositories"].get(CURATOR_REPOSITORY, {}).get("path")
@@ -3625,7 +3626,7 @@ def cmd_note(args):
 
     def op(board):
         t = find_task(board, args.id)
-        if t["state"] in ("done", "production"):
+        if t["state"] in ("develop", "done", "production"):
             raise KanvasError(f"{t['id']} is {t['state']}; propose a follow-up task instead")
         waited, requested = open_question(t), change_request(t)
         add_note(t, text, actor(args))
@@ -4955,7 +4956,7 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
     ids = lambda: ", ".join(f"{k}: {v}" for k, v in repositories.items()) or "none"
     if kind == "task":
         groups = "\n".join(f"- {g['id']}: {g['name']}" for g in board["groups"]) or "(none)"
-        open_tasks = [t for t in board["tasks"] if t["state"] not in ("done", "production")]
+        open_tasks = [t for t in board["tasks"] if t["state"] not in ("develop", "done", "production")]
         listed = "\n".join(f"- {t['id']} [{t['state']}] {t['title']}" for t in open_tasks[:80]) or "(none)"
         return head + (
             f"The owner is creating a task and has written:\nTitle: {fields.get('title') or '(empty)'}\n"
@@ -5873,9 +5874,9 @@ def cmd_service(args):
 # ---------------------------------------------------------------------------
 
 EPILOG = """\
-workflow:  proposed -> todo -> doing -> review -> done -> production
+workflow:  proposed -> todo -> doing -> review -> develop -> done -> production
   Product definition (PO/TL) gates todo; a technical plan (Architect/Senior)
-  gates doing. Independent agent and manual reviews gate the dev merge (done),
+  gates doing. Independent agent and manual reviews gate the dev merge (develop),
   and main/deployment evidence gates production.
   A todo task with unfinished dependencies shows as blocked.
   An agent that needs the human's reply in the conversation runs `ask`
@@ -5918,7 +5919,7 @@ def build_parser():
 
     add("status", cmd_status, "board overview (default command)")
     p = add("list", cmd_list, "list tasks, optionally filtered by state or group")
-    p.add_argument("filter", nargs="?", help="proposed, todo/ready, blocked, doing, review, done, production, or a group")
+    p.add_argument("filter", nargs="?", help="proposed, todo/ready, blocked, doing, review, develop, done, production, or a group")
     p = add("show", cmd_show, "task details, dependencies and notes")
     p.add_argument("id")
     add("ready", cmd_ready, "tasks that can be started now")

@@ -317,7 +317,7 @@ class UndoTests(unittest.TestCase):
             "moving A-03 to To do": lambda b, t: t["A-03"].update(state="todo", notes=[self.NOTE]),
             "reopening A-04": lambda b, t: t["A-04"].update(state="todo"),
             "starting A-01": lambda b, t: t["A-01"].update(state="doing"),
-            "recording the dev merge of A-02 and A-03": lambda b, t: [t[i].update(state="done") for i in ("A-02", "A-03")],
+            "recording the dev merge of A-02 and A-03": lambda b, t: [t[i].update(state="develop") for i in ("A-02", "A-03")],
             "moving A-04 to Proposed": lambda b, t: t["A-04"].update(state="proposed"),
             "rejecting A-01": lambda b, t: drop(b, {"A-01"}),
             "deleting A-02": lambda b, t: drop(b, {"A-02"}),
@@ -929,7 +929,7 @@ class BoardViewTests(unittest.TestCase):
             "const t = b.tasks[0]; process.stdout.write(JSON.stringify([errors, t.state, t.review, t.delivery]));")
         errors, state, review, delivery = json.loads(run_html_js(
             self, code, json.dumps(board), [("function mustFind(", "\n// ----")]))
-        self.assertEqual(errors, ["A-01 needs approved agent and manual reviews before merge to dev"])
+        self.assertEqual(errors, ["A-01 needs the manual review approved before merge to dev"])
         self.assertEqual(state, "production")
         self.assertEqual((review["agent"]["status"], review["manual"]["status"]), ("approved", "approved"))
         self.assertEqual(delivery["dev"]["evidence"], "PR #1 merged at abc123")
@@ -1049,7 +1049,7 @@ class ReviewFlowTests(unittest.TestCase):
             "      if (c.fail) throw new Error(c.fail);\n"
             "      const b = clone(latest); fn(b); return { board: b, base: latest };\n"
             "    } };\n"
-            "    const target = c.state || 'done', direct = (b) => { const x = mustFind(b, c.id); x.state = target;"
+            "    const target = c.state || 'develop', direct = (b) => { const x = mustFind(b, c.id); x.state = target;"
             "      if (c.note) (x.notes ||= []).push({ at: '2026-10-29T10:00:00Z', by: 'human', text: c.note }); };\n"
             "    await review(get(c.id), target, c.note || '', null, direct);\n"
             "    await saveQueue;\n"
@@ -1063,7 +1063,7 @@ class ReviewFlowTests(unittest.TestCase):
                     ("const MOVE_WORDS =", "\n// What a change did"), ("function mustFind(", "\n// ----"),
                     ("async function review(", "\nasync function askChanges(")] + self.FILTERS
         out = json.loads(run_html_js(self, code, json.dumps({"board": board, "cases": cases}), sections))
-        done, kept = ["done", []], ["review", []]
+        done, kept = ["develop", []], ["review", []]
         self.assertEqual(out, [
             {"open": "BE-04", "toasts": ["Recorded the dev merge of BE-03. Next to review: BE-04."], "saved": done, "afterUndo": "BE-03"},
             {"open": "BE-04", "toasts": ["Recorded the dev merge of BE-03. Next to review: BE-04."], "saved": done, "afterUndo": "FE-02"},
@@ -5455,7 +5455,7 @@ class StyleTests(unittest.TestCase):
                     check(f"{selector} on hover", color(rule(selector)["color"]), brighter(fill))
             asking = rule(":is(.card, .kcard).asking .badge")
             check("waiting for you", color(asking["color"], **{"--c": "var(--accent)"}), color(asking["background"], **{"--c": "var(--accent)"}))
-            badge, toast_badge, filled, button = rule(".badge"), rule(".toast .badge"), rule(":is(.card, .kcard):is(.s-doing, .s-review, .s-production) .badge"), rule("button.primary.to")
+            badge, toast_badge, filled, button = rule(".badge"), rule(".toast .badge"), rule(":is(.card, .kcard):is(.s-doing, .s-review, .s-develop, .s-production) .badge"), rule("button.primary.to")
             for state, own in states.items():
                 cards = [color(rule(".card")["background"], **own)]
                 if state == "blocked":

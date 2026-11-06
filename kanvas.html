@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <meta name="color-scheme" content="light dark">
 <title>Factory</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='2' y='2' width='60' height='60' rx='15' fill='%2323272f'/%3E%3Cg transform='translate(9.6 9.6) scale(.7)'%3E%3Cpath d='M19 14V50M46 14L28 32L46 50' fill='none' stroke='%23efece6' stroke-width='6.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M37.5 13H47V22.5ZM37.5 51H47V41.5Z' fill='%23efece6' stroke='%23efece6' stroke-width='4' stroke-linejoin='round'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231456d6'/%3E%3Crect x='44' y='9' width='8' height='24' rx='1.5' fill='%23fff'/%3E%3Cpath d='M9 55V29l12 8v-8l12 8v-8l12 8v-3h10v21z' fill='%23fff'/%3E%3Crect x='14' y='43' width='6' height='5' fill='%231456d6'/%3E%3Crect x='25' y='43' width='6' height='5' fill='%231456d6'/%3E%3Crect x='36' y='43' width='6' height='5' fill='%231456d6'/%3E%3C/svg%3E">
 <script id="kanvas-snapshot" type="application/json"></script>
 <style>
 :root {
@@ -13,9 +13,9 @@
   --text: #151a25; --muted: #5a6577; --faint: #656d7b; --accent: #4f46e5; --accent-text: #fff; --raise: #fff;
   --shadow: 0 1px 2px rgb(16 24 40 / .05), 0 1px 3px rgb(16 24 40 / .07);
   --shadow-lg: 0 14px 34px rgb(16 24 40 / .14), 0 3px 8px rgb(16 24 40 / .07);
-  --proposed: #9b51e0; --todo: #0b94d8; --blocked: #8d97a7; --doing: #f5650f; --review: #e03a85; --done: #16a34a; --production: #087f8c;
+  --proposed: #9b51e0; --todo: #0b94d8; --blocked: #8d97a7; --doing: #f5650f; --review: #e03a85; --done: #16a34a; --develop: #3f6fe0; --production: #087f8c;
   /* Fills keep 4.5:1 with --fill-text, also when a button brightens on hover. */
-  --todo-fill: #0073b5; --doing-fill: #bd4900; --review-fill: #ce2576; --done-fill: #008027; --production-fill: #066773; --fill-text: #fff;
+  --todo-fill: #0073b5; --doing-fill: #bd4900; --review-fill: #ce2576; --done-fill: #008027; --develop-fill: #2a55b8; --production-fill: #066773; --fill-text: #fff;
   --badge-mix: 60%; --toast-mix: 66%; --mark-mix: 80%; --danger: #dc2626; --yolo-mark: #c47b00;
   --yolo: #eda200; --y1: #fff1a8; --y2: #ffc61a; --y3: #ff9500; --y4: #ff6200; --yolo-ink: #3a2000;
   --yolo-fill: linear-gradient(100deg, var(--y1), var(--y2) 30%, var(--y3) 70%, var(--y4));
@@ -28,39 +28,54 @@
   --bg: #0d0f14; --surface: #161920; --surface-2: #1c2028; --border: #282d38; --border-strong: #3a4150;
   --text: #e6e8ec; --muted: #a0a8b6; --faint: #7f8799; --accent: #8b93ff; --accent-text: #0d0f14; --raise: #2a2f3a;
   --shadow: 0 1px 2px rgb(0 0 0 / .45); --shadow-lg: 0 14px 34px rgb(0 0 0 / .55);
-  --proposed: #b98af5; --todo: #3bb4f0; --blocked: #7a8597; --doing: #ff8a3d; --review: #f06aa8; --done: #3fcf78; --production: #39c4d2; --yolo: #ffc53d;
-  --todo-fill: var(--todo); --doing-fill: var(--doing); --review-fill: var(--review); --done-fill: var(--done); --production-fill: var(--production); --fill-text: #0d0f14;
+  --proposed: #b98af5; --todo: #3bb4f0; --blocked: #7a8597; --doing: #ff8a3d; --review: #f06aa8; --done: #3fcf78; --develop: #7da2ff; --production: #39c4d2; --yolo: #ffc53d;
+  --todo-fill: var(--todo); --doing-fill: var(--doing); --review-fill: var(--review); --done-fill: var(--done); --develop-fill: var(--develop); --production-fill: var(--production); --fill-text: #0d0f14;
   --badge-mix: 76%; --toast-mix: 45%; --mark-mix: 90%; --danger: #f6443d; --yolo-mark: var(--yolo);
   --edge: #343a47; --edge-open: #7a8496; --lane: rgb(255 255 255 / .022); --grid: #1f232c;
 }
 
-/* The Factory look: an old factory in iron and copper. It is dark by itself and only recolours and decorates. */
+/* The Factory look: a modern factory in engineering blue. White by day, navy by night; it only recolours and decorates. */
 [data-skin="factory"] {
-  --bg: #15110e; --surface: #211c18; --surface-2: #2a241f; --border: #3d342c; --border-strong: #6a5744;
-  --text: #efe6d8; --muted: #b9ab9a; --faint: #948677; --accent: #d9a441; --accent-text: #1b1307; --raise: #342c25;
-  --shadow: 0 2px 5px rgb(0 0 0 / .5); --shadow-lg: 0 18px 40px rgb(0 0 0 / .6), 0 0 0 1px #0008;
-  --proposed: #b99ad6; --todo: #6fb0cf; --blocked: #8a8077; --doing: #f08a3c; --review: #e0607a; --done: #6cc4a0; --production: #62b5c0; --yolo: #ffc53d;
-  --todo-fill: #2f7da0; --doing-fill: #c25f14; --review-fill: #b8405a; --done-fill: #2f8a68; --production-fill: #2b8592; --fill-text: #fff;
-  --danger: #f2594b; --edge: #4a3f35; --edge-open: #a58a6c; --lane: rgb(217 164 65 / .035); --grid: #261f1a;
-  --display: "Rockwell", "Roboto Slab", "Rockwell Nova", "Arvo", Georgia, "Times New Roman", serif;
+  --bg: #ffffff; --surface: #ffffff; --surface-2: #f2f6fc; --border: #d9e2ef; --border-strong: #aebfd6;
+  --text: #0f1e36; --muted: #4a5b76; --faint: #5f6f89; --accent: #1456d6; --accent-text: #fff; --raise: #fff;
+  --shadow: 0 1px 2px rgb(15 40 90 / .06), 0 2px 6px rgb(15 40 90 / .06); --shadow-lg: 0 16px 38px rgb(15 40 90 / .18), 0 3px 8px rgb(15 40 90 / .08);
+  --proposed: #7a5af0; --todo: #0e8fd0; --blocked: #8794a8; --doing: #f08a00; --review: #d6336c; --done: #12a05c; --develop: #1456d6; --production: #0b7f8f; --yolo: #f0a000;
+  --todo-fill: #0b6fa3; --doing-fill: #b35f00; --review-fill: #c02660; --done-fill: #0a7a44; --develop-fill: #0f46b0; --production-fill: #086673; --fill-text: #fff;
+  --danger: #d92d20; --edge: #c3d0e3; --edge-open: #5b7194; --lane: rgb(20 86 214 / .035); --grid: #e4ebf5;
+  --plate-a: #f7faff; --plate-b: #e8f0fb; --rim: rgb(15 40 90 / .12); --lamp-off: #c3d0e3; --belt-a: #9db4d6; --belt-b: #c9d8ee; --belt-edge: #7f98c0; --screw: #aebfd6;
+  --display: var(--sans);
 }
-[data-skin="factory"] body { background: radial-gradient(1100px 560px at 50% -12%, rgb(217 164 65 / .09), transparent 62%), repeating-linear-gradient(0deg, rgb(255 255 255 / .014) 0 2px, transparent 2px 4px), var(--bg); }
-[data-skin="factory"] header.top { background: linear-gradient(#30281f, #211c18); border-bottom: 3px double #7b6240; box-shadow: 0 2px 0 #0007; }
-[data-skin="factory"] :is(.board-title .t, .section-head, .d-head, .dlg h3, .lane-head .name, .station-plate, .gauge b) { font-family: var(--display); letter-spacing: .05em; }
-[data-skin="factory"] :is(.section-head, .d-head, .dlg h3, .station-plate) { text-transform: uppercase; }
-[data-skin="factory"] button { background: linear-gradient(#372e27, #2a241f); border-color: #55493c; box-shadow: inset 0 1px 0 rgb(255 255 255 / .07); }
-[data-skin="factory"] button:hover { border-color: #8d7456; background: linear-gradient(#41362d, #2f2822); }
-[data-skin="factory"] button.ghost { background: transparent; box-shadow: none; }
-[data-skin="factory"] button.primary { background: linear-gradient(#e9bb5d, #b98a2d); border-color: #f0c870; color: #1b1307; text-shadow: 0 1px 0 rgb(255 255 255 / .25); }
-[data-skin="factory"] button.primary:hover { background: linear-gradient(#f2c76b, #c4952f); }
-[data-skin="factory"] :is(.card, .kcard) { box-shadow: inset 0 0 0 1px #0007, inset 0 1px 0 rgb(255 255 255 / .06), var(--shadow); }
-[data-skin="factory"] :is(#panel, dialog.dlg) {
-  background-image: radial-gradient(circle, #b89a68 0 1.8px, #4a3a28 2.2px 3px, transparent 3.2px), radial-gradient(circle, #b89a68 0 1.8px, #4a3a28 2.2px 3px, transparent 3.2px),
-    radial-gradient(circle, #b89a68 0 1.8px, #4a3a28 2.2px 3px, transparent 3.2px), radial-gradient(circle, #b89a68 0 1.8px, #4a3a28 2.2px 3px, transparent 3.2px);
-  background-size: 8px 8px; background-repeat: no-repeat;
-  background-position: 7px 7px, calc(100% - 7px) 7px, 7px calc(100% - 7px), calc(100% - 7px) calc(100% - 7px);
+[data-skin="factory"][data-theme="dark"] {
+  --bg: #0a1424; --surface: #101d33; --surface-2: #15253f; --border: #223454; --border-strong: #34507c;
+  --text: #e8eefa; --muted: #a3b3cf; --faint: #8294b3; --accent: #5b9bff; --accent-text: #08142a; --raise: #1d3052;
+  --shadow: 0 1px 2px rgb(0 0 0 / .5); --shadow-lg: 0 16px 38px rgb(0 0 0 / .6);
+  --proposed: #a592ff; --todo: #4cc0f5; --blocked: #8294b3; --doing: #ffa726; --review: #ff7aa8; --done: #3fd68c; --develop: #6ea8ff; --production: #3dc9d6; --yolo: #ffc53d;
+  --todo-fill: var(--todo); --doing-fill: var(--doing); --review-fill: var(--review); --done-fill: var(--done); --develop-fill: var(--develop); --production-fill: var(--production); --fill-text: #08142a;
+  --danger: #ff6b5e; --edge: #2c4166; --edge-open: #7f9bc8; --lane: rgb(120 170 255 / .04); --grid: #14233c;
+  --plate-a: #1a2d4d; --plate-b: #12223c; --rim: rgb(0 0 0 / .45); --lamp-off: #2c4166; --belt-a: #34507c; --belt-b: #1d3052; --belt-edge: #0a1424; --screw: #5b7194;
 }
-[data-skin="factory"] dialog.dlg { border: 2px solid #6a5744; box-shadow: var(--shadow-lg), inset 0 0 0 1px #0008; }
+[data-skin="factory"] body { background: var(--bg); }
+[data-skin="factory"] header.top { background: linear-gradient(180deg, var(--surface), var(--surface-2)); border-bottom: 2px solid var(--accent); box-shadow: none; }
+[data-skin="factory"] :is(.board-title .t, .section-head, .d-head, .dlg h3, .lane-head .name, .station-plate, .gauge b) { font-family: var(--display); letter-spacing: .02em; }
+[data-skin="factory"] :is(.section-head, .d-head, .dlg h3, .station-plate) { text-transform: uppercase; letter-spacing: .06em; }
+[data-skin="factory"] button { box-shadow: none; }
+[data-skin="factory"] button.ghost { background: transparent; }
+[data-skin="factory"] button.primary { box-shadow: 0 1px 2px rgb(15 40 90 / .25), inset 0 -2px 0 rgb(0 0 0 / .18); }
+[data-skin="factory"] :is(.card, .kcard) { border-radius: 8px; box-shadow: var(--shadow); }
+[data-skin="factory"] dialog.dlg { border: 1px solid var(--border-strong); box-shadow: var(--shadow-lg); }
+[data-skin="factory"] .gauge { box-shadow: var(--shadow); }
+[data-skin="factory"] .station-plate { background: linear-gradient(var(--plate-a), var(--plate-b)); box-shadow: 0 1px 0 var(--rim); }
+[data-skin="factory"] .lamp { background: var(--lamp-off); box-shadow: inset 0 0 0 1px var(--rim); }
+[data-skin="factory"] .lamp.on-green { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+[data-skin="factory"] .lamp.on-amber { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
+[data-skin="factory"] .lamp.on-red { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
+[data-skin="factory"] .machine { background: repeating-linear-gradient(135deg, rgb(20 86 214 / .04) 0 6px, transparent 6px 12px), var(--surface); }
+[data-skin="factory"] .crate { background: linear-gradient(var(--plate-a), var(--plate-b)); box-shadow: 0 1px 0 var(--rim); }
+[data-skin="factory"] .crate::after { background: var(--screw); box-shadow: inset 0 0 0 1px var(--rim); }
+[data-skin="factory"] .belt { background: repeating-linear-gradient(90deg, var(--belt-a) 0 8px, var(--belt-b) 8px 16px); border-block-color: var(--belt-edge); }
+@media (max-width: 760px) { [data-skin="factory"] .belt { background: repeating-linear-gradient(180deg, var(--belt-a) 0 8px, var(--belt-b) 8px 16px); border-inline-color: var(--belt-edge); } }
+.logo { color: var(--accent); }
+.logo .lt { fill: color-mix(in srgb, var(--accent) 38%, var(--surface)); }
 
 /* The factory floor: the tasks as crates on an assembly line, the agents as the machines that work them. */
 #plant-view { overflow: auto; }
@@ -97,7 +112,7 @@
 .crate { display: block; width: 100%; text-align: left; white-space: normal; padding: 6px 8px 6px 11px; border: 1px solid var(--border-strong); border-left: 6px solid var(--c, var(--border-strong)); border-radius: 6px; background: linear-gradient(#2e2721, #261f1a); box-shadow: inset 0 0 0 1px #0006, 0 2px 0 #0007; position: relative; }
 .crate::after { content: ""; position: absolute; top: 5px; right: 5px; width: 5px; height: 5px; border-radius: 50%; background: #8f734a; box-shadow: inset 0 0 0 1px #0008; }
 .crate.s-proposed { --c: var(--proposed); } .crate.s-todo { --c: var(--todo); } .crate.s-blocked { --c: var(--blocked); } .crate.s-doing { --c: var(--doing); }
-.crate.s-review { --c: var(--review); } .crate.s-done { --c: var(--done); } .crate.s-production { --c: var(--production); }
+.crate.s-review { --c: var(--review); } .crate.s-develop { --c: var(--develop); } .crate.s-done { --c: var(--done); } .crate.s-production { --c: var(--production); }
 .crate.s-blocked { opacity: .7; border-style: dashed; }
 .crate.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
 .crate .id { display: block; font: 700 11px var(--mono); color: var(--muted); }
@@ -138,7 +153,7 @@ kbd { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--border);
 .icon svg { width: 16px; height: 16px; }
 .s-proposed { --c: var(--proposed); } .s-todo { --c: var(--todo); --c-fill: var(--todo-fill); } .s-blocked { --c: var(--blocked); }
 .s-doing { --c: var(--doing); --c-fill: var(--doing-fill); } .s-review { --c: var(--review); --c-fill: var(--review-fill); }
-.s-done { --c: var(--done); --c-fill: var(--done-fill); } .s-production { --c: var(--production); --c-fill: var(--production-fill); } .s-ask { --c: var(--accent); }
+.s-done { --c: var(--done); --c-fill: var(--done-fill); } .s-develop { --c: var(--develop); --c-fill: var(--develop-fill); } .s-production { --c: var(--production); --c-fill: var(--production-fill); } .s-ask { --c: var(--accent); }
 /* Each state's mark has a shape of its own, so the states read apart without their colors. */
 .s-proposed { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6' stroke-dasharray='2.6 2.112' stroke-dashoffset='1.3'/%3E%3C/svg%3E"); }
 .s-blocked { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M4 4l8 8'/%3E%3C/svg%3E"); }
@@ -146,10 +161,11 @@ kbd { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--border);
 .s-doing { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 3a5 5 0 0 1 0 10z' fill='black' stroke='none'/%3E%3C/svg%3E"); }
 .s-review { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M8 3a5 5 0 1 1-5 5h5z' fill='black' stroke='none'/%3E%3C/svg%3E"); }
 .s-done { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Cmask id='m'%3E%3Crect width='16' height='16' fill='white' stroke='none'/%3E%3Cpath d='M5 8.3l2 2 4-4.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/mask%3E%3Ccircle cx='8' cy='8' r='7' mask='url(%23m)' fill='black' stroke='none'/%3E%3C/svg%3E"); }
+.s-develop { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M5.2 8.2l2 2 3.6-3.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
 .s-production { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8'%3E%3Cpath d='M8 1.5l2 4 4.5.7-3.3 3.2.8 4.6L8 11.9 4 14l.8-4.6-3.3-3.2L6 5.5z' fill='black'/%3E%3C/svg%3E"); }
 .dot { width: 12px; height: 12px; background: color-mix(in srgb, var(--c) var(--mark-mix), var(--text)); flex: none; -webkit-mask: var(--mark) center / contain no-repeat; mask: var(--mark) center / contain no-repeat; }
 .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 650; padding: 1px 6px; border-radius: 4px; color: color-mix(in srgb, var(--c) var(--badge-mix), var(--text)); background: color-mix(in srgb, var(--c) 16%, transparent); white-space: nowrap; }
-:is(.card, .kcard):is(.s-doing, .s-review, .s-production) .badge { background: var(--c-fill); color: var(--fill-text); }
+:is(.card, .kcard):is(.s-doing, .s-review, .s-develop, .s-production) .badge { background: var(--c-fill); color: var(--fill-text); }
 :is(.card, .kcard).asking .badge { background: var(--c); color: var(--accent-text); }
 .readonly .edit-only { display: none !important; }
 
@@ -774,6 +790,13 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
   #new-task .lbl { display: none; }
   #new-task { padding: 0 7px; }
 }
+/* The board's name never collapses to its first letter: the progress meter and a narrower search give it the room. */
+.board-title { min-width: 8.5rem; }
+@media (max-width: 1535px) and (min-width: 1151px) {
+  .meter { display: none; }
+  .search kbd { display: none; }
+  .search input { width: 120px; padding-right: 8px; }
+}
 @media (max-width: 1150px) {
   header.top { flex-wrap: wrap; row-gap: 6px; }
   header.top > #help, .search kbd { display: none; }
@@ -797,7 +820,7 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
   #redo { order: 10; }
 }
 /* The filters' own row has room for the state names again, except on a phone held sideways. */
-@media (min-width: 900px) and (max-width: 1150px) and (min-height: 481px) {
+@media (min-width: 1120px) and (max-width: 1150px) and (min-height: 481px) {
   .schip .lbl { display: inline; }
 }
 @media (max-width: 900px) {
@@ -912,14 +935,14 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 <script>
   try {
     const p = JSON.parse(localStorage.getItem("kanvas:prefs") || "{}");
-    // The Factory look (iron and copper) is dark by itself; Plain keeps the light, dark or automatic theme.
+    // Both looks follow the light, dark or automatic theme; Factory starts light until a theme is chosen.
     document.documentElement.dataset.skin = p.skin === "plain" ? "plain" : "factory";
-    document.documentElement.dataset.theme = p.skin === "plain" ? p.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : "dark";
-  } catch (e) { document.documentElement.dataset.skin = "factory"; document.documentElement.dataset.theme = "dark"; }
+    document.documentElement.dataset.theme = (p.skin !== "plain" && p.theme === undefined) ? "light" : p.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  } catch (e) { document.documentElement.dataset.skin = "factory"; document.documentElement.dataset.theme = "light"; }
 </script>
 <header class="top">
   <div class="brand">
-    <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><path d="M19 14V50M46 14L28 32L46 50" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><path d="M37.5 13H47V22.5ZM37.5 51H47V41.5Z" fill="currentColor" stroke="currentColor" stroke-width="4" stroke-linejoin="round"/></svg>
+    <svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><rect x="45" y="6" width="9" height="30" rx="1.5" fill="currentColor"/><rect x="43" y="6" width="13" height="4" rx="1" class="lt"/><path d="M5 58V28l14 9v-9l14 9v-9l14 9v-3h12v24z" fill="currentColor"/><rect x="11" y="44" width="7" height="6" rx="1" fill="var(--surface)"/><rect x="24" y="44" width="7" height="6" rx="1" fill="var(--surface)"/><rect x="37" y="44" width="7" height="6" rx="1" fill="var(--surface)"/><rect x="49" y="42" width="8" height="16" rx="1" class="lt"/></svg>
     <span id="title-slot"></span>
     <span id="sync" class="sync" role="status"><span class="dot"></span><span class="label"></span></span>
     <span class="meter" id="meter" role="img"><span class="progress" id="progress" aria-hidden="true"></span><b id="meter-pct"></b></span>
@@ -996,9 +1019,9 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 // Constants and small helpers
 // ---------------------------------------------------------------------------
 
-const STATES = ["proposed", "todo", "doing", "review", "done", "production"];
-const VIEW_STATES = ["proposed", "blocked", "todo", "doing", "review", "done", "production"];
-const LABEL = { proposed: "Proposed", blocked: "Blocked", todo: "To do", doing: "Doing", review: "Review", done: "Done", production: "Production", ask: "Question" };
+const STATES = ["proposed", "todo", "doing", "review", "develop", "done", "production"];
+const VIEW_STATES = ["proposed", "blocked", "todo", "doing", "review", "develop", "done", "production"];
+const LABEL = { proposed: "Proposed", blocked: "Blocked", todo: "To do", doing: "Doing", review: "Review", develop: "Develop", done: "Done", production: "Production", ask: "Question" };
 const ID_RE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 const PREFIX_RE = /^[A-Z][A-Z0-9]{0,5}$/;
 const UNGROUPED = "G";
@@ -1200,7 +1223,7 @@ function serialize(b) {
 }
 
 const indexOf = (b) => new Map(b.tasks.map((t) => [key(t.id), t]));
-const complete = (t) => !!t && ["done", "production"].includes(t.state);
+const complete = (t) => !!t && ["develop", "done", "production"].includes(t.state);
 const unmetIn = (ix, t) => t.deps.filter((d) => !complete(ix.get(key(d))));
 const vstateIn = (ix, t) => (t.state === "todo" && unmetIn(ix, t).length ? "blocked" : t.state);
 
@@ -1218,7 +1241,7 @@ function upstreamOf(b, id) {
 }
 
 // A YOLO mark counts until its task goes to review (mirrors yolo_active in kanvas.py).
-const yoloActive = (t) => !!t.yolo && !["review", "done", "production"].includes(t.state);
+const yoloActive = (t) => !!t.yolo && !["review", "develop", "done", "production"].includes(t.state);
 
 // Task key -> ID of the YOLO task covering it (mirrors yolo_cover in kanvas.py). Only the last YOLO task of a chain
 // covers it: a YOLO task that another one depends on is covered by that one.
@@ -1390,7 +1413,7 @@ function problemsOf(b) {
       if (same(d, t.id)) errors.push(`${t.id} depends on itself`);
       else if (!ix.has(key(d))) errors.push(`${t.id} depends on missing task ${d}`);
     }
-    if (["doing", "review", "done", "production"].includes(t.state)) {
+    if (["doing", "review", "develop", "done", "production"].includes(t.state)) {
       const pending = unmetIn(ix, t).filter((d) => ix.has(key(d)));
       if (pending.length) warnings.push(`${t.id} is ${t.state} but depends on unfinished ${pending.join(", ")}`);
     }
@@ -2137,7 +2160,7 @@ const phone = matchMedia("(max-width: 640px), (pointer: coarse) and (max-device-
 const coarse = matchMedia("(pointer: coarse)");
 // The view chosen on wider screens, and the one chosen on phones, which start on the board.
 const prefs = (() => {
-  const defaults = { view: "graph", phoneView: "board", orient: "horizontal", arrange: "auto", hideDone: false, theme: null, levelGap: 70 };
+  const defaults = { view: "graph", phoneView: "board", orient: "horizontal", arrange: "auto", hideDone: false, theme: "light", levelGap: 70 };
   try { return Object.assign(defaults, JSON.parse(localStorage.getItem("kanvas:prefs") || "{}")); } catch (e) { return defaults; }
 })();
 const savePrefs = () => { try { localStorage.setItem("kanvas:prefs", JSON.stringify(prefs)); } catch (e) { /* storage disabled */ } };
@@ -2372,7 +2395,7 @@ const moved = (old, t) => !old || old.state !== t.state || revised(old, t) || as
 
 // What agents did since the last poll, as toasts that lead to the task, and in the activity list of the inbox.
 // `where` is another board's { name, title }, or null for this one. The author is only known when the move added a note.
-const ACTIVITY = { proposed: "proposed", doing: "started", review: "finished", done: "finished", todo: "paused" };
+const ACTIVITY = { proposed: "proposed", doing: "started", review: "finished", develop: "finished", done: "finished", todo: "paused" };
 // A plan arrives as many proposals at once, so planning toasts only on the board it happens on.
 const PLANNING = new Set(["proposed", "revised", "withdrew"]);
 function announce(moves, withdrawn, where = null, b = board) {
@@ -2435,10 +2458,11 @@ const MOVE_WORDS = {
   "doing>todo": ["Paused %", "pausing %"],
   "review>doing": ["Sent % back", "sending % back"],
   "done>todo": ["Reopened %", "reopening %"],
+  "develop>todo": ["Reopened %", "reopening %"],
   "production>done": ["Rolled % back to Done", "rolling % back to Done"],
   ">doing": ["Started %", "starting %"],
   ">review": ["Sent % to review", "sending % to review"],
-  ">done": ["Recorded the dev merge of %", "recording the dev merge of %"],
+  ">develop": ["Recorded the dev merge of %", "recording the dev merge of %"],
   ">production": ["Promoted % to production", "promoting % to production"],
 };
 const moveWords = (from, to) => MOVE_WORDS[`${from}>${to}`] || MOVE_WORDS[`>${to}`] || [`Moved % to ${LABEL[to] || to}`, `moving % to ${LABEL[to] || to}`];
@@ -2628,6 +2652,7 @@ const ops = {
     }
     if (from === "proposed" && state === "todo") throw new Error(`${t.id} needs its PO/TL product definition first`);
     if (from === "todo" && state === "doing") throw new Error(`${t.id} needs its Architect/Senior construction plan first`);
+    if (state === "develop") throw new Error(`${t.id} needs dev merge evidence first`);
     if (state === "done" && from !== "production") throw new Error(`${t.id} needs both reviews and dev merge evidence first`);
     if (state === "production") throw new Error(`${t.id} needs main/master deployment evidence first`);
     t.state = state;
@@ -2684,17 +2709,16 @@ const ops = {
   mergeDev: (id, evidence, at = nowIso()) => (b) => {
     const t = mustFind(b, id), review = t.review || {};
     if (t.state !== "review") throw new Error(`${t.id} is no longer in review`);
-    if (review.agent?.status !== "approved" || review.manual?.status !== "approved") {
-      throw new Error(`${t.id} needs approved agent and manual reviews before merge to dev`);
-    }
+    if (review.manual?.status !== "approved") throw new Error(`${t.id} needs the manual review approved before merge to dev`);
+    if (review.agent?.status !== "approved") evidence = `${evidence} (agent review ${review.agent?.status || "pending"} at merge time)`;
     const delivery = t.delivery ||= {};
     delivery.dev = { by: "human", at, evidence };
-    t.state = "done";
+    t.state = "develop";
     addNote(t, `Merged to dev: ${evidence}`, at);
   },
   promote: (id, evidence, at = nowIso()) => (b) => {
     const t = mustFind(b, id);
-    if (t.state !== "done") throw new Error(`${t.id} is not merged to dev`);
+    if (!["develop", "done"].includes(t.state)) throw new Error(`${t.id} is not merged to dev`);
     const delivery = t.delivery ||= {};
     delivery.production = { by: "human", at, evidence };
     t.state = "production";
@@ -2988,7 +3012,7 @@ function renderHeader() {
   hd.replaceChildren(icon(prefs.hideDone ? "eye-off" : "eye"));
 
   const total = board.tasks.length || 1;
-  $("#progress").replaceChildren(...["production", "done", "review", "doing", "todo", "blocked", "proposed"].map((s) =>
+  $("#progress").replaceChildren(...["production", "done", "develop", "review", "doing", "todo", "blocked", "proposed"].map((s) =>
     h("span", { class: `s-${s}`, style: `flex-grow:${counts[s] / total}` })));
   $("#meter").dataset.tip = `${counts.done} of ${board.tasks.length} tasks done`;
   $("#meter").setAttribute("aria-label", $("#meter").dataset.tip);
@@ -3155,7 +3179,7 @@ function renderGraph() {
   // Implied dependencies are drawn only while one of their two tasks is selected.
   for (const e of L.edges) {
     const dep = IX.get(e.from), t = IX.get(e.to);
-    const cls = dep.state === "done" ? "met" : "open";
+    const cls = ["develop", "done", "production"].includes(dep.state) ? "met" : "open";
     const m = yoloVia(dep) && yoloVia(t) ? "yolo" : dep.state === "doing" && !openQuestion(dep) ? "live" : cls;
     const imp = e.implied ? (same(ui.selected, dep.id) || same(ui.selected, t.id) ? " implied shown" : " implied") : "";
     const path = curvePath(e.segs);
@@ -4312,12 +4336,12 @@ async function approveManualReview(t) {
 
 async function recordDevMerge(t) {
   const data = await modal(`Merge to dev · ${t.id}`, [
-    h("p", {}, "Both reviews passed. Record the pull request and commit evidence merged into every affected dev branch."),
+    h("p", {}, "Record the pull request and commit evidence merged into every affected dev branch. The task moves to Develop."),
     h("label", { class: "field" }, "PR / dev commit evidence", h("textarea", { name: "evidence", rows: 5, required: true,
       placeholder: "Repository, pull request URL and merge commit SHA for frontend/API…" })),
   ], { ok: "Record merge to dev" });
   if (!data) return;
-  review(t, "done", "", () => recordDevMerge(t), ops.mergeDev(t.id, data.get("evidence").trim()));
+  review(t, "develop", "", () => recordDevMerge(t), ops.mergeDev(t.id, data.get("evidence").trim()));
 }
 
 async function recordProduction(t) {
@@ -4349,10 +4373,11 @@ function stateMoves(t) {
       const agent = t.review?.agent?.status === "approved", manual = t.review?.manual?.status === "approved";
       return [
         !manual ? { label: "Approve manual review", icon: "eye", run: () => approveManualReview(t), primary: agent, asks: true } : null,
-        agent && manual ? { label: "Record merge to dev", icon: "check", run: () => recordDevMerge(t), to: "done", primary: true, asks: true } : null,
+        manual ? { label: "Merge to dev done", icon: "check", run: () => recordDevMerge(t), to: "develop", primary: true, asks: true } : null,
         { label: "Send back", icon: "back", run: () => sendBack(t), to: "doing", asks: true },
       ].filter(Boolean);
     }
+    case "develop": return [{ label: "Promote to Production", icon: "up", run: () => recordProduction(t), to: "production", primary: true, asks: true }, { label: "Reopen", icon: "back", run: to("todo"), to: "todo" }];
     case "done": return [{ label: "Promote to Production", icon: "up", run: () => recordProduction(t), to: "production", primary: true, asks: true }, { label: "Reopen", icon: "back", run: to("todo"), to: "todo" }];
     case "production": return [{ label: "Roll back to Done", icon: "back", run: to("done"), to: "done" }];
     default: return [];
@@ -4361,7 +4386,7 @@ function stateMoves(t) {
 
 function yoloAction(t) {
   if (t.yolo) return { label: "Turn off YOLO", icon: "zap", run: () => toggleYolo(t) };
-  if (["review", "done", "production"].includes(t.state)) return null;
+  if (["review", "develop", "done", "production"].includes(t.state)) return null;
   const via = yoloVia(t);
   if (via) return { head: `${t.state === "proposed" ? "In the YOLO chain of" : "Covered by YOLO on"} ${via}` };
   return { label: "YOLO up to here…", icon: "zap", run: () => toggleYolo(t) };
@@ -4485,7 +4510,7 @@ function fillPanel(panel, t) {
   const kids = dependents(t);
   const last = t.notes[t.notes.length - 1];
   // The block under the title shows the latest note of work under way or finished, and a proposal's open request for changes.
-  const top = (["doing", "review", "done", "production"].includes(vs) ? last : vs === "proposed" ? changeRequest(t) : null) || null;
+  const top = (["doing", "review", "develop", "done", "production"].includes(vs) ? last : vs === "proposed" ? changeRequest(t) : null) || null;
 
   const title = h("textarea", { class: "p-title", rows: 1, value: drafts.title ?? t.title, "aria-label": "Title", readonly: ro, spellcheck: "false" });
   title.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); focusPanel(); } if (e.key === "Escape") { title.value = t.title; focusPanel(); } });
@@ -4687,7 +4712,8 @@ function nowCard(t, vs, ro, note) {
     todo: [icon("play"), "Ready for technical planning", ro ? null : h("p", {}, "Run the Architect + Senior Grill me before construction starts.")],
     doing: [h("i", { class: "live" }), "In progress", null],
     review: [icon("check"), "Agent and manual review", h("p", {}, `Agent: ${t.review?.agent?.status || "pending"} · Manual: ${t.review?.manual?.status || "pending"}`)],
-    done: [icon("check"), "Merged to dev", null],
+    develop: [icon("check"), "Merged to dev", null],
+    done: [icon("check"), "Done", null],
     production: [icon("up"), "Production", null],
   }[vs];
   const via = yoloVia(t), yoloComplete = t.yolo && t.state === "review";
@@ -5198,7 +5224,7 @@ async function newTaskDialog(group, { deps, blocks = [], title = "", desc = "" }
     chosen: blocks, label: "Blocks", placeholder: "Tasks that wait for this one", prompt: "Tasks that wait for the new task",
     reason: (t) => {
       if (depPick.ids.some((d) => same(d, t.id))) return "Already in Blocked by";
-      const started = { doing: "Already in progress", review: "Waiting for review", done: "Already done" }[t.state];
+      const started = { doing: "Already in progress", review: "Waiting for review", develop: "Already in dev", done: "Already done" }[t.state];
       if (started) return started;
       const d = depPick.ids.find((x) => up(x).has(key(t.id)));
       return d ? `Would loop: ${d} depends on it` : null;
@@ -5596,8 +5622,8 @@ function displayMenu() {
       row("Finished tasks", ["H"], seg("Finished tasks", [[false, "Show"], [true, "Hide"]], !!prefs.hideDone, toggleDone)),
       h("div", { class: "d-head" }, "Appearance"),
       row("Look", [], seg("Look", [["factory", "Factory", "factory"], ["plain", "Plain"]], prefs.skin === "plain" ? "plain" : "factory", (v) => { setSkinPref(v); fill(); }),
-        prefs.skin === "plain" ? null : "Iron and copper, an old factory. It is dark by itself."),
-      prefs.skin === "plain" ? row("Theme", [], seg("Theme", [["light", "Light", "sun"], ["dark", "Dark", "moon"], [null, "Auto", "contrast"]], prefs.theme || null, setThemePref)) : null,
+        prefs.skin === "plain" ? null : "A modern factory in engineering blue."),
+      row("Theme", [], seg("Theme", [["light", "Light", "sun"], ["dark", "Dark", "moon"], [null, "Auto", "contrast"]], prefs.theme || null, setThemePref)),
     ));
     if (focused >= 0) (controls()[focused] || node.closest(".ctx-menu") || node).focus({ preventScroll: true });
   };
@@ -6052,7 +6078,7 @@ const systemDark = matchMedia("(prefers-color-scheme: dark)");
 const applyTheme = () => {
   const plain = prefs.skin === "plain";
   document.documentElement.dataset.skin = plain ? "plain" : "factory";
-  document.documentElement.dataset.theme = plain ? prefs.theme || (systemDark.matches ? "dark" : "light") : "dark";
+  document.documentElement.dataset.theme = prefs.theme || (systemDark.matches ? "dark" : "light");
 };
 function setSkinPref(skin) { prefs.skin = skin === "plain" ? "plain" : "factory"; savePrefs(); applyTheme(); }
 function setThemePref(theme) { prefs.theme = theme; savePrefs(); applyTheme(); }
