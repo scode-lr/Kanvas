@@ -2611,7 +2611,11 @@ def cmd_retry(args):
         run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
         if run.get("status") != "failed":
             raise KanvasError(f"{t['id']} automation is {run.get('status') or 'not started'}; only failed automation can be retried")
-        kept = {k: run[k] for k in ("round", "since", "pull_requests", "cycle_start") if k in run}
+        kept = {k: run[k] for k in ("round", "since", "pull_requests") if k in run}
+        # The human choosing to continue starts a new count of review rounds: without it the run would stop again at
+        # automation.max_rounds as soon as the reviewer asks for one more change.
+        if run.get("round"):
+            kept["cycle_start"] = int(run["round"])
         if kept:
             work["automation"] = kept
         else:

@@ -2699,6 +2699,14 @@ const ops = {
     } else if (from === "review" && state === "doing") {
       const review = t.review ||= {};
       review.manual = { status: "pending" };
+      // Sending it back starts a new count of review rounds, and lifts a stop at the round limit so the agent goes on by itself.
+      const run = t.work?.automation;
+      if (run?.round) {
+        run.cycle_start = Number(run.round);
+        if (run.status === "failed" && String(run.summary || "").startsWith("Stopped after")) {
+          t.work.automation = Object.fromEntries(["round", "since", "pull_requests", "cycle_start"].filter((k) => k in run).map((k) => [k, run[k]]));
+        }
+      }
     }
     if (text) addNote(t, text, at);
   },
@@ -2714,7 +2722,9 @@ const ops = {
   retry: (id, at = nowIso()) => (b) => {
     const t = mustFind(b, id), run = t.work?.automation;
     if (t.state !== "doing" || run?.status !== "failed") throw new Error(`${t.id} has no failed automation to retry`);
-    const kept = Object.fromEntries(["round", "since", "pull_requests", "cycle_start"].filter((k) => k in run).map((k) => [k, run[k]]));
+    const kept = Object.fromEntries(["round", "since", "pull_requests"].filter((k) => k in run).map((k) => [k, run[k]]));
+    // Continuing by hand starts a new count of review rounds, as `kanvas retry` does.
+    if (run.round) kept.cycle_start = Number(run.round);
     if (Object.keys(kept).length) t.work.automation = kept; else delete t.work.automation;
     addNote(t, "Retrying failed automation in its existing isolated worktree.", at);
   },

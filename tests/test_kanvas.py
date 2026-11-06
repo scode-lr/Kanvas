@@ -3012,6 +3012,16 @@ class AutomationTests(TempBoard):
         self.assertEqual((first.get("status"), first.get("resumed")), (None, 1))
         self.assertEqual(self.get("DV-02")["work"]["automation"]["status"], "failed")
 
+    def test_a_retry_by_hand_starts_a_new_count_of_review_rounds(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.sent_back_board(repo, round_no=3, cycle_start=1)
+        kanvas.find_task(board, "DV-02")["work"]["automation"].update(status="failed", summary="Stopped after 3 rounds (automation.max_rounds).")
+        write_board(self.path, board)
+        self.run_cli("retry", "DV-02", "--as", "human")
+        run = self.get("DV-02")["work"]["automation"]
+        self.assertEqual((run["round"], run["cycle_start"]), (3, 3))
+
     def test_a_task_sent_back_to_doing_runs_again_as_the_next_round(self):
         repo = os.path.join(self.dir, "front")
         os.makedirs(repo)
@@ -3155,7 +3165,7 @@ class AutomationTests(TempBoard):
         write_board(self.path, board)
         self.run_cli("retry", "DV-02", "--as", "human")
         self.assertEqual(self.get("DV-02")["work"]["automation"],
-                         {"round": 2, "since": "2026-11-02T10:00:00Z", "pull_requests": [{"url": "https://github.com/a/b/pull/1"}]})
+                         {"round": 2, "since": "2026-11-02T10:00:00Z", "pull_requests": [{"url": "https://github.com/a/b/pull/1"}], "cycle_start": 2})
         launched = self.scan(kanvas.load_board(self.path))
         self.assertEqual(launched, ["DV-02"])
         self.assertEqual(self.get("DV-02")["work"]["automation"]["round"], 2)

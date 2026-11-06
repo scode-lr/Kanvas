@@ -632,6 +632,29 @@ class BrowserSmokeTests(unittest.TestCase):
         texts = self.page.js("[...document.querySelectorAll('#panel .notes .note-text')].map((n) => n.textContent.trim())")
         self.assertEqual(texts, sorted(texts, reverse=True))
 
+    def test_sending_a_task_back_starts_a_new_count_of_rounds_and_lifts_the_round_limit(self):
+        def stopped(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "review"
+            task["review"] = {"agent": {"status": "approved"}, "manual": {"status": "pending"}}
+            task["work"] = {"by": "human", "plan": "Build it", "repositories": ["front"], "automation": {
+                "status": "failed", "round": 3, "cycle_start": 1, "since": "2026-11-02T10:00:00Z",
+                "summary": "Stopped after 3 rounds (automation.max_rounds). Continue by hand."}}
+        kanvas.mutate(self.path, stopped)
+        self.load("#BE-03")
+        self.until("the panel", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")
+        self.page.js("[...document.querySelectorAll('#panel button')].find((b) => b.textContent.trim() === 'Send back').click()")
+        self.until("the dialog", "!!document.querySelector('dialog textarea[name=text]')")
+        self.page.js("document.querySelector('dialog textarea[name=text]').value = 'Please also fix the empty case'")
+        self.page.js("[...document.querySelectorAll('dialog button')].find((b) => b.textContent.trim() === 'Send back').click()")
+        for _ in range(30):
+            time.sleep(0.2)
+            task = kanvas.find_task(kanvas.load_board(self.path), "BE-03")
+            if task["state"] == "doing":
+                break
+        run = task["work"]["automation"]
+        self.assertEqual((task["state"], run.get("status"), run["round"], run["cycle_start"]), ("doing", None, 3, 3))
+
     def test_the_one_thing_allowed_on_a_busy_task_is_asking_the_agent_to_stop(self):
         def busy(board):
             task = kanvas.find_task(board, "BE-03")
