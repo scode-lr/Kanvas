@@ -2273,6 +2273,11 @@ class AutomationTests(TempBoard):
         board = self.review_board(repo, round_no=3, notes=[asked[0], runner, asked[1], runner])
         outcome = self.run_reviewers(board, [{"verdict": "changes", "summary": "Still not fixed", "findings": ["x"]}])
         self.assertEqual(outcome[0], "left")
+        # After two rounds of the haiku reviewer, the third review is made by the strong reviewer (sonnet).
+        command = self.review_calls[0]["command"]
+        self.assertEqual(command[command.index("--model") + 1], "sonnet")
+        self.assertTrue(self.review_calls[0]["log"].endswith("dv-02-review-strong.jsonl"))
+        self.assertEqual(len(self.review_calls), 1)
         self.assertIn("round 2 findings", self.review_calls[0]["prompt"])
         task = self.get("DV-02")
         self.assertEqual((task["state"], task["review"]["agent"]["status"]), ("review", "pending"))

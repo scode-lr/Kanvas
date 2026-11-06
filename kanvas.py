@@ -1814,8 +1814,12 @@ def _run_review(path, task_id, force=False):
         changes = [review_diff(w["worktree"], w["base"]) for w in worktrees]
         previous = last_review_findings(task)
         role_name = "reviewer"
+        # The first reviewer has already sent the task back as many times as it is allowed: a stronger model reviews it now.
+        rounds_allowed = config["review"]["rounds"]
+        if 0 < rounds_allowed <= consecutive_agent_changes(task) and "reviewer-strong" in config["agents"]:
+            role_name = "reviewer-strong"
         review, cost, model = ask_reviewer(config, task, run, worktrees, changes, previous, role_name)
-        if review["verdict"] == "escalate":
+        if review["verdict"] == "escalate" and role_name == "reviewer":
             role_name = "reviewer-strong"
             review, more, model = ask_reviewer(config, task, run, worktrees, changes, previous, role_name)
             cost += more

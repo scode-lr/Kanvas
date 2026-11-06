@@ -821,11 +821,11 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 @media (max-width: 1590px) and (min-width: 1536px) {
   #display .lbl { display: none; }
 }
-@media (max-width: 1535px) {
+@media (max-width: 1780px) {
   .schip .lbl { display: none; }
 }
 /* Down to 1430px the state names fit once the view, Display and New task buttons drop theirs, unless the YOLO chip takes that room. */
-@media (max-width: 1535px) and (min-width: 1430px) {
+@media (max-width: 1780px) and (min-width: 1430px) {
   header.top:not(:has(> #yolo-chip:not([hidden]))) .schip .lbl { display: inline; }
   header.top:not(:has(> #yolo-chip:not([hidden]))) :is(.seg, #display, #new-task) .lbl { display: none; }
   header.top:not(:has(> #yolo-chip:not([hidden]))) #new-task { padding: 0 7px; }
