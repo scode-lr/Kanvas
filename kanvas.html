@@ -4827,7 +4827,7 @@ function fillPanel(panel, t) {
     commit(ops.note(t.id, v), { onFail: () => noteBack(t.id, v) });
   };
   noteBox.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { addNoteNow(); focusPanel(noteBox); } if (e.key === "Escape") focusPanel(); });
-  const earlier = t.notes.filter((n) => n !== top);
+  const earlier = t.notes.filter((n) => n !== top).reverse(); // the newest first
 
   panel.replaceChildren(head,
     h("div", { class: "p-body" },

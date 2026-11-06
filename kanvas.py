@@ -990,11 +990,28 @@ def update_automation(path, task_id, status, **fields):
     return mutate(path, op)
 
 
-def finish_automation(path, task_id, success, summary, pull_requests=None):
+def resume_run(task, why):
+    """Puts a cut-off run back to be run again from its worktree, once per round: a second cut-off in the same round fails
+    and waits for the human. Returns whether it resumed."""
+    work = task.get("work") if isinstance(task.get("work"), dict) else {}
+    run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+    round_no = int(run.get("round") or 1)
+    if run.get("resumed") == round_no:
+        return False
+    kept = {k: run[k] for k in ("round", "since", "pull_requests", "cycle_start") if k in run}
+    work["automation"] = {**kept, "resumed": round_no}
+    task["work"] = work
+    add_note(task, f"Factory continues the run by itself: {why}. What it had done is kept in the worktree.", "kanvas-runner")
+    return True
+
+
+def finish_automation(path, task_id, success, summary, pull_requests=None, resume=""):
     def op(board):
         task = find_task(board, task_id)
         work = task.setdefault("work", {})
         run = work.setdefault("automation", {})
+        if not success and resume and task.get("state") == "doing" and resume_run(task, resume):
+            return task
         run.update({"status": "completed" if success else "failed", "updated": now_iso(), "summary": summary})
         if pull_requests:
             run["pull_requests"] = pull_requests
@@ -1755,8 +1772,11 @@ def run_automation(path, task_id):
                              limits=agent_limits(config, role), stop=lambda: stop_requested(path, task_id))
         clear_stop(path, task_id)
         if stop_text(proc):
+            # An agent that wrote nothing for a while usually lost its connection: it is continued once before it waits for you.
+            quiet = str(proc.stopped).startswith("it wrote nothing")
             finish_automation(path, task_id, False, f"{stop_text(proc)} What it had done so far is in the worktree and "
-                                                    f"the log ({log}). `retry {task_id}` runs it again from there.")
+                                                    f"the log ({log}). `retry {task_id}` runs it again from there.",
+                              resume="it wrote nothing for a while, probably a lost connection" if quiet else "")
             return
         ok, summary = claude_outcome(proc, log)
         if not summary:
@@ -1888,6 +1908,8 @@ def clear_busy_marks(path):
             t["work"].pop("busy", None)
             run = t["work"].get("automation")
             if isinstance(run, dict) and run.get("status") in ("queued", "running") and not t["work"].get("stop"):
+                if t.get("state") == "doing" and resume_run(t, "Factory restarted while the agent was working"):
+                    continue
                 message = "Factory restarted while the agent was working; its work is kept in the worktree. Press Retry to continue."
                 t["work"]["automation"] = {**run, "status": "failed", "updated": now_iso(), "summary": message}
                 add_note(t, "Automation interrupted: " + message, "kanvas-runner")
@@ -4518,6 +4540,8 @@ class AutomationDispatcher:
                         queued["cycle_start"] = fresh_run["cycle_start"]
                 if fresh_run.get("pull_requests"):
                     queued["pull_requests"] = fresh_run["pull_requests"]
+                if fresh_run.get("resumed"):
+                    queued["resumed"] = fresh_run["resumed"]
                 fresh_work["automation"] = queued
                 fresh["work"] = fresh_work
                 return True

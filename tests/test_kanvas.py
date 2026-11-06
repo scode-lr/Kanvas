@@ -2973,15 +2973,44 @@ class AutomationTests(TempBoard):
         self.assertEqual(task["state"], "todo")
         self.assertIn("could not write the technical plan: boom", task["notes"][-1]["text"])
 
-    def test_a_run_cut_off_by_a_restart_is_marked_failed_so_it_can_be_retried(self):
+    def cut_off_board(self, repo, **run):
+        board = self.automated_board(repo)
+        kanvas.find_task(board, "DV-02")["work"]["automation"] = {"status": "running", "updated": "2026-11-02T10:00:00Z", "round": 1, **run}
+        return board
+
+    def test_a_run_cut_off_by_a_restart_is_continued_by_itself_once(self):
         repo = os.path.join(self.dir, "front")
         os.makedirs(repo)
-        board = self.automated_board(repo)
-        kanvas.find_task(board, "DV-02")["work"]["automation"] = {"status": "running", "updated": "2026-11-02T10:00:00Z", "round": 1}
-        self.assertEqual(self.scan(board), [])
+        self.assertEqual(self.scan(self.cut_off_board(repo)), ["DV-02"])
+        task = self.get("DV-02")
+        self.assertEqual((task["work"]["automation"]["status"], task["work"]["automation"]["resumed"]), ("queued", 1))
+        self.assertTrue(any("continues the run by itself" in n["text"] for n in task["notes"]))
+
+    def test_a_second_cut_off_in_the_same_round_waits_for_the_human(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        self.assertEqual(self.scan(self.cut_off_board(repo, resumed=1)), [])
         task = self.get("DV-02")
         self.assertEqual(task["work"]["automation"]["status"], "failed")
         self.assertIn("Press Retry", task["notes"][-1]["text"])
+
+    def test_a_run_that_wrote_nothing_is_continued_once_and_then_fails(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        write_board(self.path, self.automated_board(repo))
+        quiet = mock.Mock(returncode=1, stopped="it wrote nothing for more than 10 minutes")
+
+        def fake(command, **kwargs):
+            kwargs["stdout"].write("")
+            return quiet
+
+        with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=self.fake_worktrees(repo)),                 mock.patch.object(kanvas, "agent_run", side_effect=fake):
+            kanvas.run_automation(self.path, "DV-02")
+            first = self.get("DV-02")["work"]["automation"]
+            kanvas.update_automation(self.path, "DV-02", "running")
+            kanvas.run_automation(self.path, "DV-02")
+        self.assertEqual((first.get("status"), first.get("resumed")), (None, 1))
+        self.assertEqual(self.get("DV-02")["work"]["automation"]["status"], "failed")
 
     def test_a_task_sent_back_to_doing_runs_again_as_the_next_round(self):
         repo = os.path.join(self.dir, "front")

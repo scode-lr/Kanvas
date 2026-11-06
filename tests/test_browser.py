@@ -622,6 +622,16 @@ class BrowserSmokeTests(unittest.TestCase):
         self.assertEqual(run.get("round"), 1)
         self.assertEqual(self.page.logged(), [])
 
+    def test_the_earlier_notes_start_with_the_newest(self):
+        def notes(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["notes"] = [{"at": f"2026-11-0{i}T10:00:00Z", "by": "human", "text": f"note {i}"} for i in range(1, 6)]
+        kanvas.mutate(self.path, notes)
+        self.load("#BE-03")
+        self.until("the notes", "document.querySelectorAll('#panel .notes .note-text').length >= 3")
+        texts = self.page.js("[...document.querySelectorAll('#panel .notes .note-text')].map((n) => n.textContent.trim())")
+        self.assertEqual(texts, sorted(texts, reverse=True))
+
     def test_the_one_thing_allowed_on_a_busy_task_is_asking_the_agent_to_stop(self):
         def busy(board):
             task = kanvas.find_task(board, "BE-03")
