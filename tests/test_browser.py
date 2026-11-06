@@ -40,7 +40,8 @@ if "The architect speaks first" in prompt:
 elif "The senior developer speaks second" in prompt:
     out("Senior: reuse the access service.")
 elif "The architect speaks last" in prompt:
-    out("Settled.\\n" + fenced({"questions": ["Which clubs first?"], "draft": {"plan": "Final plan from the conversation."}}))
+    plan = "Plan for Voltrega only." if "Answer: Voltrega" in prompt else "Final plan from the conversation."
+    out("Settled.\\n" + fenced({"questions": [{"text": "Which clubs first?", "options": ["All", "Voltrega"]}], "draft": {"plan": plan}}))
 elif "defining the product need" in prompt:
     out("Questions below.\\n" + fenced({"questions": ["Which roles?"], "draft": {"outcome": "Outcome from the agent",
         "needs": "Needs from the agent", "acceptance": "Acceptance from the agent", "non_goals": "", "repositories": [],
@@ -383,8 +384,7 @@ class BrowserSmokeTests(unittest.TestCase):
                                      ".querySelector('.section-head').textContent.startsWith('Evidence')"))
 
     def use_the_draft(self):
-        self.until("the agents' draft", "[...document.querySelectorAll('dialog .assist button')].some(b => b.textContent === 'Use the draft')", timeout=30)
-        self.page.js("[...document.querySelectorAll('dialog .assist button')].find(b => b.textContent === 'Use the draft').click()")
+        self.until("the agents' draft", "!!document.querySelector('dialog .assist-use')", timeout=30)
 
     def test_the_product_owner_drafts_a_new_task_from_its_dialog(self):
         self.load()
@@ -394,7 +394,6 @@ class BrowserSmokeTests(unittest.TestCase):
         self.page.js("document.querySelector('dialog .assist-bar button').click()")
         self.until("the questions", "!!document.querySelector('dialog .assist-questions')", timeout=30)
         self.assertIn("Which phones?", self.page.js("document.querySelector('dialog .assist-questions').innerText"))
-        self.assertEqual(self.page.js("document.querySelector('dialog input[name=title]').value"), "app crashes on login")
         self.use_the_draft()
         self.assertEqual(self.page.js("document.querySelector('dialog input[name=title]').value"), "Fix the login crash")
         self.assertEqual(self.page.js("document.querySelector('dialog textarea[name=desc]').value"), "It no longer crashes.")
@@ -426,6 +425,12 @@ class BrowserSmokeTests(unittest.TestCase):
         self.assertEqual(self.page.js("document.querySelector('dialog .assist-ask > b').textContent"), "1 question for you")
         self.assertFalse(self.page.js("document.querySelector('dialog .assist-msg').open"))
         self.assertEqual(self.page.js("document.querySelector('dialog textarea[name=plan]').value"), "Final plan from the conversation.")
+        # Each question offers its likely answers and a last box for anything else.
+        self.assertEqual(self.page.js("[...document.querySelectorAll('dialog .qa-item .qa-chips button')].map(b => b.textContent)"), ["All", "Voltrega"])
+        self.assertIn("Something else", self.page.js("document.querySelector('dialog .qa-item input').placeholder"))
+        self.page.js("[...document.querySelectorAll('dialog .qa-item .qa-chips button')].find(b => b.textContent === 'Voltrega').click()")
+        self.page.js("document.querySelector('dialog .assist-bar button').click()")
+        self.until("the plan to follow the answer", "document.querySelector('dialog textarea[name=plan]').value === 'Plan for Voltrega only.'", timeout=30)
         self.assertIn("Which clubs first?", self.page.js("document.querySelector('dialog .assist-questions').innerText"))
         self.assertEqual(self.page.logged(), [])
 

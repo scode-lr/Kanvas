@@ -4974,7 +4974,11 @@ def clean_assist(kind, data, board, repository_ids, role_names, phase="draft", a
         return {"questions": clean_questions(data)} if isinstance(data, dict) else None
     if not isinstance(data, dict):
         return None
-    questions = [_clip(q, 400) for q in data.get("questions") or [] if isinstance(q, str) and q.strip()][:8]
+    if kind == "definition":
+        questions = [_clip(q, 400) for q in data.get("questions") or [] if isinstance(q, str) and q.strip()][:8]
+    else:
+        # A task or a plan asks with likely answers the owner can tap; the page adds the box for any other answer.
+        questions = clean_questions(data)[1:]
     out = {"questions": questions}
     draft = data.get("draft") if isinstance(data.get("draft"), dict) else data
     if kind == "task":
@@ -5016,7 +5020,7 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
             "if none does, and list the open tasks it duplicates. Ask at most 5 questions.\n\n"
             "End your reply with one fenced json block and nothing after it:\n"
             "```json\n{\"title\": \"...\", \"group\": \"<group id or empty>\", \"desc\": \"...\", "
-            "\"duplicates\": [\"<task id>\"], \"questions\": [\"...\"]}\n```\n")
+            "\"duplicates\": [\"<task id>\"], \"questions\": [{\"text\": \"...\", \"options\": [\"...\"]}]}\n```\n")
     definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
     notes = "\n".join(f"- {_clip(n.get('text'), 300)}" for n in (task.get("notes") or [])[-3:]) or "(none)"
     about = f"task {task['id']}: {task['title']}\nDescription: {_clip(task.get('desc'), 1500) or '(none)'}\nRecent notes:\n{notes}\n"
@@ -5069,7 +5073,10 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
     return head + ("The architect speaks last. " + spec + f"Your proposal was:\n{earlier[0]}\n\nThe senior developer answered:\n"
                    f"{earlier[1]}\n\nSettle it: write the final construction plan, taking what is right in the review, and "
                    "the questions only the owner can answer.\n\nEnd your reply with one fenced json block and nothing "
-                   "after it:\n```json\n{\"questions\": [\"...\"], \"draft\": {\"plan\": \"<the final plan, in plain text>\"}}\n```\n")
+                   "after it:\n```json\n{\"questions\": [{\"text\": \"...\", \"options\": [\"...\"]}], \"draft\": {\"plan\": \"<the final plan, in plain text>\"}}\n```\n"
+                   "The plan must be complete on its own: for every open question take your best option. Each question must be "
+                   "answerable by tapping, with 2 to 4 short options and the one you recommend first. Ask only what reading the "
+                   "code and the documentation could not settle; never ask the owner what you can look up.\n")
 
 
 def assist_step(agent, prompt, root, settings):

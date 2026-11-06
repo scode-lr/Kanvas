@@ -4251,7 +4251,7 @@ class ServerTests(TempBoard):
                               env={"GH_TOKEN": "secret", "KANVAS_GITHUB_TOKEN": "secret"})
         self.assertEqual(job["status"], "done", job)
         self.assertEqual(job["result"]["draft"], {"title": "Fix the crash on login", "group": "DV", "desc": "Login no longer crashes."})
-        self.assertEqual((job["result"]["duplicates"], job["result"]["questions"]), (["DV-02"], ["Which phones?"]))
+        self.assertEqual((job["result"]["duplicates"], [q["text"] for q in job["result"]["questions"]]), (["DV-02"], ["Which phones?"]))
         self.assertEqual([m["agent"] for m in job["messages"]], ["product-owner"])
         self.assertEqual(job["messages"][0]["text"], "This is a bug.")
         call = self.agent_calls[0]
@@ -4354,7 +4354,7 @@ class ServerTests(TempBoard):
         self.assertIn("Senior: reuse ClubAccessService.", self.agent_calls[2]["prompt"])
         self.assertIn("Architect: use the service layer.", self.agent_calls[2]["prompt"])
         self.assertEqual(job["result"]["draft"], {"plan": "1. Add the endpoint. 2. Test the club case."})
-        self.assertEqual(job["result"]["questions"], ["Who may do it?"])
+        self.assertEqual([q["text"] for q in job["result"]["questions"]], ["Who may do it?"])
         self.assertEqual((job["turns"], round(job["cost"], 2)), (6, 0.03))
         for call in self.agent_calls:
             self.assertEqual(call["command"][call["command"].index("--tools") + 1], "Read,Glob,Grep")

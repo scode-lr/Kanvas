@@ -4153,7 +4153,7 @@ function wizardSteps(names) {
 function questionItem(q, { fixed = false } = {}) {
   let picked = q.default || "";
   const box = q.options?.length && fixed ? null : h(q.options?.length ? "input" : "textarea", {
-    type: q.options?.length ? "text" : undefined, rows: 2, placeholder: q.options?.length ? "Or write another answer…" : "Your answer…" });
+    type: q.options?.length ? "text" : undefined, rows: 2, placeholder: q.options?.length ? "Something else: write it here…" : "Your answer…" });
   const buttons = (q.options || []).map((o) => h("button", { type: "button", "aria-pressed": String(o === picked), onclick: () => {
     picked = picked === o && !fixed ? "" : o;
     buttons.forEach((b) => b.setAttribute("aria-pressed", String(b.textContent === picked)));
@@ -4185,7 +4185,8 @@ function assistPanel({ kind, id, label, hint, fields, apply }) {
   let asked = [];
   const finish = (job) => {
     const { questions = [], duplicates = [], draft = {} } = job.result || {};
-    asked = questions.map((q, i) => questionItem({ id: `q${i + 1}`, text: q }));
+    asked = questions.map((q, i) => questionItem(typeof q === "string" ? { id: `q${i + 1}`, text: q } : q));
+    apply(draft);
     status.className = "assist-status";
     status.textContent = `${job.messages.length} ${job.messages.length === 1 ? "answer" : "answers"} · ${job.turns} turns · $${Number(job.cost).toFixed(2)}`;
     goLabel.textContent = "Ask again";
@@ -4196,10 +4197,8 @@ function assistPanel({ kind, id, label, hint, fields, apply }) {
       questions.length || duplicates.length ? h("div", { class: "assist-ask" }, h("b", {}, asked.length ? `${asked.length} ${asked.length === 1 ? "question" : "questions"} for you` : "For you"),
         duplicates.length ? h("div", {}, `May duplicate ${duplicates.join(", ")}.`) : null,
         asked.length ? h("div", { class: "qa-list assist-questions" }, asked.map((q) => q.el)) : null,
-        asked.length ? h("div", { class: "hint" }, "Answer what you can and press “Ask again with my answers”, or use the draft as it is.") : null) : null,
-      h("div", { class: "assist-use" },
-        h("button", { type: "button", class: "primary", onclick: (e) => { apply(draft); e.currentTarget.textContent = "Draft applied"; e.currentTarget.disabled = true; } }, "Use the draft"),
-        h("span", { class: "hint" }, "It fills the form below; you can still edit it.")),
+        asked.length ? h("div", { class: "hint" }, "Tap an answer or write your own, then press “Ask again with my answers”. Or leave them and keep the draft.") : null) : null,
+      h("p", { class: "assist-use" }, "The draft is already in the form below" + (asked.length ? "; it takes the first option of each question until you answer." : ". Edit it as you like.")),
       talk));
     if (asked.length) goLabel.textContent = "Ask again with my answers";
   };
