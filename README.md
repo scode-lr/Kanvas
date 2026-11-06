@@ -27,7 +27,7 @@ AI agents do their best work in a terminal, but a project needs a plan that outl
 
 The easiest way to start is just to open Claude Code, Codex, Cursor, Gemini CLI or OpenCode in your project's folder and paste into the chat:
 
-> Set up Kanvas in this project with `uvx kanvas-board init` (https://github.com/XMihura/Kanvas), then follow `.agents/skills/kanvas/SKILL.md` and plan the work with me on the board.
+> Set up Kanvas in this project with `uvx --from git+https://github.com/scode-lr/Kanvas kanvas-board init` (https://github.com/scode-lr/Kanvas), then follow `.agents/skills/kanvas/SKILL.md` and plan the work with me on the board.
 
 The agent should then guide you.
 
@@ -94,10 +94,10 @@ Install with pipx, or straight from GitHub without PyPI:
 
 ```bash
 pipx install kanvas-board
-uv tool install https://github.com/XMihura/Kanvas/archive/refs/heads/main.zip
+uv tool install git+https://github.com/scode-lr/Kanvas
 ```
 
-Without uv, you need Python 3.8 or newer. [Download](https://github.com/XMihura/Kanvas/archive/refs/heads/main.zip) or clone this repository and run its `kanvas.py` in your project's folder; from then on, use the project's copy (type `python3` where `python` is missing):
+Without uv, you need Python 3.8 or newer. [Download](https://github.com/scode-lr/Kanvas/archive/refs/heads/main.zip) or clone this repository and run its `kanvas.py` in your project's folder; from then on, use the project's copy (type `python3` where `python` is missing):
 
 ```bash
 python path/to/kanvas.py init

@@ -4783,7 +4783,7 @@ function phoneDialog() {
       h("p", {}, "Scan it with your phone's camera. The phone needs the Tailscale app, signed in to the same account."),
       ...info.urls.map((u) => h("div", { class: "phone-url" }, h("code", {}, u), h("button", { type: "button", onclick: () => copy(u) }, icon("copy"), "Copy"))),
       h("p", { class: "phone-note" }, `Anyone on your Tailscale network can open and edit your boards. If the phone cannot connect, allow port ${port} for Tailscale in this computer's firewall: `,
-        h("a", { href: "https://github.com/XMihura/Kanvas#if-the-phone-cannot-connect", target: "_blank", rel: "noopener" }, "how, for each system"), "."),
+        h("a", { href: "https://github.com/scode-lr/Kanvas#if-the-phone-cannot-connect", target: "_blank", rel: "noopener" }, "how, for each system"), "."),
       info.manage ? h("button", { type: "button", onclick: (e) => { e.currentTarget.disabled = true; ask("DELETE").then(show, fail); } }, "Stop opening to phones")
         : h("p", { class: "phone-note" }, "Only the computer running Kanvas can close it to phones."));
   };
