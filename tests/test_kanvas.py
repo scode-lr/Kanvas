@@ -1355,6 +1355,7 @@ class AutomationTests(TempBoard):
             "runs_root": ".kanvas/runs",
             "repositories": [{"id": "front", "name": "Frontend", "path": repo, "base": "HEAD"}],
             "design": False,
+            "ci": False,
         }
         t = kanvas.find_task(board, "DV-02")
         t["state"] = "doing"
@@ -3021,6 +3022,87 @@ class AutomationTests(TempBoard):
         self.run_cli("retry", "DV-02", "--as", "human")
         run = self.get("DV-02")["work"]["automation"]
         self.assertEqual((run["round"], run["cycle_start"]), (3, 3))
+
+    # --- CI: the checks of the pull requests pass before the task goes to Review ---
+
+    def run_with_ci(self, repo, verdicts, heads=None, **ci):
+        """Runs a task whose pull request has the given check verdicts in turn; returns (agent_run, publish)."""
+        board = self.automated_board(repo)
+        board["automation"]["ci"] = {"enabled": True, **ci}
+        write_board(self.path, board)
+        sequence = iter(verdicts)
+        commits = iter(heads or [f"c{i}" for i in range(20)])
+
+        def completed(command, **kwargs):
+            kwargs["stdout"].write(json.dumps(self.success_events()[0]) + chr(10))
+            return mock.Mock(returncode=0)
+
+        publish = mock.Mock(return_value=[self.agent_pull()])
+        failure = {"pull": self.agent_pull(), "check": "Unit tests", "url": "https://github.com/acme/front/actions/runs/99/job/1"}
+        with mock.patch.object(kanvas, "prepare_automation_worktrees", return_value=self.fake_worktrees(repo)),              mock.patch.object(kanvas, "publish_pull_requests", publish), mock.patch.object(kanvas, "save_changes"),              mock.patch.object(kanvas, "agent_run", side_effect=completed) as run,              mock.patch.object(kanvas, "_heads", side_effect=lambda w: [next(commits)]),              mock.patch.object(kanvas, "ci_failure_logs", return_value="FAILED: the date test"),              mock.patch.object(kanvas, "wait_for_checks", side_effect=lambda *a, **k: (lambda v: (v, [failure] if v == "failed" else []))(next(sequence))):
+            kanvas.run_automation(self.path, "DV-02")
+        return run, publish
+
+    def test_a_task_whose_checks_pass_goes_to_review(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        run, _ = self.run_with_ci(repo, ["passed"])
+        self.assertEqual(run.call_count, 1)
+        task = self.get("DV-02")
+        self.assertEqual(task["state"], "review")
+        self.assertIn("CI: all checks passed.", task["work"]["automation"]["summary"])
+
+    def test_the_agent_fixes_a_failing_check_before_the_task_goes_to_review(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        run, publish = self.run_with_ci(repo, ["failed", "passed"])
+        self.assertEqual(run.call_count, 2)
+        prompt = run.call_args_list[1].kwargs["input"]
+        self.assertIn("failing CI", prompt)
+        self.assertIn("Unit tests", prompt)
+        self.assertIn("FAILED: the date test", prompt)
+        self.assertEqual(publish.call_count, 2)
+        task = self.get("DV-02")
+        self.assertEqual(task["state"], "review")
+        self.assertIn("after 1 fix by the agent", task["work"]["automation"]["summary"])
+
+    def test_a_task_whose_checks_keep_failing_stays_in_doing_after_the_allowed_fixes(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        run, _ = self.run_with_ci(repo, ["failed"] * 5, max_fixes=2)
+        self.assertEqual(run.call_count, 3)
+        task = self.get("DV-02")
+        self.assertEqual((task["state"], task["work"]["automation"]["status"]), ("doing", "failed"))
+        self.assertIn("CI still fails after 2 fixes", task["work"]["automation"]["summary"])
+
+    def test_a_fix_that_changes_nothing_is_not_pushed_again(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        run, publish = self.run_with_ci(repo, ["failed"] * 3, heads=["same", "same"])
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(publish.call_count, 1)
+        self.assertIn("changed nothing", self.get("DV-02")["work"]["automation"]["summary"])
+
+    def test_the_checks_of_a_pull_request_are_read_as_passed_failed_or_pending(self):
+        rollup = json.dumps([
+            {"name": "Lint", "status": "COMPLETED", "conclusion": "SUCCESS", "detailsUrl": "https://github.com/a/b/actions/runs/1/job/2"},
+            {"name": "Unit tests", "status": "COMPLETED", "conclusion": "FAILURE", "detailsUrl": "https://github.com/a/b/actions/runs/3/job/4"},
+            {"name": "Build", "status": "IN_PROGRESS", "conclusion": ""},
+            {"context": "legacy", "state": "SUCCESS", "targetUrl": "https://ci"}])
+        with mock.patch.object(kanvas, "_gh", return_value=rollup):
+            checks = kanvas.pull_request_checks("/x", "https://github.com/a/b/pull/1")
+        self.assertEqual([(c["name"], c["state"]) for c in checks],
+                         [("Lint", "passed"), ("Unit tests", "failed"), ("Build", "pending"), ("legacy", "passed")])
+
+    def test_waiting_for_checks_ends_when_every_one_has_finished(self):
+        pull = self.agent_pull()
+        states = iter([[{"name": "Build", "state": "pending", "url": ""}], [{"name": "Build", "state": "passed", "url": ""}]])
+        with mock.patch.object(kanvas, "pull_request_checks", side_effect=lambda *a: next(states)),              mock.patch.object(kanvas, "CI_POLL_SECONDS", 0):
+            self.assertEqual(kanvas.wait_for_checks([pull], {"front": "/x"}, 5), ("passed", []))
+
+    def test_waiting_for_checks_gives_up_when_no_ci_answers(self):
+        with mock.patch.object(kanvas, "pull_request_checks", return_value=[]), mock.patch.object(kanvas, "CI_POLL_SECONDS", 0),              mock.patch.object(kanvas, "CI_APPEAR_SECONDS", 0):
+            self.assertEqual(kanvas.wait_for_checks([self.agent_pull()], {"front": "/x"}, 5), ("none", []))
 
     def test_a_task_sent_back_to_doing_runs_again_as_the_next_round(self):
         repo = os.path.join(self.dir, "front")

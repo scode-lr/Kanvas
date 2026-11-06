@@ -412,6 +412,20 @@ class BrowserSmokeTests(unittest.TestCase):
         self.assertEqual(self.page.js("document.querySelector('dialog textarea[name=acceptance]').value"), "Acceptance from the agent")
         self.assertEqual(self.page.logged(), [])
 
+    def test_the_steps_of_the_definition_dialog_can_be_picked_and_its_actions_stay_in_view(self):
+        self.load("#BE-05")
+        self.until("the panel of BE-05", "document.querySelector('#panel .cid')?.textContent === 'BE-05'")
+        self.page.js("[...document.querySelectorAll('#panel button')].find(b => b.textContent.includes('PO/TL Grill me')).click()")
+        self.until("the definition dialog", "!!document.querySelector('dialog .wiz-steps')")
+        self.assertEqual(self.page.js("document.querySelectorAll('dialog .wiz-pick').length"), 2)
+        self.page.js("document.querySelectorAll('dialog .wiz-pick')[1].click()")
+        self.until("the definition form", "!document.querySelector('dialog textarea[name=outcome]').closest('.wiz-step').hidden")
+        self.assertFalse(self.page.js("[...document.querySelectorAll('dialog .dlg-actions button')].find(b => b.textContent.includes('Approve definition')).hidden"))
+        self.assertEqual(self.page.js("getComputedStyle(document.querySelector('dialog .dlg-actions')).position"), "sticky")
+        self.page.js("document.querySelectorAll('dialog .wiz-pick')[0].click()")
+        self.until("the questions again", "!document.querySelector('dialog .wiz-actions').closest('.wiz-step').hidden")
+        self.assertEqual(self.page.logged(), [])
+
     def test_the_architect_and_the_senior_talk_in_the_plan_dialog(self):
         self.load("#FE-04")
         self.until("the panel of FE-04", "document.querySelector('#panel .cid')?.textContent === 'FE-04'")

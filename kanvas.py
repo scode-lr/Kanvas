@@ -802,6 +802,7 @@ def automation_config(board, path):
         "review": review_settings(config.get("review")),
         "curator": curator_settings(config.get("curator")),
         "design": design_settings(config.get("design")),
+        "ci": ci_settings(config.get("ci")),
         "max_rounds": _positive_int(config.get("max_rounds"), 3, "automation.max_rounds"),
         "timeout_minutes": _positive_int(config.get("timeout_minutes"), None, "automation.timeout_minutes"),
         "idle_minutes": _positive_int(config.get("idle_minutes"), None, "automation.idle_minutes"),
@@ -1158,6 +1159,21 @@ def design_settings(value):
     return {"enabled": _flag(value.get("enabled"), True, "automation.design.enabled"), "repositories": repositories}
 
 
+def ci_settings(value):
+    """`automation.ci`: before a task goes to Review Factory waits for the checks of its pull requests and, when one fails,
+    has the implementer fix it, at most `max_fixes` times; it waits at most `timeout_minutes` for the checks to finish."""
+    default = {"enabled": True, "max_fixes": 2, "timeout_minutes": 15}
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return {**default, "enabled": value}
+    if not isinstance(value, dict):
+        raise KanvasError("automation.ci must be true, false or an object")
+    return {"enabled": _flag(value.get("enabled"), True, "automation.ci.enabled"),
+            "max_fixes": _positive_int(value.get("max_fixes"), 2, "automation.ci.max_fixes"),
+            "timeout_minutes": _positive_int(value.get("timeout_minutes"), 15, "automation.ci.timeout_minutes")}
+
+
 def task_agent_name(task):
     """The role that implements a task: the one its product definition names, or the implementer."""
     work = task.get("work") if isinstance(task.get("work"), dict) else {}
@@ -1465,6 +1481,93 @@ def _gh(path, *args):
     if proc.returncode:
         raise KanvasError("gh " + " ".join(args[:2]) + ": " + (proc.stderr.strip() or proc.stdout.strip() or "failed"))
     return proc.stdout.strip()
+
+
+CI_POLL_SECONDS = 20
+CI_APPEAR_SECONDS = 90
+CI_LOG_LIMIT = 5000
+
+
+def pull_request_checks(folder, url):
+    """The checks of a pull request as [{"name", "state", "url"}], where state is passed, failed or pending."""
+    raw = _gh(folder, "pr", "view", url, "--json", "statusCheckRollup", "--jq", ".statusCheckRollup")
+    out = []
+    for c in json.loads(raw or "[]") or []:
+        status = str(c.get("status") or "").upper()
+        conclusion = str(c.get("conclusion") or c.get("state") or "").upper()
+        if status in ("QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED") or conclusion in ("PENDING", "EXPECTED") \
+                or (not conclusion and status != "COMPLETED"):
+            state = "pending"
+        elif conclusion in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+            state = "passed"
+        else:
+            state = "failed"
+        out.append({"name": c.get("name") or c.get("context") or "check", "state": state,
+                    "url": c.get("detailsUrl") or c.get("targetUrl") or ""})
+    return out
+
+
+def wait_for_checks(pulls, folders, minutes, stop=lambda: False):
+    """Waits for the checks of every pull request. Returns (verdict, failures): "passed", "none" (no CI answered),
+    "failed" (with [{"pull", "check", "url"}]), "pending" (the time ran out) or "stopped"."""
+    start = time.monotonic()
+    while True:
+        if stop():
+            return "stopped", []
+        failures, pending, seen = [], False, False
+        for pull in pulls:
+            try:
+                checks = pull_request_checks(folders[pull["id"]], pull["url"])
+            except (KanvasError, ValueError):
+                checks = []
+            seen = seen or bool(checks)
+            for c in checks:
+                if c["state"] == "pending":
+                    pending = True
+                elif c["state"] == "failed":
+                    failures.append({"pull": pull, "check": c["name"], "url": c["url"]})
+        if not seen:
+            if time.monotonic() - start >= CI_APPEAR_SECONDS:
+                return "none", []
+        elif not pending:
+            return ("failed", failures) if failures else ("passed", [])
+        elif time.monotonic() - start >= minutes * 60:
+            return "pending", failures
+        time.sleep(CI_POLL_SECONDS)
+
+
+def ci_failure_logs(failures, folders):
+    """The end of the log of each failed run, once per run, so the agent sees why the check failed."""
+    seen, logs = set(), []
+    for f in failures:
+        run = re.search(r"/actions/runs/(\d+)", f["url"] or "")
+        key = run.group(1) if run else f["url"] or f["check"]
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            text = _gh(folders[f["pull"]["id"]], "run", "view", run.group(1), "--log-failed") if run else ""
+        except KanvasError as e:
+            text = f"(the log could not be read: {e})"
+        logs.append(f"### {f['pull']['name']}: {f['check']} ({f['url']})\n{text.strip()[-CI_LOG_LIMIT:]}")
+    return "\n\n".join(logs)
+
+
+def ci_fix_prompt(task, worktrees, failures, logs, attempt):
+    repos = "\n".join(f"- {x['id']} ({x['name']}): {x['worktree']} on {x['branch']}" for x in worktrees)
+    failed = "\n".join(f"- {f['pull']['name']}: {f['check']} ({f['pull']['url']})" for f in failures)
+    return f"""You are fixing the failing CI of Factory task {task['id']}: {task['title']}. The pull requests are already open and the checks below failed (attempt {attempt}).
+
+Worktrees:
+{repos}
+
+Failed checks:
+{failed}
+
+What the failed runs printed:
+{logs or '(no log available; run the same commands the workflow runs, see .github/workflows)'}
+
+Find the cause and fix it in the worktrees. Run the failing command again here before you finish when you can, with a time limit. Fix the code, not the check: do not delete, skip or weaken a test, a lint rule or the build to make it pass unless that test is wrong, and then say so. Do not change what the task is about. Commit your work with a conventional commit. Do not push or open pull requests: Factory does it. End with a short summary of the cause and the fix."""
 
 
 def pull_request_body(task, summary):
@@ -1792,12 +1895,65 @@ def run_automation(path, task_id):
             except KanvasError as e:
                 ok = False
                 summary += f"\n\nPull request not opened: {e}"
+            if ok and config["ci"]["enabled"]:
+                ok, ci_text = ensure_checks(path, task, config, role, worktrees, pulls, summary, log)
+                summary += "\n\n" + ci_text
         finish_automation(path, task_id, ok, summary, pulls)
     except Exception as e:
         try:
             finish_automation(path, task_id, False, str(e))
         except Exception:
             pass
+
+
+def _heads(worktrees):
+    return [_git(w["worktree"], "rev-parse", "HEAD") for w in worktrees]
+
+
+def ensure_checks(path, task, config, role, worktrees, pulls, summary, log):
+    """Before the task goes to Review: waits for the checks of its pull requests and has the agent fix the ones that fail,
+    up to automation.ci.max_fixes times. Returns (ok, one line for the summary)."""
+    task_id, ci = task["id"], config["ci"]
+    folders = {w["id"]: w["worktree"] for w in worktrees}
+    fixes = 0
+    while True:
+        update_automation(path, task_id, "running", ci="waiting for the checks of the pull requests")
+        verdict, failures = wait_for_checks(pulls, folders, ci["timeout_minutes"], lambda: stop_requested(path, task_id))
+        update_automation(path, task_id, "running", ci="")
+        if verdict == "stopped":
+            return False, "CI: stopped while waiting for the checks."
+        if verdict == "none":
+            return True, "CI: the pull requests have no checks."
+        if verdict == "pending":
+            return True, f"CI: the checks were still running after {ci['timeout_minutes']} minutes; check them before you approve."
+        if verdict == "passed":
+            return True, "CI: all checks passed" + (f" after {fixes} fix{'es' if fixes > 1 else ''} by the agent." if fixes else ".")
+        names = ", ".join(sorted({f"{f['pull']['name']}: {f['check']}" for f in failures}))
+        if fixes >= ci["max_fixes"]:
+            return False, f"CI still fails after {fixes} fix{'es' if fixes != 1 else ''} by the agent: {names}."
+        fixes += 1
+        before = _heads(worktrees)
+        logs = ci_failure_logs(failures, folders)
+        fix_log = os.path.splitext(log)[0] + f"-ci{fixes}.jsonl"
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        update_automation(path, task_id, "running", ci=f"the agent is fixing the failed checks (attempt {fixes})")
+        clear_stop(path, task_id)
+        with open(fix_log, "w", encoding="utf-8", newline="\n") as output:
+            proc = agent_run(claude_command(config, worktrees, role), input=ci_fix_prompt(task, worktrees, failures, logs, fixes),
+                             text=True, encoding="utf-8", errors="replace", stdout=output, stderr=subprocess.STDOUT,
+                             creationflags=flags, cwd=worktrees[0]["worktree"], env=agent_environment(),
+                             limits=agent_limits(config, role), stop=lambda: stop_requested(path, task_id))
+        clear_stop(path, task_id)
+        update_automation(path, task_id, "running", ci="")
+        if stop_text(proc):
+            return False, f"CI fails ({names}). {stop_text(proc)}"
+        save_changes(config, task_id, worktrees)
+        if _heads(worktrees) == before:
+            return False, f"CI fails ({names}) and the agent changed nothing to fix it. See {fix_log}."
+        try:
+            publish_pull_requests(task, worktrees, summary, 1)
+        except KanvasError as e:
+            return False, f"CI fails ({names}); the fix could not be pushed: {e}"
 
 
 DESIGN_APPROVED, DESIGN_PENDING, DESIGN_CHANGES, DESIGN_FAILED = "approved", "pending", "changes_requested", "failed"

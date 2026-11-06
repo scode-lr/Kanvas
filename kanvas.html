@@ -475,6 +475,10 @@ button.say { padding: 1px 6px; gap: 5px; font: 600 12px var(--mono); vertical-al
 .wiz-steps { display: flex; gap: 8px; margin: 2px 0 12px; padding: 0; list-style: none; }
 .wiz-steps li { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 12.5px; font-weight: 600; }
 .wiz-steps li b { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--surface-2); font-size: 11px; }
+.wiz-steps li { padding: 0; }
+.wiz-pick { all: unset; box-sizing: border-box; flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 10px; cursor: pointer; border-radius: 8px; }
+.wiz-pick:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.wiz-pick:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 1px; }
 .wiz-steps li.on { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
 .wiz-steps li.on b { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 .wiz-steps li.past b { background: var(--done); border-color: var(--done); color: #fff; }
@@ -696,6 +700,8 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
   dialog.dlg:has(> form > .help) { width: min(860px, calc(100vw - 32px)); }
   /* The dialogs where an agent talks with you need room to read: wide on a computer, full width on a phone (below). */
   dialog.dlg:has(.assist), dialog.dlg:has(.wiz-steps) { width: min(1120px, calc(100vw - 48px)); max-height: 94dvh; overflow-y: auto; }
+  /* The actions stay in view however long the form is. */
+  dialog.dlg:has(.assist) .dlg-actions, dialog.dlg:has(.wiz-steps) .dlg-actions { position: sticky; bottom: 0; margin: 0 -20px; padding: 10px 20px; background: var(--surface); border-top: 1px solid var(--border); }
   dialog.dlg:has(.assist) textarea[name=plan] { min-height: 22em; }
   .assist-ask .qa-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); align-items: start; }
   .help-groups { grid-template-columns: 1fr 1fr; }
@@ -4174,8 +4180,10 @@ async function assistRun(request, { onJob = () => {}, alive = () => true } = {})
 }
 
 // The row that says which step of a dialog is on.
-function wizardSteps(names) {
-  const items = names.map((name, i) => h("li", {}, h("b", {}, String(i + 1)), h("span", {}, name)));
+// Each step can be picked to change screen: `pick(n)` is called with the step the owner chose.
+function wizardSteps(names, pick = null) {
+  const items = names.map((name, i) => h("li", {}, h("button", { type: "button", class: "wiz-pick", title: `Go to step ${i + 1}`, onclick: () => pick?.(i) },
+    h("b", {}, String(i + 1)), h("span", {}, name))));
   return {
     el: h("ol", { class: "wiz-steps" }, ...items),
     show: (n) => items.forEach((li, i) => { li.classList.toggle("on", i === n); li.classList.toggle("past", i < n); }),
@@ -4282,7 +4290,7 @@ async function approveDefinition(t) {
     h("option", { value: name, selected: name === (d.agent || "implementer") }, `${name} · ${r.model || "default model"}`))) : null;
   const fields = () => ({ outcome: outcome.value, needs: needs.value, acceptance: acceptance.value, non_goals: nonGoals.value });
   // Step 1: the questions and the answers.
-  const steps = wizardSteps(["Refine with the product owner", "Definition"]);
+  const steps = wizardSteps(["Refine with the product owner", "Definition"], (n) => { if (n === 1) carryPriority(); goTo(n); });
   const status = h("p", { class: "assist-status", role: "status" });
   const list = h("div", { class: "qa-list wiz-step" });
   const ask = h("button", { type: "button", class: "primary" }, icon("spark"), "Ask the product owner");
