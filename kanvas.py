@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Kanvas: a task board shared by humans and AI agents.
+"""Factory: a task board shared by humans and AI agents.
 
 The board is a single JSON file (kanvas.json). Agents change it only through
 this CLI, which enforces the workflow rules. Humans plan and review in the
@@ -116,7 +116,7 @@ def parse_board(text):
         raise KanvasError("Board must be a JSON object")
     if isinstance(board.get("kanvas"), int) and board["kanvas"] > FORMAT:
         upgrade = "upgrade with `uv tool upgrade kanvas-board`" if INSTALLED else "upgrade kanvas.py"
-        raise KanvasError(f"Board was written by a newer version of Kanvas; {upgrade}")
+        raise KanvasError(f"Board was written by a newer version of Factory; {upgrade}")
     # Defaults follow JavaScript's truthiness and String(), as normalize() in kanvas.html does.
     board["title"] = _js_text(board.get("title"))
     for key in ("groups", "tasks"):
@@ -768,7 +768,7 @@ def automation_config(board, path):
     if not isinstance(config, dict) or config.get("enabled") is not True:
         return None
     if config.get("executor") not in (None, "claude"):
-        raise KanvasError("automation.executor is no longer needed: Kanvas runs tasks with Claude Code")
+        raise KanvasError("automation.executor is no longer needed: Factory runs tasks with Claude Code")
     root = os.path.abspath(os.path.join(os.path.dirname(path), config.get("project_root") or "."))
     repositories = {}
     for item in config.get("repositories") or []:
@@ -820,24 +820,24 @@ def task_repository_ids(task):
     return [str(x) for x in values if str(x).strip()]
 
 
-# Only Kanvas pushes and opens pull requests, so the agent must not inherit any GitHub credential.
+# Only Factory pushes and opens pull requests, so the agent must not inherit any GitHub credential.
 GITHUB_TOKEN_VARS = ("KANVAS_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
-# Branches Kanvas never pushes to, besides the branch each pull request goes into.
+# Branches Factory never pushes to, besides the branch each pull request goes into.
 PROTECTED_BRANCHES = ("dev", "main", "master")
 
 
-# Other credentials of Kanvas's own that an agent must not inherit: the token of the Telegram bot.
+# Other credentials of Factory's own that an agent must not inherit: the token of the Telegram bot.
 SECRET_VARS = ("KANVAS_TELEGRAM_TOKEN",)
 
 
 def agent_environment():
-    """The environment the agent runs in: Kanvas's own without GitHub tokens, the bot's token or the SSH agent."""
+    """The environment the agent runs in: Factory's own without GitHub tokens, the bot's token or the SSH agent."""
     return {k: v for k, v in os.environ.items()
             if k.upper() not in GITHUB_TOKEN_VARS and k.upper() not in SECRET_VARS and k.upper() != "SSH_AUTH_SOCK"}
 
 
 def publisher_environment():
-    """The environment of Kanvas's own `git push` and `gh` calls, and whether it holds a GitHub token of its own.
+    """The environment of Factory's own `git push` and `gh` calls, and whether it holds a GitHub token of its own.
     With KANVAS_GITHUB_TOKEN set, that token is the only GitHub credential they use; without it they use the computer's."""
     env = dict(os.environ)
     token = env.get("KANVAS_GITHUB_TOKEN")
@@ -851,11 +851,11 @@ def publisher_environment():
 
 
 def check_task_branch(branch, repo):
-    """Kanvas only pushes branches it made for a task: never a protected one, nor the one a pull request goes into."""
+    """Factory only pushes branches it made for a task: never a protected one, nor the one a pull request goes into."""
     name = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
     refused = {b.lower() for b in PROTECTED_BRANCHES} | {pr_base_branch(repo).lower()}
     if name.lower() in refused:
-        raise KanvasError(f"Refusing to use {name} as a task branch: Kanvas never pushes to {', '.join(PROTECTED_BRANCHES)} "
+        raise KanvasError(f"Refusing to use {name} as a task branch: Factory never pushes to {', '.join(PROTECTED_BRANCHES)} "
                           "or to the branch a pull request goes into")
 
 
@@ -868,7 +868,7 @@ def _git(path, *args, env=None):
 
 
 def push_branch(folder, branch):
-    """Pushes a task branch with Kanvas's own credentials. With a token of its own the push goes over HTTPS, through
+    """Pushes a task branch with Factory's own credentials. With a token of its own the push goes over HTTPS, through
     the GitHub CLI's credential helper, and uses only that token."""
     env, token = publisher_environment()
     options = []
@@ -921,7 +921,7 @@ def automation_prompt(board, task, config, worktrees, round_no=1, feedback=""):
         followup = (f"\nThis is round {round_no}: your earlier work was reviewed and sent back. The branches already hold "
                     f"your commits. Address every point below, then commit.\n\nFeedback to address:\n"
                     f"{feedback or '(no written feedback: check the earlier work against the acceptance criteria)'}\n")
-    return f"""You are the implementation agent for Kanvas task {task['id']}: {task['title']}.
+    return f"""You are the implementation agent for Factory task {task['id']}: {task['title']}.
 
 Project root: {config['root']}
 Repositories and isolated worktrees:
@@ -946,9 +946,9 @@ Read the root AGENTS.md (or CLAUDE.md), then each repository's AGENTS.md or CLAU
 Work only in the isolated worktrees listed above; never modify the original checkouts. The branches may already
 hold commits from an earlier attempt: continue from them instead of starting over. Implement the complete task
 across every selected repository, run proportionate tests and commit each repository with a conventional commit,
-leaving no uncommitted changes to tracked files. Do not push, open pull requests, merge or deploy: Kanvas pushes
+leaving no uncommitted changes to tracked files. Do not push, open pull requests, merge or deploy: Factory pushes
 each branch and opens the pull request itself when you finish. End with a concise summary of changes, tests and
-commits. Do not edit kanvas.json; Kanvas records your result itself.
+commits. Do not edit kanvas.json; Factory records your result itself.
 """
 
 
@@ -1007,7 +1007,7 @@ def finish_automation(path, task_id, success, summary, pull_requests=None):
 
 
 CLAUDE_ALLOWED_TOOLS = ("Bash", "Edit", "Write", "Read", "Glob", "Grep")
-# Kanvas pushes the branch and opens the pull request itself, so the agent needs no GitHub access. The `git -*`
+# Factory pushes the branch and opens the pull request itself, so the agent needs no GitHub access. The `git -*`
 # patterns catch pushes and merges that put an option first (`git -C . push`, `git --no-pager push`), which the
 # plain prefixes miss, without refusing a commit message that happens to say push.
 CLAUDE_DISALLOWED_TOOLS = ("Bash(git push:*)", "Bash(git -* push*)", "Bash(git merge:*)", "Bash(git -* merge*)",
@@ -1042,7 +1042,7 @@ def _flag(value, default, name):
 
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_AGENT = "implementer"
-# The agent roles Kanvas knows without configuration, so that each kind of work runs on the cheapest model that does it
+# The agent roles Factory knows without configuration, so that each kind of work runs on the cheapest model that does it
 # well. A role may set model, effort, max_turns, max_budget_usd, allowed_tools and disallowed_tools, which win over the
 # same keys of `automation`. A task picks its role with `definition.agent`; without one it runs as the implementer.
 # kanvas.html repeats these roles to fill the Agent choice of the product definition: change both together.
@@ -1219,7 +1219,7 @@ def kill_tree(proc):
 
 def agent_run(command, input="", stdout=None, cwd=None, env=None, creationflags=0, limits=None, stop=None, **_):
     """Runs Claude Code with `input` on its stdin and its output in `stdout`, and watches it. The result has the exit
-    code and `stopped`, the reason Kanvas ended it, or None when it ended by itself."""
+    code and `stopped`, the reason Factory ended it, or None when it ended by itself."""
     limits = limits or {}
     options = {"stdin": subprocess.PIPE, "stdout": stdout, "stderr": subprocess.STDOUT, "text": True, "encoding": "utf-8",
                "errors": "replace", "cwd": cwd, "env": env}
@@ -1328,11 +1328,11 @@ def cmd_shots(args):
 
 
 def stop_text(proc):
-    """Why Kanvas ended a run, in a sentence, or "" when the run ended by itself."""
+    """Why Factory ended a run, in a sentence, or "" when the run ended by itself."""
     reason = getattr(proc, "stopped", None)
     if not isinstance(reason, str):
         return ""
-    return "Stopped by you." if reason == "stopped" else f"Stopped by Kanvas because {reason}."
+    return "Stopped by you." if reason == "stopped" else f"Stopped by Factory because {reason}."
 
 
 def request_stop(path, task_id):
@@ -1442,7 +1442,7 @@ def pr_base_branch(repo):
 def _gh(path, *args):
     exe = shutil.which("gh")
     if not exe:
-        raise KanvasError("The GitHub CLI (gh) is not installed or not on PATH; Kanvas needs it to open pull requests")
+        raise KanvasError("The GitHub CLI (gh) is not installed or not on PATH; Factory needs it to open pull requests")
     proc = subprocess.run([exe, *args], cwd=path, capture_output=True, text=True, encoding="utf-8", errors="replace",
                           env=publisher_environment()[0])
     if proc.returncode:
@@ -1452,12 +1452,12 @@ def _gh(path, *args):
 
 def pull_request_body(task, summary):
     definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
-    parts = [f"Kanvas task **{task['id']}**: {task['title']}"]
+    parts = [f"Factory task **{task['id']}**: {task['title']}"]
     for heading, key in (("Outcome", "outcome"), ("Acceptance criteria", "acceptance")):
         if definition.get(key):
             parts.append(f"## {heading}\n{definition[key]}")
     parts.append("## Agent summary\n" + (summary or "(none)"))
-    parts.append("Opened by Kanvas after a Claude Code run. Review it, then merge it yourself.")
+    parts.append("Opened by Factory after a Claude Code run. Review it, then merge it yourself.")
     return "\n\n".join(parts)
 
 
@@ -1477,7 +1477,7 @@ def publish_pull_requests(task, worktrees, summary, round_no=1):
         url = _gh(folder, "pr", "list", "--head", wt["branch"], "--base", base, "--state", "open",
                   "--json", "url", "--jq", ".[0].url")
         if url and round_no > 1:
-            _gh(folder, "pr", "comment", url, "--body", f"Round {round_no} pushed by Kanvas.\n\n{summary}")
+            _gh(folder, "pr", "comment", url, "--body", f"Round {round_no} pushed by Factory.\n\n{summary}")
         if not url:
             url = _gh(folder, "pr", "create", "--base", base, "--head", wt["branch"],
                       "--title", f"{task['id']}: {task['title']}", "--body", pull_request_body(task, summary))
@@ -1566,7 +1566,7 @@ def review_prompt(task, run, worktrees, changes, previous, strong=False):
                  if strong else
                  'Use "escalate" when the change touches authentication, permissions, multi-club isolation, migrations or '
                  'money, or when you cannot tell whether it is correct.')
-    return f"""You review the work of an automated implementation agent for Kanvas task {task['id']}: {task['title']}. You did not write it and you must not edit it.
+    return f"""You review the work of an automated implementation agent for Factory task {task['id']}: {task['title']}. You did not write it and you must not edit it.
 
 Product outcome: {definition.get('outcome') or task.get('desc') or '(not supplied)'}
 Needs and constraints: {definition.get('needs') or '(not supplied)'}
@@ -1668,9 +1668,9 @@ def review_comment(role_name, model, round_no, outcome, review):
     """The comment the reviewer leaves on each pull request, for the human who reads it next."""
     heading = {"approved": "Approved", "changes": "Changes requested", "left": "Needs your attention"}[outcome]
     tail = {"approved": "No blocking findings: ready for your review.",
-            "changes": "The implementer will fix this in the next round and Kanvas will review it again.",
+            "changes": "The implementer will fix this in the next round and Factory will review it again.",
             "left": "The automatic review stops here: the points above are left for you."}[outcome]
-    lines = [f"**Kanvas review** · {role_name}" + (f" ({model})" if model else "") + f" · round {round_no}", "",
+    lines = [f"**Factory review** · {role_name}" + (f" ({model})" if model else "") + f" · round {round_no}", "",
              f"**{heading}.** {review['summary']}"]
     if review["findings"]:
         lines += [""] + [f"- {f}" for f in review["findings"]]
@@ -1818,7 +1818,7 @@ def design_prompt(task, config, previous, feedback):
                       if i in config["design"]["repositories"])
     again = (f"\nYour previous proposal:\n{_clip(previous, 6000)}\n\nThe human asked for these changes; address every one:\n"
              f"{feedback or '(no written feedback)'}\n" if previous else "")
-    return f"""You are the UI/UX designer for Kanvas task {task['id']}: {task['title']}. Nobody has written code for it yet and you do not write any: you propose the design and a human approves it before an implementer builds it.
+    return f"""You are the UI/UX designer for Factory task {task['id']}: {task['title']}. Nobody has written code for it yet and you do not write any: you propose the design and a human approves it before an implementer builds it.
 
 Application repositories (read only):
 {repos}
@@ -1868,7 +1868,7 @@ def mark_busy(path, task_id, who):
 
 
 def clear_busy_marks(path):
-    """When Kanvas starts nothing is being worked on, so any mark a crash left behind is stale."""
+    """When Factory starts nothing is being worked on, so any mark a crash left behind is stale."""
     if not any(isinstance((t.get("work") or {}).get("busy"), dict) for t in load_board(path)["tasks"]):
         return
 
@@ -2242,10 +2242,15 @@ def kanvas_on_path():
     return not os.path.normcase(os.path.abspath(found)).startswith(inside)
 
 
+def command_name():
+    """The installed command the user typed: `factory`, or `kanvas`, which works the same."""
+    return "factory" if os.path.splitext(os.path.basename(sys.argv[0] or ""))[0].lower() == "factory" else "kanvas"
+
+
 def command_line(rest=""):
-    """The command to type to run Kanvas the way it was started, followed by `rest`."""
+    """The command to type to run Factory the way it was started, followed by `rest`."""
     if INSTALLED:
-        head = "kanvas" if kanvas_on_path() else "uvx kanvas-board"
+        head = command_name() if kanvas_on_path() else "uvx kanvas-board"
     else:
         script = sys.argv[0] or "kanvas.py"
         head = f'python "{script}"' if " " in script else f"python {script}"
@@ -2254,7 +2259,7 @@ def command_line(rest=""):
 
 def project_command(rest=""):
     """What to type inside a project after `init`: the installed command, or the project's own copy."""
-    head = "kanvas" if INSTALLED and kanvas_on_path() else "python .agents/skills/kanvas/kanvas.py"
+    head = command_name() if INSTALLED and kanvas_on_path() else "python .agents/skills/kanvas/kanvas.py"
     return f"{head} {rest}" if rest else head
 
 
@@ -2578,7 +2583,7 @@ def cmd_retry(args):
         return t
 
     t = mutate(path, op)
-    print(f"Queued retry for {t['id']}; the Kanvas server will reuse its isolated worktree.")
+    print(f"Queued retry for {t['id']}; the Factory server will reuse its isolated worktree.")
 
 
 def cmd_design(args):
@@ -2606,7 +2611,7 @@ def cmd_stop(args):
 # ---------------------------------------------------------------------------
 # `kanvas mcp`: the board and the documentation, as tools for any Claude session or agent that speaks MCP (the commercial
 # agent that prices a client's request, a bot, an interactive session). It reads the board and the documentation folders
-# and writes only what agents may write in Kanvas anyway: a proposed task and a note. Approving, starting, reviewing,
+# and writes only what agents may write in Factory anyway: a proposed task and a note. Approving, starting, reviewing,
 # stopping and merging stay with the human, so there is no tool for them.
 
 MCP_PROTOCOL = "2025-06-18"
@@ -2932,7 +2937,7 @@ def inbox_prompt(board, task, config):
     roles = ", ".join(r for r in config["agents"] if r not in ("reviewer", "reviewer-strong", "curator", "designer", "po"))
     brain = config["repositories"].get(CURATOR_REPOSITORY, {}).get("path")
     docs = f"The documentation is in {brain} (modules, adr, ops)." if brain else "Read the documentation you find in the project."
-    return f"""You are the product owner of the Kanvas board "{board['title']}". The owner sends you, from their phone, a raw idea or an incident that someone reported. Turn it into a well-formed task with as little work for the owner as possible: infer everything you can from the project, and ask only what you cannot infer, at most 3 questions.
+    return f"""You are the product owner of the Factory board "{board['title']}". The owner sends you, from their phone, a raw idea or an incident that someone reported. Turn it into a well-formed task with as little work for the owner as possible: infer everything you can from the project, and ask only what you cannot infer, at most 3 questions.
 
 The project is in {config['root']}. {docs} Read what you need, change nothing. If the owner mentions an attachment, open the file with Read.
 
@@ -3123,7 +3128,7 @@ def inbox_token_ok(token):
 
 
 def phone_bases():
-    """The addresses a phone on Tailscale uses to reach this computer's Kanvas, or none without Tailscale."""
+    """The addresses a phone on Tailscale uses to reach this computer's Factory, or none without Tailscale."""
     try:
         ip, name, magic = tailscale_self()
     except KanvasError:
@@ -3305,7 +3310,7 @@ class TelegramBridge:
         self.stopping = False
 
     def try_pair(self, message):
-        """The owner sends the code Kanvas showed on the board: from then on this Telegram account is heard."""
+        """The owner sends the code Factory showed on the board: from then on this Telegram account is heard."""
         chat, sender = message.get("chat") or {}, message.get("from") or {}
         code = str(message.get("text") or "").strip()
         pairing = self.pairing
@@ -3912,7 +3917,7 @@ def cmd_undepend(args):
 # ---------------------------------------------------------------------------
 
 
-AGENTS_LINE = "Plan and track work on the Kanvas board; follow .agents/skills/kanvas/SKILL.md."
+AGENTS_LINE = "Plan and track work on the Factory board; follow .agents/skills/kanvas/SKILL.md."
 
 
 def find_git_top(start=None):
@@ -3945,7 +3950,7 @@ def project_folder(start=None):
 
 
 def points_to_skill(folder):
-    """True if an AGENTS.md or CLAUDE.md in `folder` already sends agents to the Kanvas skill."""
+    """True if an AGENTS.md or CLAUDE.md in `folder` already sends agents to the Factory skill."""
     for name in os.listdir(folder):
         if name.lower() in ("agents.md", "claude.md"):
             try:
@@ -3965,7 +3970,7 @@ def cmd_init(args):
 
 
 def init_project(target, reason=None, next_steps=True):
-    """Set up Kanvas in `target`, print what was done, and return the board's path."""
+    """Set up Factory in `target`, print what was done, and return the board's path."""
     if not os.path.isdir(target):
         raise KanvasError(f"Directory does not exist: {target}")
     skill_md = next(
@@ -4015,7 +4020,7 @@ def init_project(target, reason=None, next_steps=True):
             f.write(f"# Agent instructions\n\n{AGENTS_LINE}\n")
         report.append("created   AGENTS.md")
 
-    print(f"Kanvas {VERSION} in {target}" + (f", {reason}" if reason else "") + "\n")
+    print(f"Factory {VERSION} in {target}" + (f", {reason}" if reason else "") + "\n")
     for line in report:
         print(f"  {line}")
     legacy = sorted(f for f in os.listdir(target) if f.endswith(".canvas"))
@@ -4039,7 +4044,7 @@ CANVAS_SKIP_IDS = {"legend", "canvas-errors", "canvas-warnings", "canvas-lint", 
 
 
 def import_canvas(canvas, title=""):
-    """Convert an Obsidian Canvas board from Kanvas 0.x into a Kanvas board."""
+    """Convert an Obsidian Canvas board from Kanvas 0.x into a Factory board."""
     nodes = canvas.get("nodes", [])
     group_nodes = [n for n in nodes if n.get("type") == "group"]
 
@@ -4378,7 +4383,7 @@ DEFAULT_PORT = 8765
 
 
 def state_file():
-    """Where Kanvas remembers the open boards between runs: the user's own application state folder."""
+    """Where Factory remembers the open boards between runs: the user's own application state folder."""
     base = os.environ.get("KANVAS_STATE_DIR")
     if not base:
         if os.name == "nt":
@@ -4507,7 +4512,7 @@ class AutomationDispatcher:
             threading.Thread(target=execute, name=f"kanvas-{task['id']}", daemon=True).start()
 
     def _settle_orphan_stops(self, path, board):
-        """A stop asked for a run this Kanvas is not running (it restarted since) has nobody to answer it: the run is over."""
+        """A stop asked for a run this Factory is not running (it restarted since) has nobody to answer it: the run is over."""
         for task in board["tasks"]:
             work = task.get("work") if isinstance(task.get("work"), dict) else {}
             if not work.get("stop"):
@@ -4632,7 +4637,7 @@ class BoardServer(ThreadingHTTPServer):
                     urls = self.open_to_phone()
                 except KanvasError as e:
                     if i == tries - 1:
-                        print(f"Could not open Kanvas to your phone: {e}", file=sys.stderr, flush=True)
+                        print(f"Could not open Factory to your phone: {e}", file=sys.stderr, flush=True)
                     time.sleep(wait)
                     continue
                 if not self.quiet:
@@ -4944,7 +4949,7 @@ def clean_assist(kind, data, board, repository_ids, role_names):
 def assist_prompt(kind, step, board, task, fields, root, repositories, roles, earlier):
     """What one agent is asked in one step of a dialog's help. Every step starts a new session, so each prompt brings
     what that agent needs."""
-    head = (f"You help the owner of the Kanvas board \"{board['title']}\" fill in a dialog. The project is in {root}: read "
+    head = (f"You help the owner of the Factory board \"{board['title']}\" fill in a dialog. The project is in {root}: read "
             "what you need there (the documentation in the brain repository, modules and adr, and the repositories) and change nothing. Be brief and "
             "concrete, ask only what changes what gets built, and answer in the language the owner writes in.\n\n")
     ids = lambda: ", ".join(f"{k}: {v}" for k, v in repositories.items()) or "none"
@@ -5084,7 +5089,7 @@ def evidence_file(folder, parts):
 
 
 class BoardHandler(BaseHTTPRequestHandler):
-    server_version = "Kanvas/" + VERSION
+    server_version = "Factory/" + VERSION
 
     def log_message(self, fmt, *args):
         pass
@@ -5142,11 +5147,11 @@ class BoardHandler(BaseHTTPRequestHandler):
 
     def _inbox_allowed(self):
         """The inbox costs tokens and opens ideas on the board, so it answers this computer and the phones that were paired
-        with a token of their own, not every device that can reach Kanvas."""
+        with a token of their own, not every device that can reach Factory."""
         return self._from_this_computer() or inbox_token_ok(self.headers.get("X-Kanvas-Token"))
 
     def _may_manage(self):
-        """Whether the request may open boards and open or close Kanvas to phones, which stay with
+        """Whether the request may open boards and open or close Factory to phones, which stay with
         the computer: only the main server does that, and only for this computer."""
         return self.server.opens_boards and self._from_this_computer()
 
@@ -5190,10 +5195,10 @@ class BoardHandler(BaseHTTPRequestHandler):
                 return self._redirect(f"/{quote(boards[0]['name'])}/")
             links = "".join(f'<a class="board" href="/{quote(b["name"])}/">{escape(b["title"])}'
                             + (f'<small>{escape(b["path"])}</small>' if "path" in b else "") + "</a>" for b in boards)
-            body = (f"<h1>Kanvas</h1>{links}" if boards else "<h1>Kanvas</h1><p>No boards are open. Run <code>kanvas serve</code> in a project to open its board here.</p>")
+            body = (f"<h1>Factory</h1>{links}" if boards else "<h1>Factory</h1><p>No boards are open. Run <code>kanvas serve</code> in a project to open its board here.</p>")
             if boards:
                 body += "<p><small>Run <code>kanvas serve</code> in a project to open its board here.</small></p>"
-            return self._send(200, page("Kanvas", body), "text/html; charset=utf-8")
+            return self._send(200, page("Factory", body), "text/html; charset=utf-8")
         if parts == ["api", "boards"]:
             info = {"kanvas": VERSION, "boards": self._board_list()}
             return self._send(200, json.dumps(info, ensure_ascii=False).encode("utf-8"))
@@ -5204,7 +5209,7 @@ class BoardHandler(BaseHTTPRequestHandler):
                 return self._error(404, f"No board called {name} is open here; run `kanvas serve` in its project")
             body = (f"<h1>No board called {escape(name)} is open</h1><p>Run <code>kanvas serve</code> in its project, then reload this page."
                     ' If it was open here before, its project folder may have been moved or renamed.</p><p><a href="/">Open boards</a></p>')
-            return self._send(404, page("Kanvas", body), "text/html; charset=utf-8")
+            return self._send(404, page("Factory", body), "text/html; charset=utf-8")
         if not rest:
             return self._redirect(f"/{quote(name)}/")
         if rest == ["api", "phone"]:
@@ -5233,7 +5238,7 @@ class BoardHandler(BaseHTTPRequestHandler):
             return self._evidence(path, rest[1], rest[2:])
         if rest == ["api", "telegram"]:
             if not self._may_manage():
-                return self._error(403, "Telegram is connected only from the computer running Kanvas")
+                return self._error(403, "Telegram is connected only from the computer running Factory")
             return self._send(200, json.dumps(self.server.main.telegram_status()).encode("utf-8"))
         if rest in (["inbox"], ["inbox", ""]):
             return self._send(200, INBOX_PAGE.encode("utf-8"), "text/html; charset=utf-8", {"X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"})
@@ -5299,7 +5304,7 @@ class BoardHandler(BaseHTTPRequestHandler):
 
     def _phone(self, name):
         """The board's addresses for phones on Tailscale, with a QR code of the first; none while closed to phones.
-        `manage` says whether this request may open or close Kanvas to phones."""
+        `manage` says whether this request may open or close Factory to phones."""
         urls = [f"{base}{quote(name)}/" for base in self.server.main.phone]
         info = {"urls": urls, "qr": qr_svg(urls[0]) if urls else None, "manage": self._may_manage()}
         self._send(200, json.dumps(info).encode("utf-8"))
@@ -5311,7 +5316,7 @@ class BoardHandler(BaseHTTPRequestHandler):
         parts = self._route()
         if parts[1:] == ["api", "phone"] and self.server.board_path(parts[0]) is not None:
             if not self._may_manage():
-                return self._error(403, "Only the computer running Kanvas can open it to phones")
+                return self._error(403, "Only the computer running Factory can open it to phones")
             if self._read_json() is None:
                 return
             try:
@@ -5324,7 +5329,7 @@ class BoardHandler(BaseHTTPRequestHandler):
             return self._phone(parts[0])
         if parts[1:] == ["api", "telegram"] and self.server.board_path(parts[0]) is not None:
             if not self._may_manage():
-                return self._error(403, "Telegram is connected only from the computer running Kanvas")
+                return self._error(403, "Telegram is connected only from the computer running Factory")
             text = self._read_json()
             if text is None:
                 return
@@ -5384,7 +5389,7 @@ class BoardHandler(BaseHTTPRequestHandler):
             return self._error(404, "Not found")
         if parts[1:] == ["api", "assist"] and self.server.board_path(parts[0]) is not None:
             if not self._from_this_computer():
-                return self._error(403, "The agents answer only requests from the computer running Kanvas")
+                return self._error(403, "The agents answer only requests from the computer running Factory")
             text = self._read_json()
             if text is None:
                 return
@@ -5400,7 +5405,7 @@ class BoardHandler(BaseHTTPRequestHandler):
         if parts != ["api", "boards"]:
             return self._error(404, "Not found")
         if not self._may_manage():
-            return self._error(403, "Boards open only from the computer running Kanvas")
+            return self._error(403, "Boards open only from the computer running Factory")
         text = self._read_json()
         if text is None:
             return
@@ -5410,7 +5415,7 @@ class BoardHandler(BaseHTTPRequestHandler):
                 raise KanvasError("Expected the board's absolute path")
             # A board always has its task list, so another JSON file is not taken for one.
             if "tasks" not in json.loads(read_text_file(path)):
-                raise KanvasError(f"{path} is not a Kanvas board")
+                raise KanvasError(f"{path} is not a Factory board")
             load_board(path)
         except (KanvasError, ValueError, AttributeError, OSError) as e:
             return self._error(400, str(e))
@@ -5423,14 +5428,14 @@ class BoardHandler(BaseHTTPRequestHandler):
         self._send(200, json.dumps(info, ensure_ascii=False).encode("utf-8"))
 
     def do_DELETE(self):
-        """Closes Kanvas to phones again."""
+        """Closes Factory to phones again."""
         if not self._host_allowed():
             return self._error(403, "Host not allowed")
         parts = self._route()
         if parts[1:] != ["api", "phone"] or self.server.board_path(parts[0]) is None:
             return self._error(404, "Not found")
         if not self._may_manage():
-            return self._error(403, "Only the computer running Kanvas can close it to phones")
+            return self._error(403, "Only the computer running Factory can close it to phones")
         if not (self.headers.get("Content-Type") or "").startswith("application/json"):
             return self._error(415, "Expected application/json")
         if self.server.phone:
@@ -5476,7 +5481,7 @@ class BoardHandler(BaseHTTPRequestHandler):
                         print(f"[{time.strftime('%H:%M:%S')}] saved {parts[0]} from the browser", flush=True)
         except (KanvasError, OSError) as e:
             # The reason names the board's folder or its lock file.
-            return self._error(503, str(e) if self._from_this_computer() else "The computer running Kanvas could not save the board")
+            return self._error(503, str(e) if self._from_this_computer() else "The computer running Factory could not save the board")
         self._send(200, data, headers={"ETag": etag_of(data)})
 
 
@@ -5514,9 +5519,9 @@ def port_free(host, port):
 
 
 def find_running(port, host="127.0.0.1"):
-    """Return (url, version) of a Kanvas already serving boards on one of the ports `serve` tries, or None."""
+    """Return (url, version) of a Factory already serving boards on one of the ports `serve` tries, or None."""
     for p in range(port, port + 20):
-        # A Kanvas may hold a later port after the ones below it were freed. Only taken ports are
+        # A Factory may hold a later port after the ones below it were freed. Only taken ports are
         # probed, since connecting to a closed port takes seconds on Windows.
         if port_free(host, p):
             continue
@@ -5531,7 +5536,7 @@ def find_running(port, host="127.0.0.1"):
 
 
 def join_running(url, path):
-    """Open the board at `path` in the Kanvas running at `url`; return the board's URL there,
+    """Open the board at `path` in the Factory running at `url`; return the board's URL there,
     and its URLs for phones on Tailscale (empty without Tailscale)."""
     body = json.dumps({"path": os.path.abspath(path)}).encode("utf-8")
     req = urllib.request.Request(url + "api/boards", body, {"Content-Type": "application/json"}, method="POST")
@@ -5544,9 +5549,9 @@ def join_running(url, path):
             message = json.loads(e.read().decode("utf-8"))["error"]
         except (ValueError, KeyError, OSError):
             message = str(e)
-        raise KanvasError(f"The Kanvas running at {url} did not open the board: {message}")
+        raise KanvasError(f"The Factory running at {url} did not open the board: {message}")
     except (OSError, ValueError, KeyError) as e:
-        raise KanvasError(f"The Kanvas running at {url} did not answer: {e}")
+        raise KanvasError(f"The Factory running at {url} did not answer: {e}")
 
 
 TAILSCALE_PATHS = (
@@ -5596,7 +5601,7 @@ def print_phone(urls):
 
 
 def offer_board():
-    """Ask the person at the terminal to set up Kanvas; return the new board's path, or None."""
+    """Ask the person at the terminal to set up Factory; return the new board's path, or None."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
     target, reason = project_folder()
@@ -5630,24 +5635,24 @@ def cmd_serve(args):
     local = args.host in ("127.0.0.1", "localhost")
     if args.tailscale and not local:
         raise KanvasError("Use --tailscale or --host, not both: --tailscale serves on this computer and on its Tailscale address.")
-    # One Kanvas serves the boards of every project; a second `serve` hands its board to it and returns.
+    # One Factory serves the boards of every project; a second `serve` hands its board to it and returns.
     running = find_running(args.port, args.host) if args.port and local else None
     if running and not path:
-        print(f"Kanvas already runs at {running[0]}")
+        print(f"Factory already runs at {running[0]}")
         return
     if running:
         url, version = running
         board_url, phone_urls = join_running(url, path)
-        print(f"Kanvas board: {path}")
+        print(f"Factory board: {path}")
         if hint := agent_copy_hint(path):
             print(hint)
-        print(f"Opened in the Kanvas already running: {board_url}")
+        print(f"Opened in the Factory already running: {board_url}")
         if phone_urls:
             print_phone(phone_urls)
         elif args.tailscale:
-            print("That Kanvas is not open to your phone. Stop it (Ctrl+C in its terminal) and run `kanvas serve --tailscale` there.")
+            print("That Factory is not open to your phone. Stop it (Ctrl+C in its terminal) and run `kanvas serve --tailscale` there.")
         if version != VERSION:
-            print(f"That Kanvas is {version} and this command is {VERSION}; to switch, stop it (Ctrl+C in its terminal) and run `kanvas serve` again.")
+            print(f"That Factory is {version} and this command is {VERSION}; to switch, stop it (Ctrl+C in its terminal) and run `kanvas serve` again.")
         if not args.no_open:
             webbrowser.open(board_url)
         return
@@ -5666,7 +5671,7 @@ def cmd_serve(args):
     if path:
         name = quote(server.add_board(path))
         board_url = f"{base_url}{name}/"
-        print(f"Kanvas board: {path}")
+        print(f"Factory board: {path}")
         if hint := agent_copy_hint(path):
             print(hint)
     else:
@@ -5691,14 +5696,14 @@ def cmd_serve(args):
 
 
 # ---------------------------------------------------------------------------
-# Background service: Kanvas starts when you log in
+# Background service: Factory starts when you log in
 # ---------------------------------------------------------------------------
 
 SERVICE_NAME = "kanvas"  # systemd unit, launchd label and Windows task
 
 
 def service_command():
-    """The command a login service runs: this Kanvas, serving the boards open last time."""
+    """The command a login service runs: this Factory, serving the boards open last time."""
     if INSTALLED and f"{os.sep}archive-v" in sys.prefix:
         raise KanvasError("This kanvas runs from uvx's temporary cache, which a service cannot rely on. "
                           "Install it with `uv tool install kanvas-board`, then run `kanvas service install`.")
@@ -5721,7 +5726,7 @@ def run_quiet(cmd):
 
 def systemd_unit(cmd):
     quoted = " ".join('"' + a.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"' for a in cmd)
-    return ("[Unit]\nDescription=Kanvas task boards\n\n"
+    return ("[Unit]\nDescription=Factory task boards\n\n"
             f"[Service]\nExecStart={quoted}\nEnvironment=PYTHONUNBUFFERED=1\nRestart=on-failure\nRestartSec=10\n\n"
             "[Install]\nWantedBy=default.target\n")
 
@@ -5739,7 +5744,7 @@ def windows_task(cmd):
     args = subprocess.list2cmdline(cmd[1:])
     return ('<?xml version="1.0" encoding="UTF-16"?>\n'
             '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
-            "<RegistrationInfo><Description>Kanvas task boards</Description></RegistrationInfo>"
+            "<RegistrationInfo><Description>Factory task boards</Description></RegistrationInfo>"
             f"<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{xml(user)}</UserId></LogonTrigger></Triggers>"
             '<Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>'
             "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"
@@ -5792,7 +5797,7 @@ def service_install(tailscale, wait=10):
         stop = ["systemctl", "--user", "stop", f"{SERVICE_NAME}.service"]
         steps = [["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", f"{SERVICE_NAME}.service"]]
         where = path
-    # Once the service is stopped, a Kanvas that still answers was started with `kanvas serve`.
+    # Once the service is stopped, a Factory that still answers was started with `kanvas serve`.
     # The service's own `serve --saved` then finds it and exits, and nothing restarts a clean exit.
     run_quiet(stop)
     by_hand = find_running(DEFAULT_PORT)
@@ -5800,14 +5805,14 @@ def service_install(tailscale, wait=10):
         code, out = run_quiet(step)
         if code:
             raise KanvasError(f"`{' '.join(step)}` failed: {out or f'exit code {code}'}")
-    print(f"Kanvas now starts when you log in ({where}).")
+    print(f"Factory now starts when you log in ({where}).")
     print("It serves the boards you open with `kanvas serve`, and remembers them across restarts.")
     if tailscale:
         print("It also opens them to your phone over Tailscale, as soon as Tailscale is connected.")
     if by_hand:
         again = "kanvas service install" + (" --tailscale" if tailscale else "")
-        print(f"Kanvas already runs at {by_hand[0]}, started with `kanvas serve`; the service leaves your boards to it and stops.")
-        print("Once that Kanvas stops, nothing serves them until you log in again. To hand them to the service now, "
+        print(f"Factory already runs at {by_hand[0]}, started with `kanvas serve`; the service leaves your boards to it and stops.")
+        print("Once that Factory stops, nothing serves them until you log in again. To hand them to the service now, "
               f"stop it (Ctrl+C in its terminal) and run `{again}` again.")
     else:
         deadline = time.monotonic() + wait
@@ -5837,7 +5842,7 @@ def service_uninstall():
         if removed:
             os.remove(path)
         run_quiet(["systemctl", "--user", "daemon-reload"])
-    print("Kanvas no longer starts when you log in." if removed else "Kanvas was not set to start when you log in.")
+    print("Factory no longer starts when you log in." if removed else "Factory was not set to start when you log in.")
 
 
 def service_status():
@@ -5893,13 +5898,13 @@ def build_parser():
     common.add_argument("--as", dest="as_name", default=argparse.SUPPRESS, metavar="NAME",
                         help="name recorded on notes and proposals (default: $KANVAS_AGENT or 'agent')")
 
-    prog = "kanvas" if INSTALLED else os.path.basename(sys.argv[0]) or "kanvas.py"
+    prog = command_name() if INSTALLED else os.path.basename(sys.argv[0]) or "kanvas.py"
     parser = argparse.ArgumentParser(
         prog=prog, parents=[common], epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Kanvas: a task board shared by humans and AI agents.",
+        description="Factory: a task board shared by humans and AI agents.",
     )
-    parser.add_argument("--version", action="version", version=f"Kanvas {VERSION}")
+    parser.add_argument("--version", action="version", version=f"Factory {VERSION}")
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     def add(name, func, help_text, **kw):
@@ -6008,15 +6013,15 @@ def build_parser():
     p = add("serve", cmd_serve, "open the interactive board in your browser")
     p.add_argument("--port", type=int, default=DEFAULT_PORT,
                    help=f"port to serve on (default: %(default)s), or the next free one up to 19 higher ({DEFAULT_PORT + 19} by default); "
-                        "when a Kanvas already runs on any of these ports, serve opens the board there and returns")
+                        "when a Factory already runs on any of these ports, serve opens the board there and returns")
     p.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 for containers or remote machines")
     p.add_argument("--tailscale", action="store_true", help="also open the boards to your phone and other devices on your Tailscale network")
     p.add_argument("--saved", action="store_true", help="serve only the boards open last time, without a project of its own (for `kanvas service`)")
     p.add_argument("--no-open", action="store_true", help="do not open a browser")
-    p = add("service", cmd_service, "start Kanvas when you log in, so your boards are always open")
+    p = add("service", cmd_service, "start Factory when you log in, so your boards are always open")
     p.add_argument("action", choices=["install", "uninstall", "status"])
     p.add_argument("--tailscale", action="store_true", help="also open the boards to your phone over Tailscale")
-    p = add("init", cmd_init, "set up Kanvas in a project (never overwrites files)")
+    p = add("init", cmd_init, "set up Factory in a project (never overwrites files)")
     p.add_argument("dir", nargs="?", help=f"project folder (default: the folder of the nearest {BOARD_FILE}, "
                                           "else the top folder of the git repository, else this one)")
     p = add("import", cmd_import, "convert an Obsidian .canvas board from Kanvas 0.x")

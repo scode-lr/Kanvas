@@ -1,11 +1,11 @@
 ---
 name: kanvas
-description: Plan and track work on the project's Kanvas board (kanvas.json), which you share with a human who approves and reviews tasks. Use when the user mentions the board, Kanvas, tasks, planning, "what's next", or a task ID such as DV-03.
+description: Plan and track work on the project's Factory board (kanvas.json), which you share with a human who approves and reviews tasks. Use when the user mentions the board, Factory, tasks, planning, "what's next", or a task ID such as DV-03.
 license: MIT
 compatibility: Requires Python 3.8 or later.
 ---
 
-# Kanvas
+# Factory
 
 The board is `kanvas.json` at the project root. Change it only through the CLI in `.agents/skills/kanvas/`; the CLI enforces the workflow and keeps the file valid:
 
@@ -13,7 +13,7 @@ The board is `kanvas.json` at the project root. Change it only through the CLI i
 python .agents/skills/kanvas/kanvas.py <command>
 ```
 
-Use `python3` where `python` is missing. Never edit `kanvas.json` by hand. The human watches the board in a browser, where your changes appear within a second. It opens with `kanvas serve` when Kanvas is installed, or `python .agents/skills/kanvas/kanvas.py serve`. When Kanvas already runs for another project, this opens the board there and returns at once; otherwise it keeps running until stopped.
+Use `python3` where `python` is missing. Never edit `kanvas.json` by hand. The human watches the board in a browser, where your changes appear within a second. It opens with `kanvas serve` when Factory is installed, or `python .agents/skills/kanvas/kanvas.py serve`. When Factory already runs for another project, this opens the board there and returns at once; otherwise it keeps running until stopped.
 
 ## Workflow
 
@@ -32,7 +32,7 @@ proposed -> todo -> doing -> review -> done -> production
 
 The product Grill me records outcome, needs/constraints, acceptance criteria and non-goals. Before Doing, `start` requires an architecture/senior construction plan and accepts repeatable `--worktree PATH`; it snapshots worktree, branch, commit and dirty state. `finish` always opens both review gates. A different agent identity must run `agent-review --approve`; the human completes manual review and records dev/production evidence in the board.
 
-When the board has `automation.enabled`, the product Grill me also selects the repositories the task may change. Starting it from the board creates isolated worktrees and launches a separate Claude Code implementation session automatically. Do not work in the original checkout. Kanvas records the run under `work.automation` and moves a successful run to Review; Kanvas itself pushes the branches and opens the GitHub pull requests, which the task lists; inspect its summary, commits and PR links before reviewing. When a reviewer sends the task back to Doing, Kanvas runs the implementation again by itself with their notes and the pull request comments, up to `automation.max_rounds` rounds; do not start that work by hand.
+When the board has `automation.enabled`, the product Grill me also selects the repositories the task may change. Starting it from the board creates isolated worktrees and launches a separate Claude Code implementation session automatically. Do not work in the original checkout. Factory records the run under `work.automation` and moves a successful run to Review; Factory itself pushes the branches and opens the GitHub pull requests, which the task lists; inspect its summary, commits and PR links before reviewing. When a reviewer sends the task back to Doing, Factory runs the implementation again by itself with their notes and the pull request comments, up to `automation.max_rounds` rounds; do not start that work by hand.
 
 The human can also ask for changes to a proposal in the board. `status` then marks it `(changes requested: ...)`, and `show ID` has the request in its notes. Revise the proposal with `edit ID`, passing `-m` with what you changed; that note answers the request, and the mark goes.
 

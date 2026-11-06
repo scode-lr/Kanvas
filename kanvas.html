@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <meta name="color-scheme" content="light dark">
-<title>Kanvas</title>
+<title>Factory</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='2' y='2' width='60' height='60' rx='15' fill='%2323272f'/%3E%3Cg transform='translate(9.6 9.6) scale(.7)'%3E%3Cpath d='M19 14V50M46 14L28 32L46 50' fill='none' stroke='%23efece6' stroke-width='6.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M37.5 13H47V22.5ZM37.5 51H47V41.5Z' fill='%23efece6' stroke='%23efece6' stroke-width='4' stroke-linejoin='round'/%3E%3C/g%3E%3C/svg%3E">
 <script id="kanvas-snapshot" type="application/json"></script>
 <style>
@@ -32,6 +32,88 @@
   --todo-fill: var(--todo); --doing-fill: var(--doing); --review-fill: var(--review); --done-fill: var(--done); --production-fill: var(--production); --fill-text: #0d0f14;
   --badge-mix: 76%; --toast-mix: 45%; --mark-mix: 90%; --danger: #f6443d; --yolo-mark: var(--yolo);
   --edge: #343a47; --edge-open: #7a8496; --lane: rgb(255 255 255 / .022); --grid: #1f232c;
+}
+
+/* The Factory look: an old factory in iron and copper. It is dark by itself and only recolours and decorates. */
+[data-skin="factory"] {
+  --bg: #15110e; --surface: #211c18; --surface-2: #2a241f; --border: #3d342c; --border-strong: #6a5744;
+  --text: #efe6d8; --muted: #b9ab9a; --faint: #948677; --accent: #d9a441; --accent-text: #1b1307; --raise: #342c25;
+  --shadow: 0 2px 5px rgb(0 0 0 / .5); --shadow-lg: 0 18px 40px rgb(0 0 0 / .6), 0 0 0 1px #0008;
+  --proposed: #b99ad6; --todo: #6fb0cf; --blocked: #8a8077; --doing: #f08a3c; --review: #e0607a; --done: #6cc4a0; --production: #62b5c0; --yolo: #ffc53d;
+  --todo-fill: #2f7da0; --doing-fill: #c25f14; --review-fill: #b8405a; --done-fill: #2f8a68; --production-fill: #2b8592; --fill-text: #fff;
+  --danger: #f2594b; --edge: #4a3f35; --edge-open: #a58a6c; --lane: rgb(217 164 65 / .035); --grid: #261f1a;
+  --display: "Rockwell", "Roboto Slab", "Rockwell Nova", "Arvo", Georgia, "Times New Roman", serif;
+}
+[data-skin="factory"] body { background: radial-gradient(1100px 560px at 50% -12%, rgb(217 164 65 / .09), transparent 62%), repeating-linear-gradient(0deg, rgb(255 255 255 / .014) 0 2px, transparent 2px 4px), var(--bg); }
+[data-skin="factory"] header.top { background: linear-gradient(#30281f, #211c18); border-bottom: 3px double #7b6240; box-shadow: 0 2px 0 #0007; }
+[data-skin="factory"] :is(.board-title .t, .section-head, .d-head, .dlg h3, .lane-head .name, .station-plate, .gauge b) { font-family: var(--display); letter-spacing: .05em; }
+[data-skin="factory"] :is(.section-head, .d-head, .dlg h3, .station-plate) { text-transform: uppercase; }
+[data-skin="factory"] button { background: linear-gradient(#372e27, #2a241f); border-color: #55493c; box-shadow: inset 0 1px 0 rgb(255 255 255 / .07); }
+[data-skin="factory"] button:hover { border-color: #8d7456; background: linear-gradient(#41362d, #2f2822); }
+[data-skin="factory"] button.ghost { background: transparent; box-shadow: none; }
+[data-skin="factory"] button.primary { background: linear-gradient(#e9bb5d, #b98a2d); border-color: #f0c870; color: #1b1307; text-shadow: 0 1px 0 rgb(255 255 255 / .25); }
+[data-skin="factory"] button.primary:hover { background: linear-gradient(#f2c76b, #c4952f); }
+[data-skin="factory"] :is(.card, .kcard) { box-shadow: inset 0 0 0 1px #0007, inset 0 1px 0 rgb(255 255 255 / .06), var(--shadow); }
+[data-skin="factory"] :is(#panel, dialog.dlg) {
+  background-image: radial-gradient(circle, #b89a68 0 1.8px, #4a3a28 2.2px 3px, transparent 3.2px), radial-gradient(circle, #b89a68 0 1.8px, #4a3a28 2.2px 3px, transparent 3.2px),
+    radial-gradient(circle, #b89a68 0 1.8px, #4a3a28 2.2px 3px, transparent 3.2px), radial-gradient(circle, #b89a68 0 1.8px, #4a3a28 2.2px 3px, transparent 3.2px);
+  background-size: 8px 8px; background-repeat: no-repeat;
+  background-position: 7px 7px, calc(100% - 7px) 7px, 7px calc(100% - 7px), calc(100% - 7px) calc(100% - 7px);
+}
+[data-skin="factory"] dialog.dlg { border: 2px solid #6a5744; box-shadow: var(--shadow-lg), inset 0 0 0 1px #0008; }
+
+/* The factory floor: the tasks as crates on an assembly line, the agents as the machines that work them. */
+#plant-view { overflow: auto; }
+#plant { padding: 16px 18px 28px; display: flex; flex-direction: column; gap: 18px; min-width: max-content; }
+.plant-top { display: flex; gap: 14px; flex-wrap: wrap; align-items: stretch; }
+.gauge { width: 150px; text-align: center; padding: 8px 10px 10px; border: 2px solid var(--border-strong); border-radius: 12px; background: var(--surface); box-shadow: inset 0 0 0 1px #0007, var(--shadow); }
+.gauge svg { width: 100%; height: auto; display: block; }
+.gauge .arc { fill: none; stroke: var(--border-strong); stroke-width: 5; stroke-linecap: round; }
+.gauge .tick { stroke: var(--faint); stroke-width: 1.5; }
+.gauge .needle { stroke: var(--accent); stroke-width: 2.6; stroke-linecap: round; transform-origin: 40px 42px; transition: transform .9s cubic-bezier(.3, 1.5, .5, 1); }
+.gauge .hub { fill: var(--accent); }
+.gauge b { display: block; font-size: 22px; line-height: 1.1; }
+.gauge small { color: var(--muted); letter-spacing: .06em; text-transform: uppercase; font-size: 11px; }
+.plant-siren { align-self: flex-start; }
+.plant-line { display: flex; align-items: flex-start; }
+.station { width: 210px; flex: none; display: flex; flex-direction: column; gap: 8px; }
+.station-plate { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 2px solid var(--border-strong); border-radius: 8px; background: linear-gradient(#3a3028, #2a231d); font-size: 12px; box-shadow: inset 0 1px 0 rgb(255 255 255 / .08), 0 2px 0 #0007; }
+.station-plate .count { margin-left: auto; font: 700 13px var(--mono); color: var(--accent); }
+.lamp { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; background: #4a3f35; box-shadow: inset 0 0 0 1px #0008; vertical-align: middle; margin-left: 6px; }
+.lamp.on-green { background: #6ee7a0; box-shadow: 0 0 8px #6ee7a0; }
+.lamp.on-amber { background: #ffc24a; box-shadow: 0 0 8px #ffc24a; }
+.lamp.on-red { background: #ff5b4d; box-shadow: 0 0 8px #ff5b4d; }
+.lamp.blink { animation: lamp-blink 1.1s ease-in-out infinite; }
+@keyframes lamp-blink { 50% { opacity: .3; } }
+.machine { height: 86px; display: flex; align-items: center; justify-content: center; color: var(--border-strong); border: 2px solid var(--border); border-radius: 10px; background: repeating-linear-gradient(135deg, rgb(255 255 255 / .025) 0 6px, transparent 6px 12px), var(--surface); }
+.machine svg { width: 96px; height: 72px; stroke: currentColor; fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.station.running .machine { color: var(--accent); }
+.piston { animation: piston-press 1.1s ease-in-out infinite; }
+@keyframes piston-press { 50% { transform: translateY(9px); } }
+.gear { transform-box: fill-box; transform-origin: 50% 50%; animation: gear-turn 4s linear infinite; }
+@keyframes gear-turn { to { transform: rotate(360deg); } }
+.station:not(.running) :is(.piston, .gear) { animation-play-state: paused; }
+.crates { display: flex; flex-direction: column; gap: 6px; padding: 0 2px; }
+.crate { display: block; width: 100%; text-align: left; white-space: normal; padding: 6px 8px 6px 11px; border: 1px solid var(--border-strong); border-left: 6px solid var(--c, var(--border-strong)); border-radius: 6px; background: linear-gradient(#2e2721, #261f1a); box-shadow: inset 0 0 0 1px #0006, 0 2px 0 #0007; position: relative; }
+.crate::after { content: ""; position: absolute; top: 5px; right: 5px; width: 5px; height: 5px; border-radius: 50%; background: #8f734a; box-shadow: inset 0 0 0 1px #0008; }
+.crate.s-proposed { --c: var(--proposed); } .crate.s-todo { --c: var(--todo); } .crate.s-blocked { --c: var(--blocked); } .crate.s-doing { --c: var(--doing); }
+.crate.s-review { --c: var(--review); } .crate.s-done { --c: var(--done); } .crate.s-production { --c: var(--production); }
+.crate.s-blocked { opacity: .7; border-style: dashed; }
+.crate.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+.crate .id { display: block; font: 700 11px var(--mono); color: var(--muted); }
+.crate .title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 13px; }
+.crate .who { display: block; margin-top: 3px; font-size: 11px; color: var(--accent); }
+.crates .more { color: var(--muted); font-size: 12px; padding: 2px 4px; }
+.belt { flex: none; width: 36px; height: 14px; margin-top: 77px; background: repeating-linear-gradient(90deg, #5d4c3c 0 8px, #3b3128 8px 16px); border-block: 3px solid #1b1612; }
+.belt.flow { animation: belt-run 1s linear infinite; }
+@keyframes belt-run { to { background-position: 16px 0; } }
+@media (max-width: 760px) {
+  #plant { min-width: 0; }
+  .plant-line { flex-direction: column; align-items: stretch; }
+  .station { width: auto; }
+  .belt { width: 14px; height: 26px; margin: 8px auto; background: repeating-linear-gradient(180deg, #5d4c3c 0 8px, #3b3128 8px 16px); border-block: 0; border-inline: 3px solid #1b1612; }
+  .belt.flow { animation: none; }
+  .gauge { width: calc(50% - 7px); }
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -644,10 +726,10 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 .welcome-card .row { display: flex; gap: 8px; flex-wrap: wrap; }
 
 @media (prefers-reduced-motion: reduce) {
-  .yolo-tag, .yolo-chip, .busy-dot, .edge.live, .live, :is(.card, .kcard)::before, :is(.card, .kcard)::after { animation: none !important; }
+  .yolo-tag, .yolo-chip, .busy-dot, .piston, .gear, .belt.flow, .lamp.blink, .edge.live, .live, :is(.card, .kcard)::before, :is(.card, .kcard)::after { animation: none !important; }
   :is(.card, .kcard).s-doing::before { content: none; }
   :is(.card, .kcard).s-doing:not(.asking) { border-color: var(--c); }
-  #world.animate, .progress span { transition: none; }
+  #world.animate, .progress span, .gauge .needle { transition: none; }
   .handle { transition: opacity .15s; }
   .live { box-shadow: 0 0 0 3px color-mix(in srgb, var(--doing) 25%, transparent); }
   .card.zap { animation-delay: 0s !important; }
@@ -830,8 +912,10 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 <script>
   try {
     const p = JSON.parse(localStorage.getItem("kanvas:prefs") || "{}");
-    document.documentElement.dataset.theme = p.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  } catch (e) { document.documentElement.dataset.theme = "light"; }
+    // The Factory look (iron and copper) is dark by itself; Plain keeps the light, dark or automatic theme.
+    document.documentElement.dataset.skin = p.skin === "plain" ? "plain" : "factory";
+    document.documentElement.dataset.theme = p.skin === "plain" ? p.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : "dark";
+  } catch (e) { document.documentElement.dataset.skin = "factory"; document.documentElement.dataset.theme = "dark"; }
 </script>
 <header class="top">
   <div class="brand">
@@ -852,6 +936,7 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
     <div class="seg track" role="group" aria-label="View">
       <button id="view-graph" data-icon="graph" data-tip="Dependency graph" data-key="G" aria-label="Graph"><span class="lbl">Graph</span></button>
       <button id="view-board" data-icon="columns" data-tip="Board by state" data-key="B" aria-label="Board"><span class="lbl">Board</span></button>
+      <button id="view-plant" data-icon="factory" data-tip="Factory floor: the tasks on an assembly line" data-key="W" aria-label="Floor"><span class="lbl">Floor</span></button>
     </div>
     <button id="display" data-icon="sliders" data-tip="Direction, card order, finished tasks and theme" aria-haspopup="dialog" aria-expanded="false" aria-label="Display options"><span class="lbl">Display</span></button>
     <button id="inbox" aria-haspopup="dialog" aria-expanded="false" hidden></button>
@@ -899,6 +984,7 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
     <div class="empty" id="graph-empty" hidden></div>
   </section>
   <section class="view" id="board-view" hidden><nav id="col-tabs" class="track" aria-label="Columns"></nav><div id="kanban"></div></section>
+  <section class="view" id="plant-view" hidden><div id="plant"></div></section>
 </main>
 <div id="welcome" hidden></div>
 <div id="toasts" aria-live="polite"></div>
@@ -934,6 +1020,7 @@ const ICONS = {
   graph: '<rect x="3" y="3.5" width="6" height="5" rx="1.2"/><rect x="15" y="3.5" width="6" height="5" rx="1.2"/><rect x="9" y="15.5" width="6" height="5" rx="1.2"/><path d="M6 8.5v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-2M12 12.5v3"/>',
   columns: '<rect x="3" y="4" width="5" height="16" rx="1.2"/><rect x="10" y="4" width="5" height="11" rx="1.2"/><rect x="17" y="4" width="4" height="7" rx="1.2"/>',
   sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+  factory: '<path d="M3 21V9l6 4V9l6 4V4h4v17z"/><path d="M7 17h2M12 17h2M17 17h2"/>',
   lanes: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9.5h18M3 14.5h18M8 4v16"/>',
   keyboard: '<rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6.5 10h.01M10 10h.01M14 10h.01M17.5 10h.01M8 14h8"/>',
   contrast: '<circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/>',
@@ -2090,15 +2177,15 @@ function serverStore() {
   const parse = async (r) => normalize(JSON.parse(await r.text()));
   // Errors that mean the page cannot reach the board carry `lost`.
   const lostError = (message) => Object.assign(new Error(message), { lost: true });
-  // A read that hangs (the computer running Kanvas asleep, a dropped network) counts as lost after 10 s. A write may
+  // A read that hangs (the computer running Factory asleep, a dropped network) counts as lost after 10 s. A write may
   // have landed even so, and waits for its answer.
   const ask = async (opts, read = true) => {
     const stop = new AbortController(), timer = read && setTimeout(() => stop.abort(), 10000);
     try { return await fetch("api/board", Object.assign({ signal: stop.signal }, opts)); }
-    catch (e) { throw lostError("Kanvas stopped running or cannot be reached"); }
+    catch (e) { throw lostError("Factory stopped running or cannot be reached"); }
     finally { clearTimeout(timer); }
   };
-  const answered = (r) => (r.status === 404 ? lostError("this board is no longer open in Kanvas") : new Error(`server answered ${r.status}`));
+  const answered = (r) => (r.status === 404 ? lostError("this board is no longer open in Factory") : new Error(`server answered ${r.status}`));
   return {
     kind: "server",
     async load() {
@@ -2219,7 +2306,7 @@ async function open(s) {
 
 async function commit(fn, { record = true, onFail = null } = {}) {
   if (!store || store.readOnly) { toast("This snapshot is read-only"); return false; }
-  // Refused at once, so nothing looks saved and then vanishes; the banner says how to bring Kanvas back.
+  // Refused at once, so nothing looks saved and then vanishes; the banner says how to bring Factory back.
   if (lost) { toast(`Not saved: ${lost}`, "error"); if (onFail) onFail(new Error(lost)); return false; }
   let draft;
   const before = clone(board);
@@ -2458,7 +2545,7 @@ function setSync(status, detail, unreachable = false) {
   el.className = `sync ${cls}`;
   el.querySelector(".label").textContent = label;
   el.dataset.tip = detail || {
-    server: "Synced with kanvas.json through the Kanvas server. Agent changes appear within a second.",
+    server: "Synced with kanvas.json through the Factory server. Agent changes appear within a second.",
     file: "Reading and writing the file directly. Agent changes appear within a second.",
     memory: "Changes live in this tab only. Use Save to download the board.",
     snapshot: store.at ? `Exported ${new Date(store.at).toLocaleString()}` : "Exported board",
@@ -2480,7 +2567,7 @@ function setLost(why) {
   el.hidden = !why;
 }
 
-// How to start Kanvas for a project, as the welcome screen and the lost connection banner put it.
+// How to start Factory for a project, as the welcome screen and the lost connection banner put it.
 const serveHint = (lead) => [lead, h("code", {}, "kanvas serve"), " in the project folder, or ",
   h("code", {}, "python .agents/skills/kanvas/kanvas.py serve"), " if the command is not installed."];
 
@@ -2711,13 +2798,120 @@ function render() {
   renderProblems();
   $("#graph-view").hidden = ui.view !== "graph";
   $("#board-view").hidden = ui.view !== "board";
+  $("#plant-view").hidden = ui.view !== "plant";
   renderPanel();
   if (ui.view === "graph") renderGraph();
+  else if (ui.view === "plant") renderPlant();
   else renderKanban();
   if (picking) applyPick();
   applyMulti();
   // The board view draws its cards anew, and the focus moves to the new card.
   if (focused?.matches(".kcard") && !focused.isConnected) { const el = shownCard(focused.dataset.id); if (el) focusCard(el); }
+}
+
+// The factory floor ---------------------------------------------------------------------------------------------
+// Six stations, one per state, joined by a conveyor belt: a task is a crate that moves from the drawing board to the
+// shipping bay. Where an agent is working the press turns, a lamp says what waits for the human, and an optional siren
+// sounds when something new does. It only shows; every move and approval stays on the board.
+const PLANT_STATIONS = [
+  { state: "proposed", name: "Drawing board", art: "drawing" }, { state: "todo", name: "Stores", art: "stores" },
+  { state: "doing", name: "Press", art: "press" }, { state: "review", name: "Inspection", art: "inspect" },
+  { state: "done", name: "Loading dock", art: "dock" }, { state: "production", name: "Shipping", art: "ship" },
+];
+const PLANT_ART = {
+  drawing: '<rect x="14" y="14" width="68" height="40" rx="3" transform="rotate(-5 48 34)"/><path d="M24 26h30M24 34h42M24 42h22" transform="rotate(-5 48 34)"/><path d="M30 64l18-10 18 10"/>',
+  stores: '<rect x="12" y="8" width="72" height="54" rx="3"/><path d="M12 26h72M12 44h72"/><rect x="20" y="14" width="14" height="10"/><rect x="40" y="14" width="22" height="10"/><rect x="24" y="32" width="18" height="10"/><rect x="58" y="32" width="14" height="10"/><rect x="18" y="50" width="26" height="10"/>',
+  press: '<rect x="14" y="58" width="68" height="8" rx="2"/><path d="M22 58V14M74 58V14"/><rect x="16" y="6" width="64" height="10" rx="2"/><g class="piston"><rect x="42" y="16" width="12" height="18"/><rect x="32" y="34" width="32" height="8" rx="2"/></g><g class="gear"><circle cx="84" cy="30" r="4"/><path d="M84 22v4M84 34v4M76 30h4M88 30h4M78.3 24.3l2.8 2.8M87 33l2.8 2.8M78.3 35.7l2.8-2.8M87 27l2.8-2.8"/></g>',
+  inspect: '<circle cx="40" cy="30" r="18"/><path d="M53 43l20 20"/><path d="M30 30l7 7 12-14"/><rect x="12" y="60" width="72" height="6" rx="2"/>',
+  dock: '<path d="M8 56h80M8 66h80"/><rect x="14" y="30" width="24" height="26"/><path d="M14 43h24M26 30v26"/><path d="M52 44h26M70 36l8 8-8 8"/>',
+  ship: '<path d="M8 52V24h46v28M54 52V34h18l12 12v6"/><circle cx="24" cy="56" r="6"/><circle cx="68" cy="56" r="6"/><path d="M8 52h80"/>',
+};
+const PLANT_NEEDS = { question: "Asks you a question", failed: "The run failed", design: "Design waits for you", review: "Waits for your review", idea: "Idea ready to approve" };
+
+// What a task waits on from the human, if anything.
+function plantNeeds(t) {
+  if (openQuestion(t)) return "question";
+  if (t.state === "doing" && t.work?.automation?.status === "failed") return "failed";
+  if (t.state === "doing" && t.work?.design?.status === "pending") return "design";
+  if (t.state === "review" && t.review?.agent?.status === "approved" && t.review?.manual?.status !== "approved") return "review";
+  if (t.state === "proposed" && t.inbox?.ready && t.inbox?.status !== "approved") return "idea";
+  return "";
+}
+
+// A steam whistle, only after the owner switched the siren on (a click is what lets a page make sound).
+let plantAudio = null;
+function whistle() {
+  try {
+    plantAudio ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (plantAudio.state === "suspended") plantAudio.resume();
+    const t0 = plantAudio.currentTime, gain = plantAudio.createGain();
+    for (const [freq, end] of [[392, 349], [494, 440]]) {
+      const osc = plantAudio.createOscillator();
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(freq, t0);
+      osc.frequency.linearRampToValueAtTime(end, t0 + 0.9);
+      osc.connect(gain);
+      osc.start(t0);
+      osc.stop(t0 + 1.05);
+    }
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.09, t0 + 0.08);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.0);
+    gain.connect(plantAudio.destination);
+  } catch (e) { /* no sound where audio is unavailable */ }
+}
+
+function gauge(label, value, max, tip) {
+  const angle = -90 + 180 * Math.min(1, value / max);
+  const ticks = [-90, -45, 0, 45, 90].map((a) => `<line class="tick" x1="40" y1="42" x2="40" y2="9" transform="rotate(${a} 40 42)" stroke-dasharray="0 28 5"/>`).join("");
+  return h("div", { class: "gauge", role: "img", "aria-label": `${label}: ${value}`, title: tip || label },
+    h("span", { html: `<svg viewBox="0 0 80 48" aria-hidden="true"><path class="arc" d="M8 42A32 32 0 0 1 72 42"/>${ticks}<line class="needle" x1="40" y1="42" x2="40" y2="14" style="transform: rotate(${angle}deg)"/><circle class="hub" cx="40" cy="42" r="3.5"/></svg>` }),
+    h("b", {}, String(value)), h("small", {}, label));
+}
+
+let plantSeen = null;
+function renderPlant() {
+  const root = $("#plant");
+  const shown = board.tasks.filter((t) => matches(t) && !(prefs.hideDone && complete(t)));
+  const busy = shown.filter((t) => agentBusy(t) || ["queued", "running"].includes(t.work?.automation?.status));
+  const waiting = board.tasks.filter((t) => plantNeeds(t));
+  const ideas = board.tasks.filter((t) => t.inbox && t.state === "proposed" && t.inbox.status !== "approved");
+  const week = Date.now() - 7 * 86400000;
+  const shipped = board.tasks.filter((t) => t.delivery?.dev?.at && Date.parse(t.delivery.dev.at) > week);
+
+  // The siren sounds for what is new since the last time the floor was drawn, never for what was already waiting.
+  const needIds = new Set(waiting.map((t) => `${t.id}:${plantNeeds(t)}`));
+  if (plantSeen && prefs.siren && [...needIds].some((k) => !plantSeen.has(k))) whistle();
+  plantSeen = needIds;
+
+  const crate = (t) => {
+    const need = plantNeeds(t), who = agentBusy(t) || (["queued", "running"].includes(t.work?.automation?.status) ? t.work.automation.agent || "implementer" : "");
+    return h("button", { type: "button", class: `crate s-${vstate(t)}${same(ui.selected, t.id) ? " sel" : ""}`, "data-id": t.id, title: `${t.id} · ${t.title}`, onclick: () => select(t.id) },
+      h("span", { class: "id" }, t.id, who ? h("span", { class: "lamp on-green blink" }) : need ? h("span", { class: `lamp on-${need === "failed" ? "red" : "amber"}` }) : null),
+      h("span", { class: "title" }, t.title),
+      who ? h("span", { class: "who" }, `The ${who} is working`) : need ? h("span", { class: "who" }, PLANT_NEEDS[need]) : null);
+  };
+  const stations = PLANT_STATIONS.map(({ state, name, art }) => {
+    const here = shown.filter((t) => (state === "todo" ? ["todo", "blocked"].includes(vstate(t)) : vstate(t) === state));
+    const finished = state === "done" || state === "production";
+    const list = finished ? here.slice(-5).reverse() : here;
+    const working = here.some((t) => agentBusy(t) || ["queued", "running"].includes(t.work?.automation?.status));
+    const needs = here.some((t) => plantNeeds(t));
+    const failed = here.some((t) => plantNeeds(t) === "failed");
+    return h("div", { class: `station st-${state}${working ? " running" : ""}` },
+      h("div", { class: "station-plate" }, name, h("span", { class: `lamp ${failed ? "on-red blink" : working ? "on-green" : needs ? "on-amber" : ""}` }), h("span", { class: "count" }, String(here.length))),
+      h("div", { class: "machine", role: "img", "aria-label": name }, h("span", { html: `<svg viewBox="0 0 96 72" aria-hidden="true">${PLANT_ART[art]}</svg>` })),
+      h("div", { class: "crates" }, list.map(crate), finished && here.length > list.length ? h("div", { class: "more" }, `${here.length - list.length} earlier`) : null));
+  });
+  const line = [];
+  stations.forEach((st, i) => { if (i) line.push(h("div", { class: `belt${busy.length ? " flow" : ""}`, "aria-hidden": "true" })); line.push(st); });
+  const siren = h("button", { type: "button", class: "plant-siren", "aria-pressed": String(!!prefs.siren), title: "Sound a whistle when something new needs you",
+    onclick: () => { prefs.siren = !prefs.siren; savePrefs(); if (prefs.siren) whistle(); renderPlant(); } }, icon("bell"), prefs.siren ? "Siren on" : "Siren off");
+  root.replaceChildren(
+    h("div", { class: "plant-top" },
+      gauge("Working", busy.length, 3, "Agents at work now"), gauge("Waiting for you", waiting.length, 8, "Questions, designs, reviews and ideas that need you"),
+      gauge("Inbox", ideas.length, 8, "Ideas and incidents still being shaped"), gauge("Shipped, 7 days", shipped.length, 10, "Merged to dev in the last week"), siren),
+    h("div", { class: "plant-line" }, line));
 }
 
 function renderHeader() {
@@ -2809,7 +3003,7 @@ function renderHeader() {
     chip.setAttribute("aria-label", `YOLO on ${targets.map((t) => t.id).join(", ")}: ${charged} task${charged > 1 ? "s" : ""} without approval`);
     chip.onclick = () => { const i = targets.findIndex((t) => same(t.id, ui.selected)); select(targets[(i + 1) % targets.length].id); };
   }
-  for (const v of ["graph", "board"]) {
+  for (const v of ["graph", "board", "plant"]) {
     const btn = $(`#view-${v}`);
     btn.classList.toggle("on", ui.view === v);
     btn.setAttribute("aria-pressed", ui.view === v ? "true" : "false");
@@ -4722,12 +4916,12 @@ function showDialog(dlg) {
   else (dlg.querySelector("input:not([type=checkbox]), textarea, select") || dlg.querySelector("button[value=ok]") || dlg).focus();
 }
 
-// The board's address for phones on Tailscale, as a QR code; opens Kanvas to phones first if needed.
+// The board's address for phones on Tailscale, as a QR code; opens Factory to phones first if needed.
 // Connects the private Telegram bot: the owner pastes the token BotFather gave, then sends the code shown here to the bot,
-// and that Telegram account is the only one heard. The token goes to Kanvas on this computer and is never shown again.
+// and that Telegram account is the only one heard. The token goes to Factory on this computer and is never shown again.
 function telegramDialog() {
   const body = h("div", { class: "phone" });
-  const gone = "Kanvas stopped running or cannot be reached.";
+  const gone = "Factory stopped running or cannot be reached.";
   let timer = null;
   const call = (action, extra = {}) => fetch("api/telegram", action ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...extra }) } : { cache: "no-store" })
     .then(async (r) => { const info = await r.json().catch(() => ({})); if (!r.ok) throw new Error(info.error || gone); return info; }, () => { throw new Error(gone); });
@@ -4743,7 +4937,7 @@ function telegramDialog() {
         h("p", {}, "A private bot on your own Telegram, to send ideas and incidents to the product owner from anywhere."),
         h("ol", {}, h("li", {}, "In Telegram, talk to ", h("b", {}, "@BotFather"), ", send ", h("code", {}, "/newbot"), " and follow its steps. It gives you a token."), h("li", {}, "Paste the token here.")),
         h("label", { class: "field" }, "Bot token", token), go,
-        h("p", { class: "phone-note" }, "Kanvas keeps the token in its own folder on this computer. Agents never receive it."));
+        h("p", { class: "phone-note" }, "Factory keeps the token in its own folder on this computer. Agents never receive it."));
     } else if (info.code) {
       children.push(h("p", {}, `Bot @${info.bot} is connected. Now send this code to it from your own Telegram account:`),
         h("div", { class: "tg-code", "aria-label": `Code ${info.code}` }, info.code),
@@ -4766,15 +4960,15 @@ function phoneDialog() {
   const body = h("div", { class: "phone" });
   const port = location.port || "80";
   const fail = (e) => body.replaceChildren(h("p", { class: "phone-error" }, e.message));
-  const gone = "Kanvas stopped running or cannot be reached.";
+  const gone = "Factory stopped running or cannot be reached.";
   const ask = (method) => fetch("api/phone", method === "GET" ? { cache: "no-store" } : { method, headers: { "Content-Type": "application/json" }, body: "{}" })
     .then(async (r) => { const info = await r.json().catch(() => ({})); if (!r.ok) throw new Error(info.error || gone); return info; }, () => { throw new Error(gone); });
   const show = (info) => {
     if (!info.urls.length) {
       const open = h("button", { type: "button", class: "primary", onclick: () => { open.disabled = true; open.textContent = "Opening…"; ask("POST").then(show, fail); } }, icon("phone"), "Open to my phone");
       body.replaceChildren(
-        h("p", {}, "Your phone can open this board through Tailscale, the private network between your own devices. Nobody outside it can reach Kanvas."),
-        info.manage ? open : h("p", { class: "phone-note" }, "Only the computer running Kanvas can open it to phones."));
+        h("p", {}, "Your phone can open this board through Tailscale, the private network between your own devices. Nobody outside it can reach Factory."),
+        info.manage ? open : h("p", { class: "phone-note" }, "Only the computer running Factory can open it to phones."));
       return;
     }
     const qr = h("div", { class: "phone-qr", role: "img", "aria-label": `QR code of ${info.urls[0]}` });
@@ -4785,7 +4979,7 @@ function phoneDialog() {
       h("p", { class: "phone-note" }, `Anyone on your Tailscale network can open and edit your boards. If the phone cannot connect, allow port ${port} for Tailscale in this computer's firewall: `,
         h("a", { href: "https://github.com/scode-lr/Kanvas#if-the-phone-cannot-connect", target: "_blank", rel: "noopener" }, "how, for each system"), "."),
       info.manage ? h("button", { type: "button", onclick: (e) => { e.currentTarget.disabled = true; ask("DELETE").then(show, fail); } }, "Stop opening to phones")
-        : h("p", { class: "phone-note" }, "Only the computer running Kanvas can close it to phones."));
+        : h("p", { class: "phone-note" }, "Only the computer running Factory can close it to phones."));
   };
   body.append(h("p", {}, "Loading…"));
   ask("GET").then(show, fail);
@@ -5137,7 +5331,7 @@ function groupsDialog(kept = {}) {
 const SHORTCUTS = [
   ["Moving around", [["← / ↑ / ↓ / →", "Select the next card in that direction"], ["Enter", "Move into the selected task's panel, where Tab goes round its controls"], ["Esc", "Leave the panel, close it, or clear the filter"], ["/", "Filter tasks"], ["Shift+← / Shift+→", "Previous or next open board"]]],
   ["The selected task", [["A", "Approve the selected proposal"], ["S", "Start the selected task"], ["D", "Mark the selected task done"], ["P", "Pause the selected task"], ["E", "Rename the selected task"], ["Del / Backspace", "Delete the selected task, or reject it if it is a proposal"], ["Ctrl+click", "Select several cards, then approve, finish or delete them together with the bar, A, D or Del"], ["Right-click", "Actions for a card, a dependency or empty space"]]],
-  ["Views", [["G / B", "Graph or board view"], ["L", "Graph left to right or top to bottom"], ["M", "Automatic layout, or order cards and groups yourself by dragging them"], ["H", "Hide or show finished tasks"], ["F", "Fit the graph to the screen"], ["+ / -", "Zoom"], ["[ / ]", "Compress or extend the graph"]]],
+  ["Views", [["G / B / W", "Graph, board or factory floor view"], ["L", "Graph left to right or top to bottom"], ["M", "Automatic layout, or order cards and groups yourself by dragging them"], ["H", "Hide or show finished tasks"], ["F", "Fit the graph to the screen"], ["+ / -", "Zoom"], ["[ / ]", "Compress or extend the graph"]]],
   ["Editing", [["N", "New task"], ["Ctrl+Enter", "Save the text you are editing"], ["Ctrl+Z", "Undo your last change"], ["Ctrl+Shift+Z / Ctrl+Y", "Redo"]]],
 ];
 
@@ -5148,7 +5342,7 @@ function helpDialog() {
       groups.map(([head, keys]) => [h("h4", { class: "section-head" }, head),
         keys.map(([k, v]) => [h("span", {}, keyLabel(k).split(" / ").map((x, i) => [i ? " / " : "", h("kbd", {}, x)])), h("span", {}, v)])])))),
     h("p", {}, keyLabel("In the graph, drag a dot on a card's edge onto another card to add a dependency, and click an arrow to remove it. Scroll to pan, Ctrl+scroll to zoom.")),
-    h("p", {}, "Agents work through the Kanvas command line; their changes appear here within a second."),
+    h("p", {}, "Agents work through the Factory command line; their changes appear here within a second."),
     prefs.skipYoloWarning ? h("p", {}, "The YOLO confirmation is hidden. ",
       h("button", { type: "button", class: "link", onclick: (e) => { delete prefs.skipYoloWarning; savePrefs(); e.target.closest("p").remove(); toast("The YOLO confirmation will show again"); } }, "Show it again")) : null,
   ), { ok: "Close", cancel: null });
@@ -5224,13 +5418,13 @@ function dropdown(btn, items, { alignRight = false, cls = "", gap = 6, role = "m
 
 // Boards ----------------------------------------------------------------------
 
-// One Kanvas serves every open board at an address of its own, /<name>/, so each can also have a tab.
+// One Factory serves every open board at an address of its own, /<name>/, so each can also have a tab.
 let openBoards = [];
 const boardHere = () => decodeURIComponent(location.pathname.split("/")[1] || "");
 const boardUrl = (b) => `/${encodeURIComponent(b.name)}/`;
 // A board without a title goes by the name in its address, as on the page that lists the boards. A file opened in
 // the browser has no such name.
-const boardLabel = () => board.title || (store?.kind === "server" ? boardHere() : store?.boardName) || "Kanvas";
+const boardLabel = () => board.title || (store?.kind === "server" ? boardHere() : store?.boardName) || "Factory";
 
 async function refreshBoards() {
   if (store?.kind !== "server") return;
@@ -5297,7 +5491,7 @@ function waitingIn(b) {
   ];
 }
 
-// This board first, then the others in the order Kanvas lists them.
+// This board first, then the others in the order Factory lists them.
 function inboxBoards() {
   if (!board) return [];
   const here = { name: boardHere(), title: boardLabel(), board, here: true };
@@ -5311,7 +5505,7 @@ function renderInboxButton() {
   const asks = items.filter((x) => x.state === "ask").length, reviews = n - asks;
   // The tab's title counts the agents waiting for a reply, so the tab shows them while the human is elsewhere.
   const name = boardLabel();
-  document.title = `${asks && !store?.readOnly ? `(${asks}) ` : ""}${name === "Kanvas" ? name : `${name} · Kanvas`}`;
+  document.title = `${asks && !store?.readOnly ? `(${asks}) ` : ""}${name === "Factory" ? name : `${name} · Factory`}`;
   const btn = $("#inbox");
   if (!btn) return;
   btn.hidden = !!store?.readOnly;
@@ -5391,7 +5585,7 @@ function displayMenu() {
     const graph = ui.view === "graph", manual = prefs.arrange === "manual";
     node.replaceChildren(...compact(
       // Phones have no room for the view switch in the header.
-      phone.matches && row("View", ["G", "B"], seg("View", [["graph", "Graph", "graph"], ["board", "Board", "columns"]], ui.view, (v) => { setView(v); fill(); })),
+      phone.matches && row("View", ["G", "B"], seg("View", [["graph", "Graph", "graph"], ["board", "Board", "columns"], ["plant", "Floor", "factory"]], ui.view, (v) => { setView(v); fill(); })),
       graph && h("div", { class: "d-head" }, "Graph"),
       graph && row("Direction", ["L"], seg("Direction", [["horizontal", "Left to right", "right"], ["vertical", "Top to bottom", "down"]], prefs.orient === "vertical" ? "vertical" : "horizontal", toggleOrient)),
       // Phones have no room for the spacing slider in the zoom bar.
@@ -5401,7 +5595,9 @@ function displayMenu() {
       h("div", { class: "d-head" }, "Tasks"),
       row("Finished tasks", ["H"], seg("Finished tasks", [[false, "Show"], [true, "Hide"]], !!prefs.hideDone, toggleDone)),
       h("div", { class: "d-head" }, "Appearance"),
-      row("Theme", [], seg("Theme", [["light", "Light", "sun"], ["dark", "Dark", "moon"], [null, "Auto", "contrast"]], prefs.theme || null, setThemePref)),
+      row("Look", [], seg("Look", [["factory", "Factory", "factory"], ["plain", "Plain"]], prefs.skin === "plain" ? "plain" : "factory", (v) => { setSkinPref(v); fill(); }),
+        prefs.skin === "plain" ? null : "Iron and copper, an old factory. It is dark by itself."),
+      prefs.skin === "plain" ? row("Theme", [], seg("Theme", [["light", "Light", "sun"], ["dark", "Dark", "moon"], [null, "Auto", "contrast"]], prefs.theme || null, setThemePref)) : null,
     ));
     if (focused >= 0) (controls()[focused] || node.closest(".ctx-menu") || node).focus({ preventScroll: true });
   };
@@ -5786,7 +5982,7 @@ function showWelcome() {
   const fileInput = h("input", { type: "file", accept: ".json,application/json", hidden: true });
   fileInput.addEventListener("change", () => fileInput.files[0] && openFromFile(fileInput.files[0]));
   w.replaceChildren(h("div", { class: "welcome-card" },
-    h("h1", {}, $(".logo").cloneNode(true), "Kanvas"),
+    h("h1", {}, $(".logo").cloneNode(true), "Factory"),
     h("p", {}, "A task board you share with your AI agents. Open your board file to plan, approve and review work."),
     h("div", { class: "row" },
       h("button", { class: "primary", onclick: () => (canPick ? pickFile() : fileInput.click()) }, icon("folder-open"), "Open kanvas.json"),
@@ -5822,7 +6018,7 @@ async function grant(handle) {
 
 async function pickFile() {
   try {
-    const [handle] = await window.showOpenFilePicker({ types: [{ description: "Kanvas board", accept: { "application/json": [".json"] } }] });
+    const [handle] = await window.showOpenFilePicker({ types: [{ description: "Factory board", accept: { "application/json": [".json"] } }] });
     if (await grant(handle)) openHandle(handle);
     else openFromFile(await handle.getFile());
   } catch (e) {
@@ -5853,7 +6049,12 @@ function download() {
 
 // With no theme chosen, the page follows the system setting, also when it changes.
 const systemDark = matchMedia("(prefers-color-scheme: dark)");
-const applyTheme = () => { document.documentElement.dataset.theme = prefs.theme || (systemDark.matches ? "dark" : "light"); };
+const applyTheme = () => {
+  const plain = prefs.skin === "plain";
+  document.documentElement.dataset.skin = plain ? "plain" : "factory";
+  document.documentElement.dataset.theme = plain ? prefs.theme || (systemDark.matches ? "dark" : "light") : "dark";
+};
+function setSkinPref(skin) { prefs.skin = skin === "plain" ? "plain" : "factory"; savePrefs(); applyTheme(); }
 function setThemePref(theme) { prefs.theme = theme; savePrefs(); applyTheme(); }
 
 // Tooltips for controls with data-tip: the control's name and its shortcut, shown sooner than the browser's own.
@@ -5902,6 +6103,7 @@ function setupChrome() {
   setupTips();
   $("#view-graph").onclick = () => setView("graph");
   $("#view-board").onclick = () => setView("board");
+  $("#view-plant").onclick = () => setView("plant");
   phone.addEventListener("change", () => { if (board && !picking && ui.view !== prefs[viewPref()]) setView(prefs[viewPref()], false); });
   // Phone keyboards shrink only the visual viewport, so dialogs size themselves to it.
   const vv = window.visualViewport;
@@ -5991,7 +6193,7 @@ function setupChrome() {
     if (!picking && !menuEl && taskKey(e.key)) { e.preventDefault(); return; }
     const r = $("#viewport").getBoundingClientRect();
     const actions = {
-      "/": () => search.focus(), n: () => newTaskDialog(), g: () => setView("graph"), b: () => setView("board"),
+      "/": () => search.focus(), n: () => newTaskDialog(), g: () => setView("graph"), b: () => setView("board"), w: () => setView("plant"),
       h: toggleDone, l: toggleOrient, m: () => ui.view === "graph" && toggleArrange(), f: () => fit(true), "?": helpDialog,
       "[": () => setLevelGap(prefs.levelGap - 30), "]": () => setLevelGap(prefs.levelGap + 30),
       "+": () => zoomAt(1.2, r.width / 2, r.height / 2), "=": () => zoomAt(1.2, r.width / 2, r.height / 2), "-": () => zoomAt(1 / 1.2, r.width / 2, r.height / 2),
@@ -6137,7 +6339,7 @@ async function boot() {
     if (snap.textContent.trim()) await open(snapshotStore(snap));
     else if (location.protocol.startsWith("http")) await open(serverStore());
   } catch (e) {
-    console.warn("Kanvas: no board from the page or server", e);
+    console.warn("Factory: no board from the page or server", e);
   }
   if (!store) showWelcome();
   poll();

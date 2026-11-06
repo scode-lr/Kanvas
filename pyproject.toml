@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "kanvas-board"
 dynamic = ["version", "readme"]
-description = "A task board you share with your AI coding agents"
+description = "Factory: a task board you share with your AI coding agents"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "scode-lr" }, { name = "XMihura" }]
@@ -28,6 +28,7 @@ Changelog = "https://github.com/scode-lr/Kanvas/blob/main/CHANGELOG.md"
 Issues = "https://github.com/scode-lr/Kanvas/issues"
 
 [project.scripts]
+factory = "kanvas_board:main"
 kanvas = "kanvas_board:main"
 kanvas-board = "kanvas_board:main"
 

@@ -441,6 +441,51 @@ class BrowserSmokeTests(unittest.TestCase):
             kanvas.load_board(self.path), "BE-03")["work"]["design"]["status"] == "approved")
         self.assertEqual(self.page.logged(), [])
 
+    def test_the_factory_look_is_the_default_and_plain_brings_the_old_one_back(self):
+        self.load()
+        self.assertEqual(self.page.js("document.documentElement.dataset.skin + '/' + document.documentElement.dataset.theme"), "factory/dark")
+        self.page.js("localStorage.setItem('kanvas:prefs', JSON.stringify({ skin: 'plain', theme: 'light' }))")
+        self.load()
+        self.assertEqual(self.page.js("document.documentElement.dataset.skin + '/' + document.documentElement.dataset.theme"), "plain/light")
+        self.assertEqual(self.page.logged(), [])
+
+    def test_the_factory_floor_puts_each_task_on_its_station_and_the_press_turns_when_an_agent_works(self):
+        def staged(board):
+            busy = kanvas.find_task(board, "BE-03")
+            busy["state"] = "doing"
+            busy["work"] = {"by": "human", "plan": "Build it", "busy": {"by": "designer", "at": kanvas.now_iso()}}
+            waiting = kanvas.find_task(board, "BE-05")
+            waiting["state"] = "review"
+            waiting["review"] = {"agent": {"status": "approved"}, "manual": {"status": "pending"}}
+        kanvas.mutate(self.path, staged)
+        self.load()
+        self.page.js("document.querySelector('#view-plant').click()")
+        self.until("the stations", "document.querySelectorAll('#plant .station').length === 6")
+        station = lambda state, task: self.page.js(f"!!document.querySelector('#plant .st-{state} .crate[data-id=\"{task}\"]')")
+        self.assertTrue(station("doing", "BE-03"))
+        self.assertTrue(station("review", "BE-05"))
+        self.assertTrue(self.page.js("!!document.querySelector('#plant .st-doing.running')"))
+        self.assertFalse(self.page.js("!!document.querySelector('#plant .st-review.running')"))
+        self.assertTrue(self.page.js("!!document.querySelector('#plant .belt.flow')"))
+        self.assertTrue(self.page.js("!!document.querySelector('#plant .crate[data-id=\"BE-03\"] .lamp.on-green')"))
+        self.assertIn("Waits for your review", self.page.js("document.querySelector('#plant .crate[data-id=\"BE-05\"]').textContent"))
+        gauges = self.page.js("[...document.querySelectorAll('#plant .gauge')].map((g) => g.getAttribute('aria-label')).join('|')")
+        self.assertIn("Working: 1", gauges)
+        self.assertIn("Waiting for you: 1", gauges)
+        self.page.js("document.querySelector('#plant .crate[data-id=\"BE-05\"]').click()")
+        self.until("the panel", "document.querySelector('#panel .cid')?.textContent === 'BE-05'")
+        self.assertEqual(self.page.logged(), [])
+
+    def test_the_siren_switch_is_kept_and_nothing_sounds_by_itself(self):
+        self.load()
+        self.page.js("document.querySelector('#view-plant').click()")
+        self.until("the siren", "!!document.querySelector('#plant .plant-siren')")
+        self.assertIn("Siren off", self.page.js("document.querySelector('#plant .plant-siren').textContent"))
+        self.page.js("document.querySelector('#plant .plant-siren').click()")
+        self.until("the siren on", "document.querySelector('#plant .plant-siren').textContent.includes('Siren on')")
+        self.assertTrue(self.page.js("JSON.parse(localStorage.getItem('kanvas:prefs')).siren === true"))
+        self.assertEqual(self.page.logged(), [])
+
     def test_the_design_timeline_shows_each_comment_and_the_proposal_that_answers_it(self):
         def talked(board):
             task = kanvas.find_task(board, "BE-03")
@@ -617,7 +662,7 @@ class BrowserSmokeTests(unittest.TestCase):
 
         stop(self.server)
         self.until("the lost connection banner", "!document.querySelector('#lost').hidden")
-        lost = "A note typed while Kanvas is stopped."
+        lost = "A note typed while Factory is stopped."
         self.type_note(lost)
         self.until("the note back in its box", f"{NOTE_BOX}.value === {json.dumps(lost)}")
         self.assertIn("Not saved", self.page.js("document.querySelector('#toasts').innerText"))

@@ -26,7 +26,7 @@ import kanvas  # noqa: E402
 
 # The CLI processes the tests start inherit the environment; they must never reach a real board.
 os.environ.pop("KANVAS_BOARD", None)
-# Nor the boards a real Kanvas remembers between runs.
+# Nor the boards a real Factory remembers between runs.
 STATE_DIR = tempfile.mkdtemp(prefix="kanvas-state-")
 os.environ["KANVAS_STATE_DIR"] = STATE_DIR
 atexit.register(shutil.rmtree, STATE_DIR, True)
@@ -391,14 +391,14 @@ class FailedSaveTests(unittest.TestCase):
         board = {"kanvas": 1, "title": "", "groups": [], "tasks": [task("A-01")]}
         out = self.run_commits(
             "store = { save: async () => { throw new Error('tried to save'); } };\n"
-            "lost = 'Kanvas stopped running or cannot be reached';\n"
+            "lost = 'Factory stopped running or cannot be reached';\n"
             "(async () => {\n"
             "  const ok = await commit(ops.note('A-01', 'Typed text'), { onFail });\n"
             "  await saveQueue;\n"
             "  process.stdout.write(JSON.stringify({ ok, pending, notes: board.tasks[0].notes.length, failed, log }));\n"
             "})();", board)
-        self.assertEqual(out, {"ok": False, "pending": 0, "notes": 0, "failed": ["Kanvas stopped running or cannot be reached"],
-                               "log": ["Not saved: Kanvas stopped running or cannot be reached"]})
+        self.assertEqual(out, {"ok": False, "pending": 0, "notes": 0, "failed": ["Factory stopped running or cannot be reached"],
+                               "log": ["Not saved: Factory stopped running or cannot be reached"]})
 
 
 class LostConnectionTests(unittest.TestCase):
@@ -427,8 +427,8 @@ class LostConnectionTests(unittest.TestCase):
             "})();"
         )
         out = json.loads(run_html_js(self, code, "{}", [("function serverStore()", "function fileStore(")]))
-        down = ["Kanvas stopped running or cannot be reached", True]
-        closed = ["this board is no longer open in Kanvas", True]
+        down = ["Factory stopped running or cannot be reached", True]
+        closed = ["this board is no longer open in Factory", True]
         self.assertEqual(out, {
             "down load": down, "down poll": down, "down save": down,
             # Only reads give up on a request that hangs: a write may have landed, and waits for its answer.
@@ -1007,7 +1007,7 @@ class ReviewFlowTests(unittest.TestCase):
     def test_moving_on_waits_for_the_save_and_reads_the_board_it_wrote(self):
         board = self.board(task("FE-01", "review", "FE"), task("BE-01", "done", "BE"), task("FE-02", "review", "FE"),
                            task("BE-03", "review", "BE"), task("FE-03", "doing", "FE"), task("BE-04", "review", "BE"), task("G-01"))
-        lost = "Kanvas stopped running or cannot be reached"
+        lost = "Factory stopped running or cannot be reached"
         cases = [
             {"id": "BE-03", "undo": True},
             {"id": "BE-03", "undo": "FE-02"},  # Undo leaves the panel alone once the human opened another task
@@ -2001,7 +2001,7 @@ class AutomationTests(TempBoard):
         proc, took, _ = self.run_process("import time; time.sleep(60)", limits={"timeout": 60, "idle": 2})
         self.assertIn("wrote nothing", proc.stopped)
         self.assertLess(took, 20)
-        self.assertIn("Stopped by Kanvas because it wrote nothing", kanvas.stop_text(proc))
+        self.assertIn("Stopped by Factory because it wrote nothing", kanvas.stop_text(proc))
 
     def test_a_run_that_lasts_too_long_is_stopped_even_if_it_keeps_writing(self):
         code = "import time\nwhile True:\n    print('x'); time.sleep(0.2)"
@@ -2073,7 +2073,7 @@ class AutomationTests(TempBoard):
         with mock.patch.object(kanvas, "review_diff", return_value=("", "", "")), mock.patch.object(kanvas, "agent_run", side_effect=fake):
             outcome, text = kanvas.run_review(self.path, "DV-02")
         self.assertEqual(outcome, "failed")
-        self.assertIn("Stopped by Kanvas because it wrote nothing", self.get("DV-02")["notes"][-1]["text"])
+        self.assertIn("Stopped by Factory because it wrote nothing", self.get("DV-02")["notes"][-1]["text"])
         self.assertEqual(self.get("DV-02")["state"], "review")
 
     def test_a_stop_asked_to_a_run_that_no_longer_exists_is_settled_by_the_dispatcher(self):
@@ -3585,7 +3585,7 @@ class InitTests(unittest.TestCase):
         os.mkdir(os.path.join(self.dir, ".git"))
         sub = self.folder("src", "deep")
         out = self.init(cwd=sub)
-        self.assertEqual(out.splitlines()[0], f"Kanvas {kanvas.VERSION} in {self.dir}, the top folder of this git repository")
+        self.assertEqual(out.splitlines()[0], f"Factory {kanvas.VERSION} in {self.dir}, the top folder of this git repository")
         self.assertIn("created   kanvas.json", out)
         self.assertTrue(os.path.isfile(os.path.join(self.dir, "kanvas.json")))
         self.assertTrue(os.path.isfile(os.path.join(self.dir, ".agents", "skills", "kanvas", "SKILL.md")))
@@ -3603,7 +3603,7 @@ class InitTests(unittest.TestCase):
         os.mkdir(os.path.join(self.dir, ".git"))
         sub = self.folder("docs")
         out = self.init(".", cwd=sub)
-        self.assertEqual(out.splitlines()[0], f"Kanvas {kanvas.VERSION} in {sub}")
+        self.assertEqual(out.splitlines()[0], f"Factory {kanvas.VERSION} in {sub}")
         self.assertTrue(os.path.isfile(os.path.join(sub, "kanvas.json")))
         self.assertFalse(os.path.exists(os.path.join(self.dir, "kanvas.json")))
 
@@ -3612,7 +3612,7 @@ class InitTests(unittest.TestCase):
         app = self.folder("app")
         write_board(os.path.join(app, "kanvas.json"), kanvas.new_board("app"))
         out = self.init(cwd=self.folder("app", "src"))
-        self.assertEqual(out.splitlines()[0], f"Kanvas {kanvas.VERSION} in {app}, the folder of the existing kanvas.json")
+        self.assertEqual(out.splitlines()[0], f"Factory {kanvas.VERSION} in {app}, the folder of the existing kanvas.json")
         self.assertIn("kept      kanvas.json", out)
         self.assertFalse(os.path.exists(os.path.join(self.dir, "kanvas.json")))
         self.assertEqual(os.listdir(os.path.join(app, "src")), [])
@@ -3622,7 +3622,7 @@ class InitTests(unittest.TestCase):
             self.skipTest("the temporary folder is inside a git repository or below a kanvas.json")
         sub = self.folder("notes")
         out = self.init(cwd=sub)
-        self.assertEqual(out.splitlines()[0], f"Kanvas {kanvas.VERSION} in {sub}")
+        self.assertEqual(out.splitlines()[0], f"Factory {kanvas.VERSION} in {sub}")
         self.assertTrue(os.path.isfile(os.path.join(sub, "kanvas.json")))
         self.assertEqual(os.listdir(self.dir), ["notes"])
 
@@ -3632,7 +3632,7 @@ class InitTests(unittest.TestCase):
         self.assertNotIn("add this line", out)
         with open(os.path.join(self.dir, "AGENTS.md"), "rb") as f:
             self.assertEqual(f.read(), b"# Agent instructions\n\n"
-                                       b"Plan and track work on the Kanvas board; follow .agents/skills/kanvas/SKILL.md.\n")
+                                       b"Plan and track work on the Factory board; follow .agents/skills/kanvas/SKILL.md.\n")
         out = self.init()
         self.assertNotIn("AGENTS.md", out)
 
@@ -3689,7 +3689,7 @@ class InstalledCommandTests(TempBoard):
         skill = os.path.join(self.dir, ".agents", "skills", "kanvas")
         os.makedirs(skill, exist_ok=True)
         with open(os.path.join(skill, "kanvas.py"), "w", encoding="utf-8") as f:
-            f.write(f'"""Kanvas."""\n\n{text}\nFORMAT = 1\n')
+            f.write(f'"""Factory."""\n\n{text}\nFORMAT = 1\n')
 
     def hint(self, copy_version, version="0.5.0", **mode):
         self.write_copy(f'VERSION = "{copy_version}"')
@@ -3748,7 +3748,7 @@ class InstalledCommandTests(TempBoard):
             kanvas.main(["serve", "-h"])
         text = " ".join(out.getvalue().split())
         self.assertIn("--port PORT port to serve on (default: 8765), or the next free one up to 19 higher (8784 by default);", text)
-        self.assertIn("when a Kanvas already runs on any of these ports, serve opens the board there and returns", text)
+        self.assertIn("when a Factory already runs on any of these ports, serve opens the board there and returns", text)
 
     def test_missing_board_names_the_init_command(self):
         nowhere = argparse.Namespace()
@@ -3882,7 +3882,7 @@ class ImportExportTests(TempBoard):
         self.assertEqual(json.loads(m.group(2))["tasks"][0]["desc"], "</script><script>alert(1)</script>")
 
     def test_an_untitled_board_goes_by_its_name_in_the_page(self):
-        """As on the boards page: the name in its address when served, the one export recorded, else "Kanvas"."""
+        """As on the boards page: the name in its address when served, the one export recorded, else "Factory"."""
         code = ("globalThis.location = { pathname: '/my-project/' };\n"
                 "let board, store;\n"
                 "process.stdout.write(JSON.stringify(input.map(([title, kind, boardName]) => {\n"
@@ -3891,7 +3891,7 @@ class ImportExportTests(TempBoard):
                 "})));")
         cases = [["Mine", "server", None], ["", "server", None], ["", "snapshot", "exported"], ["", "file", None], ["", None, None]]
         out = run_html_js(self, code, json.dumps(cases), [("const boardHere =", "\nasync function refreshBoards")])
-        self.assertEqual(json.loads(out), ["Mine", "my-project", "exported", "Kanvas", "Kanvas"])
+        self.assertEqual(json.loads(out), ["Mine", "my-project", "exported", "Factory", "Factory"])
 
 
 class ConcurrencyTests(TempBoard):
@@ -4106,7 +4106,7 @@ class ServerTests(TempBoard):
     def test_serves_the_page_and_the_board(self):
         status, headers, body = self.request("GET", f"/{self.name}/")
         self.assertEqual(status, 200)
-        self.assertIn(b"<title>Kanvas</title>", body)
+        self.assertIn(b"<title>Factory</title>", body)
         status, headers, body = self.request("GET", self.api)
         self.assertEqual(status, 200)
         self.assertEqual(body, self.raw())
@@ -4463,7 +4463,7 @@ class ServerTests(TempBoard):
         self.assertEqual(listing["kanvas"], kanvas.VERSION)
         self.assertEqual([(b["name"], b["title"]) for b in listing["boards"]], [(self.name, "Test"), ("other", "Other")])
         self.assertEqual(self.request("GET", "/other")[1]["Location"], "/other/")
-        self.assertIn(b"<title>Kanvas</title>", self.request("GET", "/other/")[2])
+        self.assertIn(b"<title>Factory</title>", self.request("GET", "/other/")[2])
 
     def test_names_boards_after_their_folders(self):
         self.assertEqual(json.loads(self.open_board(self.path)[2])["name"], self.name)
@@ -4513,13 +4513,13 @@ class ServerTests(TempBoard):
     def test_serve_in_another_project_opens_its_board_in_the_running_kanvas(self):
         other = self.other_project()
         code, out, err = self.run_cli("serve", "--no-open", "--port", str(self.port), cwd=os.path.dirname(other))
-        self.assertIn(f"Opened in the Kanvas already running: http://127.0.0.1:{self.port}/other/", out)
+        self.assertIn(f"Opened in the Factory already running: http://127.0.0.1:{self.port}/other/", out)
         # The second project's own run sees its folder with symlinks resolved, as /private/var on macOS.
         self.assertEqual([os.path.realpath(b["path"]) for b in json.loads(self.request("GET", "/api/boards")[2])["boards"]],
                          [os.path.realpath(self.path), os.path.realpath(other)])
 
     def test_serve_finds_a_kanvas_that_took_a_later_port(self):
-        """A Kanvas that took port + 2 while the ports below were busy is found once they are free again."""
+        """A Factory that took port + 2 while the ports below were busy is found once they are free again."""
         for _ in range(10):
             server = kanvas.start_server(self.path, "127.0.0.1", 0, quiet=True)
             port = server.server_address[1]
@@ -4534,11 +4534,11 @@ class ServerTests(TempBoard):
         other = self.other_project()
         env = dict(os.environ, KANVAS_AGENT="")
         env.pop("KANVAS_BOARD", None)
-        # A timeout, since a serve that misses the running Kanvas starts its own and keeps running.
+        # A timeout, since a serve that misses the running Factory starts its own and keeps running.
         proc = subprocess.run([sys.executable, SCRIPT, "serve", "--no-open", "--port", str(port - 2)],
                               cwd=os.path.dirname(other), input=b"", capture_output=True, env=env, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8"))
-        self.assertIn(f"Opened in the Kanvas already running: http://127.0.0.1:{port}/other/", proc.stdout.decode("utf-8"))
+        self.assertIn(f"Opened in the Factory already running: http://127.0.0.1:{port}/other/", proc.stdout.decode("utf-8"))
         self.assertEqual([b["name"] for b in server.board_list()], [self.name, "other"])
         self.assertTrue(kanvas.port_free("127.0.0.1", port - 2))
 
@@ -4595,7 +4595,7 @@ class ServerTests(TempBoard):
         body = json.dumps({"path": self.other_project()}).encode("utf-8")
         status, reply = self.phone_request(port, "POST", "/api/boards", "box", body, {"Content-Type": "application/json"})
         self.assertEqual(status, 403)
-        self.assertIn("only from the computer running Kanvas", json.loads(reply)["error"])
+        self.assertIn("only from the computer running Factory", json.loads(reply)["error"])
         self.assertEqual([b["name"] for b in json.loads(self.request("GET", "/api/boards")[2])["boards"]], [self.name])
 
     def test_only_this_computer_sees_where_the_boards_live(self):
@@ -4632,7 +4632,7 @@ class ServerTests(TempBoard):
         self.addCleanup(os.remove, self.path + ".lock")
         with mock.patch.object(kanvas, "LOCK_TIMEOUT", 0.2):
             status, reply = self.phone_request(port, "PUT", self.api, "box", body, headers)
-            self.assertEqual((status, json.loads(reply)["error"]), (503, "The computer running Kanvas could not save the board"))
+            self.assertEqual((status, json.loads(reply)["error"]), (503, "The computer running Factory could not save the board"))
             status, _, reply = self.request("PUT", self.api, body, headers)
             self.assertEqual(status, 503)
             self.assertIn("lock file", json.loads(reply)["error"])
@@ -4695,7 +4695,7 @@ class ServerTests(TempBoard):
                     break
                 reply += chunk
         self.assertTrue(reply.startswith(b"HTTP/1.0 403"), reply[:40])
-        self.assertIn(b"Only the computer running Kanvas can open it to phones", reply)
+        self.assertIn(b"Only the computer running Factory can open it to phones", reply)
 
     def test_phones_that_come_through_tailscale_serve_cannot_open_boards_or_change_phone_access(self):
         """`tailscale serve` passes phones on to this computer's own address, by its Tailscale name and with X-Forwarded headers."""
@@ -4706,11 +4706,11 @@ class ServerTests(TempBoard):
                         {"Host": f"127.0.0.1:{self.port}", "X-Forwarded-For": "100.64.0.9"}, {"Host": "localhost", "X-Forwarded-Host": "box.tail1.ts.net"}):
             with self.subTest(headers=headers):
                 status, _, reply = self.request("POST", "/api/boards", body, dict(headers, **json_type))
-                self.assertEqual((status, json.loads(reply)["error"]), (403, "Boards open only from the computer running Kanvas"))
+                self.assertEqual((status, json.loads(reply)["error"]), (403, "Boards open only from the computer running Factory"))
                 status, _, reply = self.request("POST", f"/{self.name}/api/phone", b"{}", dict(headers, **json_type))
-                self.assertEqual((status, json.loads(reply)["error"]), (403, "Only the computer running Kanvas can open it to phones"))
+                self.assertEqual((status, json.loads(reply)["error"]), (403, "Only the computer running Factory can open it to phones"))
                 status, _, reply = self.request("DELETE", f"/{self.name}/api/phone", b"{}", dict(headers, **json_type))
-                self.assertEqual((status, json.loads(reply)["error"]), (403, "Only the computer running Kanvas can close it to phones"))
+                self.assertEqual((status, json.loads(reply)["error"]), (403, "Only the computer running Factory can close it to phones"))
                 status, _, reply = self.request("GET", f"/{self.name}/api/phone", headers=headers)
                 self.assertEqual((status, len(json.loads(reply)["urls"]), json.loads(reply)["manage"]), (200, 2, False))
                 status, _, reply = self.request("GET", "/api/boards", headers=headers)
@@ -4725,7 +4725,7 @@ class ServerTests(TempBoard):
                                     dict(json_type, Host="box.tail1.ts.net", **{"If-Match": headers["ETag"], "X-Forwarded-For": "100.64.0.9"}))
         self.assertEqual(status, 200)
         self.assertEqual(self.get("DV-04")["state"], "todo")
-        # This computer itself still opens boards and opens and closes Kanvas to phones, by each of its names.
+        # This computer itself still opens boards and opens and closes Factory to phones, by each of its names.
         self.assertIs(json.loads(self.request("GET", f"/{self.name}/api/phone")[2])["manage"], True)
         status, _, reply = self.open_board(other, host=f"localhost:{self.port}")
         self.assertEqual((status, json.loads(reply)["name"]), (200, "other"))
@@ -4846,7 +4846,7 @@ class ServerTests(TempBoard):
 
 
 class RememberTests(TempBoard):
-    """A Kanvas started again reopens the boards and the phone access it had."""
+    """A Factory started again reopens the boards and the phone access it had."""
 
     def setUp(self):
         super().setUp()
@@ -4921,6 +4921,25 @@ class RememberTests(TempBoard):
         self.assertEqual(server.phone[-1], f"http://100.64.0.7:{server.server_address[1]}/")
         server.phone_listener = None
 
+    def test_the_command_is_called_factory_and_kanvas_still_works(self):
+        for typed, expected in (("factory", "factory"), (r"C:\bin\factory.exe", "factory"), ("/usr/bin/kanvas", "kanvas"),
+                                ("kanvas-board", "kanvas"), ("", "kanvas")):
+            with self.subTest(typed=typed), mock.patch.object(kanvas.sys, "argv", [typed]):
+                self.assertEqual(kanvas.command_name(), expected)
+        with open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8") as f:
+            scripts = f.read().split("[project.scripts]")[1].split("[tool")[0]
+        for name in ("factory", "kanvas", "kanvas-board"):
+            self.assertIn(f'{name} = "kanvas_board:main"', scripts)
+
+    def test_the_product_is_called_factory_where_people_read_it(self):
+        with open(os.path.join(ROOT, "kanvas.html"), encoding="utf-8") as f:
+            page = f.read()
+        self.assertIn("<title>Factory</title>", page)
+        self.assertNotIn("<title>Kanvas</title>", page)
+        code, out, _ = self.run_cli("--version")
+        self.assertTrue(out.startswith("Factory "))
+        self.assertIn("Factory", self.run_cli("--help")[1].splitlines()[2] + self.run_cli("--help")[1])
+
     def test_the_state_lives_in_the_users_own_folders(self):
         cases = (("posix", "linux", {"XDG_STATE_HOME": "/x/state"}, "/x/state/kanvas/boards.json"),
                  ("posix", "linux", {}, os.path.expanduser("~/.local/state/kanvas/boards.json")),
@@ -4987,7 +5006,7 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(kanvas.main(["service", "install", "--tailscale"]), 0)
             with open(unit) as f:
                 self.assertIn("serve --saved --no-open", f.read().replace('"', ""))
-            # The search for a Kanvas started by hand comes after the service's own one stops, and before it starts again.
+            # The search for a Factory started by hand comes after the service's own one stops, and before it starts again.
             self.assertEqual(calls.mock_calls, [mock.call.run(["systemctl", "--user", "stop", "kanvas.service"]),
                                                 mock.call.find(kanvas.DEFAULT_PORT),
                                                 mock.call.run(["systemctl", "--user", "daemon-reload"]),
@@ -5003,12 +5022,12 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(kanvas.main(["service", "uninstall"]), 0)
             self.assertFalse(os.path.exists(unit))
         os.remove(kanvas.state_file())
-        self.assertIn("Kanvas now starts when you log in", out.getvalue())
-        self.assertIn("Kanvas no longer starts when you log in.", out.getvalue())
+        self.assertIn("Factory now starts when you log in", out.getvalue())
+        self.assertIn("Factory no longer starts when you log in.", out.getvalue())
 
     @contextlib.contextmanager
     def system(self, port):
-        """Service files in a temporary folder, system commands that succeed without running, and Kanvas's ports from `port` on."""
+        """Service files in a temporary folder, system commands that succeed without running, and Factory's ports from `port` on."""
         folder = tempfile.mkdtemp(prefix="kanvas-config-")
         self.addCleanup(shutil.rmtree, folder, True)
         with mock.patch.object(kanvas, "service_paths", return_value=os.path.join(folder, "kanvas.service")), \
@@ -5017,7 +5036,7 @@ class ServiceTests(unittest.TestCase):
             yield out
 
     def kanvas_above_free_ports(self):
-        """Start a Kanvas on a port with the two ports below it free, as one that took port + 2; return its port."""
+        """Start a Factory on a port with the two ports below it free, as one that took port + 2; return its port."""
         for _ in range(10):
             server = kanvas.start_server(None, "127.0.0.1", 0, quiet=True)
             port = server.server_address[1]
@@ -5048,13 +5067,13 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("It has not answered yet; `kanvas service status` says when it runs.\n", out.getvalue())
 
     def test_install_says_when_a_kanvas_started_by_hand_keeps_the_boards(self):
-        """The service's `serve --saved` would join that Kanvas and exit, so nothing serves the boards once it stops."""
+        """The service's `serve --saved` would join that Factory and exit, so nothing serves the boards once it stops."""
         port = self.kanvas_above_free_ports()
         for args, again in (([], "kanvas service install"), (["--tailscale"], "kanvas service install --tailscale")):
             with self.subTest(args=args), self.system(port - 2) as out:
                 self.assertEqual(kanvas.main(["service", "install", *args]), 0)
                 text = out.getvalue()
-                self.assertIn(f"Kanvas already runs at http://127.0.0.1:{port}/, started with `kanvas serve`", text)
+                self.assertIn(f"Factory already runs at http://127.0.0.1:{port}/, started with `kanvas serve`", text)
                 self.assertIn(f"stop it (Ctrl+C in its terminal) and run `{again}` again.", text)
                 self.assertNotIn("Open ", text)
         os.remove(kanvas.state_file())
@@ -5127,10 +5146,10 @@ class ServeWithoutBoardTests(unittest.TestCase):
                 board = os.path.join(top, "kanvas.json")
                 self.assertTrue(os.path.isfile(board))
                 self.assertTrue(os.path.isfile(os.path.join(top, ".agents", "skills", "kanvas", "SKILL.md")))
-                self.assertIn(f"Kanvas {kanvas.VERSION} in {top}, the top folder of this git repository", out)
+                self.assertIn(f"Factory {kanvas.VERSION} in {top}, the top folder of this git repository", out)
                 self.assertIn("created   kanvas.json", out)
                 self.assertNotIn("Open the board:", out)
-                self.assertIn(f"Kanvas board: {board}", out)
+                self.assertIn(f"Factory board: {board}", out)
                 self.assertEqual(self.start.call_args[0][0], board)
                 self.server.serve_forever.assert_called_once_with()
 
@@ -5195,7 +5214,7 @@ class ServeWithoutBoardTests(unittest.TestCase):
         with mock.patch.object(kanvas, "find_running", return_value=("http://127.0.0.1:8765/", kanvas.VERSION)), \
                 mock.patch.object(sys, "stdout", io.StringIO()) as stdout:
             self.assertEqual(kanvas.main(["serve", "--saved", "--no-open"]), 0)
-        self.assertEqual(stdout.getvalue(), "Kanvas already runs at http://127.0.0.1:8765/\n")
+        self.assertEqual(stdout.getvalue(), "Factory already runs at http://127.0.0.1:8765/\n")
 
     def test_tailscale_and_host_do_not_mix(self):
         top = self.project()
