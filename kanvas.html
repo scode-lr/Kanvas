@@ -452,8 +452,22 @@ button.say { padding: 1px 6px; gap: 5px; font: 600 12px var(--mono); vertical-al
 .assist-log:empty { display: none; }
 .assist-msg { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .assist-msg > b { font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
-.assist-msg > div { white-space: pre-wrap; font-size: 13px; line-height: 1.45; max-height: 13em; overflow: auto; overflow-wrap: anywhere; }
+.assist-msg > div:not(.md) { font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
 .assist-questions { margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.45; }
+.assist-msg { padding: 0; }
+.assist-msg > summary { display: flex; gap: 8px; align-items: baseline; padding: 7px 9px; cursor: pointer; font-size: 13px; list-style: none; }
+.assist-msg > summary::-webkit-details-marker { display: none; }
+.assist-msg > summary::before { content: "▸"; color: var(--faint); }
+.assist-msg[open] > summary::before { content: "▾"; }
+.assist-msg > summary > b { flex: none; font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.assist-msg > summary > span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.assist-msg[open] > summary > span { display: none; }
+.assist-msg > .md { padding: 0 12px 10px 24px; max-height: none; overflow: visible; white-space: normal; }
+.assist-ask { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius: 8px; background: var(--surface); }
+.assist-ask > b { font-size: 13px; }
+.assist-use { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.assist-talk > summary { cursor: pointer; font-size: 12.5px; color: var(--muted); padding: 4px 2px; }
+.assist-talk > .assist-log { margin-top: 6px; }
 .assist-status { margin: 0; font-size: 12.5px; color: var(--muted); }
 .assist-status:empty { display: none; }
 .assist-error { color: #b42318; }
@@ -4160,7 +4174,14 @@ function assistPanel({ kind, id, label, hint, fields, apply }) {
   const go = h("button", { type: "button", class: "primary" }, icon("spark"), goLabel);
   const panel = h("div", { class: "assist" }, h("div", { class: "assist-bar" }, go, h("span", { class: "hint" }, hint)), log, status);
   const fail = (message) => { status.className = "assist-status assist-error"; status.textContent = message; go.disabled = false; };
-  const said = (job) => log.replaceChildren(...job.messages.map((m) => h("div", { class: "assist-msg" }, h("b", {}, AGENT_NAMES[m.agent] || m.agent), h("div", {}, m.text))));
+  // What an agent said: its name and one line of it, and the whole text, drawn as markdown, when opened.
+  const gist = (text) => {
+    const line = String(text).split("\n").map((l) => l.replace(/^[#>*\-\s\d.)]+/, "").replace(/[*`_]/g, "").trim()).find((l) => l.length > 3) || "";
+    return line.length > 110 ? `${line.slice(0, 107)}…` : line;
+  };
+  const message = (m, open) => h("details", { class: "assist-msg", open }, h("summary", {}, h("b", {}, AGENT_NAMES[m.agent] || m.agent), h("span", {}, gist(m.text))),
+    h("div", { class: "md", html: markdown(m.text) }));
+  const said = (job) => log.replaceChildren(...job.messages.map((m, i) => message(m, i === job.messages.length - 1 && job.status === "running")));
   let asked = [];
   const finish = (job) => {
     const { questions = [], duplicates = [], draft = {} } = job.result || {};
@@ -4169,12 +4190,17 @@ function assistPanel({ kind, id, label, hint, fields, apply }) {
     status.textContent = `${job.messages.length} ${job.messages.length === 1 ? "answer" : "answers"} · ${job.turns} turns · $${Number(job.cost).toFixed(2)}`;
     goLabel.textContent = "Ask again";
     go.disabled = false;
-    log.append(...compact(
-      questions.length || duplicates.length ? h("div", { class: "assist-msg" }, h("b", {}, "For you"),
+    const talk = job.messages.length ? h("details", { class: "assist-talk" }, h("summary", {}, `What they said (${job.messages.length})`),
+      h("div", { class: "assist-log" }, job.messages.map((m) => message(m, false)))) : null;
+    log.replaceChildren(...compact(
+      questions.length || duplicates.length ? h("div", { class: "assist-ask" }, h("b", {}, asked.length ? `${asked.length} ${asked.length === 1 ? "question" : "questions"} for you` : "For you"),
         duplicates.length ? h("div", {}, `May duplicate ${duplicates.join(", ")}.`) : null,
         asked.length ? h("div", { class: "qa-list assist-questions" }, asked.map((q) => q.el)) : null,
-        asked.length ? h("div", { class: "hint" }, "Answer what you can, then press “Ask again with my answers”.") : null) : null,
-      h("button", { type: "button", class: "primary", onclick: (e) => { apply(draft); e.currentTarget.textContent = "Draft applied"; e.currentTarget.disabled = true; } }, "Use the draft")));
+        asked.length ? h("div", { class: "hint" }, "Answer what you can and press “Ask again with my answers”, or use the draft as it is.") : null) : null,
+      h("div", { class: "assist-use" },
+        h("button", { type: "button", class: "primary", onclick: (e) => { apply(draft); e.currentTarget.textContent = "Draft applied"; e.currentTarget.disabled = true; } }, "Use the draft"),
+        h("span", { class: "hint" }, "It fills the form below; you can still edit it.")),
+      talk));
     if (asked.length) goLabel.textContent = "Ask again with my answers";
   };
   go.addEventListener("click", async () => {
@@ -4315,7 +4341,7 @@ async function approveDefinition(t) {
 }
 
 async function startWorkDialog(t) {
-  const planField = h("textarea", { name: "plan", rows: 8, required: true,
+  const planField = h("textarea", { name: "plan", rows: 14, required: true,
     placeholder: "Architecture, repositories, API/data changes, security, tests, observability, rollout and rollback…" });
   const data = await modal(`Architect + Senior Grill me · ${t.id}`, [
     h("p", {}, "Record the construction plan before a worktree or implementation starts."),
