@@ -685,6 +685,10 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 .help h4:first-child { margin-top: 0; }
 @media (min-width: 761px) {
   dialog.dlg:has(> form > .help) { width: min(860px, calc(100vw - 32px)); }
+  /* The dialogs where an agent talks with you need room to read: wide on a computer, full width on a phone (below). */
+  dialog.dlg:has(.assist), dialog.dlg:has(.wiz-steps) { width: min(1120px, calc(100vw - 48px)); max-height: 94dvh; overflow-y: auto; }
+  dialog.dlg:has(.assist) textarea[name=plan] { min-height: 22em; }
+  .assist-ask .qa-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); align-items: start; }
   .help-groups { grid-template-columns: 1fr 1fr; }
 }
 .ctx-menu { position: fixed; z-index: 40; min-width: 210px; max-width: 340px; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-lg); display: flex; flex-direction: column; font-size: 13px; animation: enter .12s ease-out; }
@@ -2706,11 +2710,12 @@ const ops = {
     t.state = "todo";
     addNote(t, "PO/TL product definition approved after Grill me.", at);
   },
-  startWork: (id, plan, at = nowIso()) => (b) => {
+  startWork: (id, plan, design = null, at = nowIso()) => (b) => {
     const t = mustFind(b, id);
     if (vstateIn(indexOf(b), t) !== "todo") throw new Error(`${t.id} is not ready to start`);
     if (!t.definition?.approved) throw new Error(`${t.id} has no approved product definition`);
     t.work = { by: "human", at, plan, repositories: [...(t.definition.repositories || [])] };
+    if (typeof design === "boolean") t.work.needs_design = design;
     delete t.review;
     t.state = "doing";
     addNote(t, plan, at);
@@ -4248,14 +4253,6 @@ async function approveDefinition(t) {
   const agentSelect = repositories.length ? h("select", { name: "agent" }, ...Object.entries(agentRoles()).filter(([name]) => !name.startsWith("reviewer") && !["curator", "designer", "po"].includes(name)).map(([name, r]) =>
     h("option", { value: name, selected: name === (d.agent || "implementer") }, `${name} · ${r.model || "default model"}`))) : null;
   const fields = () => ({ outcome: outcome.value, needs: needs.value, acceptance: acceptance.value, non_goals: nonGoals.value });
-  // One plain check decides whether the designer proposes the UI before anything is built. It starts on when the task
-  // changes an application repository, and stays as the owner leaves it.
-  const designRepositories = board.automation?.design?.repositories || ["front"];
-  const needsDesign = h("input", { type: "checkbox", name: "design", checked: typeof d.design === "boolean" ? d.design : [...selected].some((r) => designRepositories.includes(r)) });
-  if (repoSelect && typeof d.design !== "boolean") repoSelect.addEventListener("change", () => {
-    needsDesign.checked = [...repoSelect.selectedOptions].some((o) => designRepositories.includes(o.value));
-  });
-
   // Step 1: the questions and the answers.
   const steps = wizardSteps(["Refine with the product owner", "Definition"]);
   const status = h("p", { class: "assist-status", role: "status" });
@@ -4276,8 +4273,6 @@ async function approveDefinition(t) {
     h("label", { class: "field" }, "Acceptance criteria", acceptance),
     h("label", { class: "field" }, "Non-goals", nonGoals),
     repoSelect ? h("label", { class: "field" }, "Repositories", repoSelect, h("span", { class: "hint" }, "Select every repository the implementation may change.")) : null,
-    h("label", { class: "field check-field" }, needsDesign, h("span", {}, "Requires design (designer)"),
-      h("span", { class: "hint" }, "The designer proposes the screens and you approve them before anything is built.")),
     agentSelect ? h("label", { class: "field" }, "Agent", agentSelect,
       h("span", { class: "hint" }, "Who implements it. Leave the implementer unless the task needs a stronger model.")) : null,
     store.readOnly ? null : h("div", { class: "wiz-actions" }, h("button", { type: "button", class: "ghost", onclick: () => goTo(0) }, "Back to the questions")));
@@ -4333,13 +4328,15 @@ async function approveDefinition(t) {
   if (!data) return;
   const definition = Object.fromEntries(["outcome", "needs", "acceptance", "non_goals"].map((k) => [k, data.get(k).trim()]));
   if (data.get("priority")) definition.priority = data.get("priority");
-  definition.design = data.get("design") !== null;
   if (repositories.length) definition.repositories = data.getAll("repositories").map(String);
   if (data.get("agent") && data.get("agent") !== "implementer") definition.agent = data.get("agent");
   undoable(ops.define(t.id, seenOf(t), definition), `Approved the product definition of ${t.id}`, { onFail: () => approveDefinition(t) });
 }
 
 async function startWorkDialog(t) {
+  // One plain check decides whether a design comes before the build. It starts on when the task changes an application repository.
+  const designRepositories = board.automation?.design?.repositories || ["front"];
+  const needsDesign = h("input", { type: "checkbox", name: "design", checked: (t.definition?.repositories || []).some((r) => designRepositories.includes(r)) });
   const planField = h("textarea", { name: "plan", rows: 14, required: true,
     placeholder: "Architecture, repositories, API/data changes, security, tests, observability, rollout and rollback…" });
   const data = await modal(`Architect + Senior Grill me · ${t.id}`, [
@@ -4349,10 +4346,12 @@ async function startWorkDialog(t) {
       fields: () => ({ plan: planField.value }), apply: (draft) => { planField.value = draft.plan; },
     }),
     h("label", { class: "field" }, "Technical construction plan", planField),
+    h("label", { class: "field check-field" }, needsDesign, h("span", {}, "Requires design (designer)"),
+      h("span", { class: "hint" }, "After this plan the designer proposes the screens and you approve them before anything is built.")),
   ], { ok: "Start construction" });
   if (!data) return;
   const plan = data.get("plan").trim();
-  undoable(ops.startWork(t.id, plan), `Started ${t.id} with a technical plan`, { onFail: () => startWorkDialog(t) });
+  undoable(ops.startWork(t.id, plan, data.get("design") !== null), `Started ${t.id} with a technical plan`, { onFail: () => startWorkDialog(t) });
 }
 
 // The conversation about a design, oldest first: each proposal of the designer, each answer of the human and the approval.

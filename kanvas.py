@@ -1807,12 +1807,11 @@ def design_applies(task, config):
     has not run yet and changes a repository that needs a design."""
     work = task.get("work") if isinstance(task.get("work"), dict) else {}
     run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
-    definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
     if not (config["design"]["enabled"] and task.get("state") == "doing" and not run.get("status")):
         return False
-    # The "Requires design" check of the product definition decides; a task defined before it existed follows its repositories.
-    if isinstance(definition.get("design"), bool):
-        return definition["design"]
+    # The "Requires design" check of the plan dialog decides; a task started before it existed follows its repositories.
+    if isinstance(work.get("needs_design"), bool):
+        return work["needs_design"]
     return bool(set(task_repository_ids(task)) & set(config["design"]["repositories"]))
 
 

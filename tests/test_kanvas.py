@@ -5736,12 +5736,15 @@ class LayoutTests(unittest.TestCase):
 class DesignCheckTests(unittest.TestCase):
     config = {"design": {"enabled": True, "repositories": ["front"]}}
 
-    def task(self, **definition):
-        return {"id": "X-1", "state": "doing", "definition": {"repositories": ["api"], **definition}}
+    def task(self, needs_design=None, repositories=("api",)):
+        work = {"repositories": list(repositories)}
+        if needs_design is not None:
+            work["needs_design"] = needs_design
+        return {"id": "X-1", "state": "doing", "definition": {"repositories": list(repositories)}, "work": work}
 
-    def test_the_check_decides_when_it_is_set(self):
-        self.assertTrue(kanvas.design_applies(self.task(design=True), self.config))
-        self.assertFalse(kanvas.design_applies({**self.task(design=False), "work": {"repositories": ["front"]}}, self.config))
+    def test_the_check_of_the_plan_decides_when_it_is_set(self):
+        self.assertTrue(kanvas.design_applies(self.task(True), self.config))
+        self.assertFalse(kanvas.design_applies(self.task(False, ["front"]), self.config))
 
     def test_a_task_without_the_check_follows_its_repositories(self):
         self.assertFalse(kanvas.design_applies(self.task(), self.config))
