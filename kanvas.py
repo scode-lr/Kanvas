@@ -1872,14 +1872,25 @@ def mark_busy(path, task_id, who):
 
 
 def clear_busy_marks(path):
-    """When Factory starts nothing is being worked on, so any mark a crash left behind is stale."""
-    if not any(isinstance((t.get("work") or {}).get("busy"), dict) for t in load_board(path)["tasks"]):
+    """When Factory starts nothing is being worked on, so any mark a crash or a restart left behind is stale: a run that
+    still says queued or running was cut off, and is marked failed so that `retry` (the Retry button) continues it."""
+    def live(t):
+        work = t.get("work") if isinstance(t.get("work"), dict) else {}
+        run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+        return isinstance(work.get("busy"), dict) or run.get("status") in ("queued", "running")
+    if not any(live(t) for t in load_board(path)["tasks"]):
         return
 
     def op(board):
         for t in board["tasks"]:
-            if isinstance(t.get("work"), dict):
-                t["work"].pop("busy", None)
+            if not isinstance(t.get("work"), dict):
+                continue
+            t["work"].pop("busy", None)
+            run = t["work"].get("automation")
+            if isinstance(run, dict) and run.get("status") in ("queued", "running") and not t["work"].get("stop"):
+                message = "Factory restarted while the agent was working; its work is kept in the worktree. Press Retry to continue."
+                t["work"]["automation"] = {**run, "status": "failed", "updated": now_iso(), "summary": message}
+                add_note(t, "Automation interrupted: " + message, "kanvas-runner")
     mutate(path, op)
 
 

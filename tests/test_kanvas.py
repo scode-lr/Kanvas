@@ -2973,6 +2973,16 @@ class AutomationTests(TempBoard):
         self.assertEqual(task["state"], "todo")
         self.assertIn("could not write the technical plan: boom", task["notes"][-1]["text"])
 
+    def test_a_run_cut_off_by_a_restart_is_marked_failed_so_it_can_be_retried(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        board = self.automated_board(repo)
+        kanvas.find_task(board, "DV-02")["work"]["automation"] = {"status": "running", "updated": "2026-11-02T10:00:00Z", "round": 1}
+        self.assertEqual(self.scan(board), [])
+        task = self.get("DV-02")
+        self.assertEqual(task["work"]["automation"]["status"], "failed")
+        self.assertIn("Press Retry", task["notes"][-1]["text"])
+
     def test_a_task_sent_back_to_doing_runs_again_as_the_next_round(self):
         repo = os.path.join(self.dir, "front")
         os.makedirs(repo)
