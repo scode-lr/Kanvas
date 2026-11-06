@@ -394,6 +394,7 @@ button.add-line:hover { color: var(--text); }
 .design-spec summary { cursor: pointer; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
 .busy-note { display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin: 0 0 10px; border-radius: 8px; color: var(--text);
   background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.tg-code { font: 700 32px/1 ui-monospace, monospace; letter-spacing: .25em; text-align: center; padding: 14px 0 14px .25em; border: 1px dashed var(--border-strong); border-radius: 10px; user-select: all; }
 .busy-text { flex: 1; min-width: 0; }
 .busy-note button { flex: none; }
 .busy-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); animation: busy-pulse 1.2s ease-in-out infinite; }
@@ -3851,7 +3852,7 @@ const moveTo = (t, state) => undoable(ops.state(t.id, seenOf(t), state), moveWor
 const unlink = (id, dep) => undoable(ops.removeDep(id, dep), `${id} no longer waits for ${dep}`);
 
 // The built-in agent roles, which kanvas.py has too; the board's automation.agents changes and adds to them.
-const DEFAULT_AGENT_ROLES = { implementer: { model: "sonnet" }, complex: { model: "opus" }, reviewer: { model: "haiku" }, "reviewer-strong": { model: "sonnet" }, curator: { model: "haiku" }, designer: { model: "sonnet" } };
+const DEFAULT_AGENT_ROLES = { implementer: { model: "sonnet" }, complex: { model: "opus" }, reviewer: { model: "haiku" }, "reviewer-strong": { model: "sonnet" }, curator: { model: "haiku" }, designer: { model: "sonnet" }, po: { model: "sonnet" } };
 
 function agentRoles() {
   const given = board.automation?.agents && typeof board.automation.agents === "object" ? board.automation.agents : {};
@@ -3911,7 +3912,8 @@ function assistPanel({ kind, id, label, hint, fields, apply }) {
 }
 
 async function approveDefinition(t) {
-  const d = t.definition || {};
+  // An idea that came through the inbox already has the product owner's draft: the dialog starts from it.
+  const d = t.definition || t.inbox?.draft || {};
   const repositories = Array.isArray(board.automation?.repositories) ? board.automation.repositories : [];
   const selected = new Set(d.repositories || []);
   const outcome = h("textarea", { name: "outcome", rows: 3, required: true, value: d.outcome || "", placeholder: "What changes for the user or the business?" });
@@ -3920,7 +3922,7 @@ async function approveDefinition(t) {
   const nonGoals = h("textarea", { name: "non_goals", rows: 2, value: d.non_goals || "", placeholder: "What is explicitly outside this task?" });
   const repoSelect = repositories.length ? h("select", { name: "repositories", multiple: true, size: Math.min(6, repositories.length), required: true },
     ...repositories.map((r) => h("option", { value: r.id, selected: selected.has(r.id) }, r.name || r.id))) : null;
-  const agentSelect = repositories.length ? h("select", { name: "agent" }, ...Object.entries(agentRoles()).filter(([name]) => !name.startsWith("reviewer") && !["curator", "designer"].includes(name)).map(([name, r]) =>
+  const agentSelect = repositories.length ? h("select", { name: "agent" }, ...Object.entries(agentRoles()).filter(([name]) => !name.startsWith("reviewer") && !["curator", "designer", "po"].includes(name)).map(([name, r]) =>
     h("option", { value: name, selected: name === (d.agent || "implementer") }, `${name} · ${r.model || "default model"}`))) : null;
   const data = await modal(`PO + TL Grill me · ${t.id}`, [
     h("p", {}, "Define the product need before making this task available for development."),
@@ -4721,6 +4723,45 @@ function showDialog(dlg) {
 }
 
 // The board's address for phones on Tailscale, as a QR code; opens Kanvas to phones first if needed.
+// Connects the private Telegram bot: the owner pastes the token BotFather gave, then sends the code shown here to the bot,
+// and that Telegram account is the only one heard. The token goes to Kanvas on this computer and is never shown again.
+function telegramDialog() {
+  const body = h("div", { class: "phone" });
+  const gone = "Kanvas stopped running or cannot be reached.";
+  let timer = null;
+  const call = (action, extra = {}) => fetch("api/telegram", action ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...extra }) } : { cache: "no-store" })
+    .then(async (r) => { const info = await r.json().catch(() => ({})); if (!r.ok) throw new Error(info.error || gone); return info; }, () => { throw new Error(gone); });
+  const problem = (e) => body.append(h("p", { class: "phone-error" }, e.message));
+  const again = (action) => (e) => { e.currentTarget.disabled = true; call(action).then(show, problem); };
+  const show = (info) => {
+    clearInterval(timer);
+    const children = [];
+    if (!info.connected) {
+      const token = h("input", { type: "password", name: "token", autocomplete: "off", spellcheck: false, placeholder: "123456:ABC-DEF…" });
+      const go = h("button", { type: "button", class: "primary", onclick: () => { go.disabled = true; call("connect", { token: token.value }).then(show, (e) => { go.disabled = false; problem(e); }); } }, "Connect");
+      children.push(
+        h("p", {}, "A private bot on your own Telegram, to send ideas and incidents to the product owner from anywhere."),
+        h("ol", {}, h("li", {}, "In Telegram, talk to ", h("b", {}, "@BotFather"), ", send ", h("code", {}, "/newbot"), " and follow its steps. It gives you a token."), h("li", {}, "Paste the token here.")),
+        h("label", { class: "field" }, "Bot token", token), go,
+        h("p", { class: "phone-note" }, "Kanvas keeps the token in its own folder on this computer. Agents never receive it."));
+    } else if (info.code) {
+      children.push(h("p", {}, `Bot @${info.bot} is connected. Now send this code to it from your own Telegram account:`),
+        h("div", { class: "tg-code", "aria-label": `Code ${info.code}` }, info.code),
+        h("p", { class: "phone-note" }, "It works once and expires in 10 minutes. Only the account that sends it will be heard."));
+      timer = setInterval(() => call().then((i) => { if (!i.code) show(i); }, () => {}), 2000);
+    } else {
+      children.push(h("p", {}, info.users ? `Bot @${info.bot} is listening to ${info.users} Telegram account${info.users === 1 ? "" : "s"}. Write to it: anything you send is an idea or an incident.`
+        : `Bot @${info.bot} is connected, but no Telegram account is paired yet.`),
+        h("button", { type: "button", onclick: again("pair") }, info.users ? "Pair another account" : "Show a new code"));
+    }
+    if (info.connected) children.push(h("button", { type: "button", class: "danger", onclick: again("disconnect") }, "Disconnect Telegram"));
+    body.replaceChildren(...children);
+  };
+  body.append(h("p", {}, "Loading…"));
+  call().then(show, (e) => { body.replaceChildren(); problem(e); });
+  modal("Connect Telegram", body, { ok: "Close", cancel: null }).then(() => clearInterval(timer));
+}
+
 function phoneDialog() {
   const body = h("div", { class: "phone" });
   const port = location.port || "80";
@@ -5331,6 +5372,7 @@ function boardMenu() {
     store.readOnly ? null : { label: "Rename board", icon: "edit", run: () => { ui.editingTitle = true; renderHeader(); } },
     store.readOnly ? null : { label: "Groups…", icon: "lanes", run: groupsDialog },
     store.kind === "server" ? { label: "Open on your phone…", icon: "phone", run: phoneDialog } : null,
+    store.kind === "server" && !store.readOnly ? { label: "Connect Telegram…", icon: "ask", run: telegramDialog } : null,
     phone.matches ? null : "sep",
     phone.matches ? null : { label: ["Keyboard shortcuts", keys("?")], icon: "keyboard", run: helpDialog },
   ];

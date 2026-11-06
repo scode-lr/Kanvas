@@ -482,6 +482,23 @@ class BrowserSmokeTests(unittest.TestCase):
         self.until("one device", "document.querySelectorAll('.studio .device-frame').length === 1")
         self.assertEqual(self.page.logged(), [])
 
+    def test_the_board_menu_connects_telegram_with_a_token_field_and_nothing_secret_shown(self):
+        self.load()
+        self.until("the board menu", "!!document.querySelector('button.board-title')")
+        self.page.js("document.querySelector('button.board-title').click()")
+        self.until("the menu item", "[...document.querySelectorAll('[role=menuitem]')].some((i) => i.textContent.includes('Connect Telegram'))")
+        self.page.js("[...document.querySelectorAll('[role=menuitem]')].find((i) => i.textContent.includes('Connect Telegram')).click()")
+        self.until("the dialog", "!!document.querySelector('dialog.dlg[open] input[name=token]')")
+        dialog = self.page.js("document.querySelector('dialog.dlg[open]').textContent")
+        self.assertIn("@BotFather", dialog)
+        self.assertIn("/newbot", dialog)
+        self.assertEqual(self.page.js("document.querySelector('dialog.dlg[open] input[name=token]').type"), "password")
+        self.page.js("document.querySelector('dialog.dlg[open] input[name=token]').value = 'nope'; "
+                     "[...document.querySelectorAll('dialog.dlg[open] button')].find((b) => b.textContent === 'Connect').click()")
+        self.until("the refusal", "document.querySelector('dialog.dlg[open] .phone-error')?.textContent.includes('bot token')")
+        # The 400 for the made-up token is the one thing the page may log.
+        self.assertEqual([m for m in self.page.logged() if "400" not in m], [])
+
     def test_the_studio_shows_what_was_built_next_to_the_design(self):
         png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
         folder = os.path.join(self.dir, "demo", ".kanvas", "evidence", "BE-03", "final")
@@ -528,12 +545,13 @@ class BrowserSmokeTests(unittest.TestCase):
             task["work"] = {"by": "human", "plan": "Build it", "busy": {"by": "designer", "at": kanvas.now_iso()}}
         kanvas.mutate(self.path, busy)
         self.load("#BE-03")
-        self.until("the notice", "!!document.querySelector('#panel .busy-note button')")
-        self.page.js("document.querySelector('#panel .busy-note button').click()")
+        # The panel is drawn again as the page learns more about the task: wait for the button and click it exactly once.
+        self.until("the Stop button", "(() => { const b = document.querySelector('#panel .busy-note button'); if (!b) return false; b.click(); return true; })()")
         self.until("the dialog", "!!document.querySelector('dialog.dlg[open]')")
         self.page.js("document.querySelector('dialog.dlg[open] button[value=ok]').click()")
         self.wait_for("the stop request in kanvas.json", lambda: bool(kanvas.find_task(
-            kanvas.load_board(self.path), "BE-03")["work"].get("stop")))
+            kanvas.load_board(self.path), "BE-03")["work"].get("stop")),
+            details=lambda: f"The page shows {self.page.js('document.body.innerText.slice(-600)')!r} and logged {self.page.errors}")
         self.assertEqual(self.page.logged(), [])
 
     def test_an_old_mark_does_not_lock_a_task(self):

@@ -12,11 +12,14 @@ Python 3.8+, standard library only. Run `python kanvas.py -h` for commands.
 
 import argparse
 import errno
+import base64
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -823,9 +826,14 @@ GITHUB_TOKEN_VARS = ("KANVAS_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTE
 PROTECTED_BRANCHES = ("dev", "main", "master")
 
 
+# Other credentials of Kanvas's own that an agent must not inherit: the token of the Telegram bot.
+SECRET_VARS = ("KANVAS_TELEGRAM_TOKEN",)
+
+
 def agent_environment():
-    """The environment the agent runs in: Kanvas's own without GitHub tokens or the SSH agent."""
-    return {k: v for k, v in os.environ.items() if k.upper() not in GITHUB_TOKEN_VARS and k.upper() != "SSH_AUTH_SOCK"}
+    """The environment the agent runs in: Kanvas's own without GitHub tokens, the bot's token or the SSH agent."""
+    return {k: v for k, v in os.environ.items()
+            if k.upper() not in GITHUB_TOKEN_VARS and k.upper() not in SECRET_VARS and k.upper() != "SSH_AUTH_SOCK"}
 
 
 def publisher_environment():
@@ -1050,6 +1058,9 @@ DEFAULT_AGENTS = {
     # Proposes the UI/UX of a front task before anyone implements it; it reads the app and the design rules, nothing else.
     "designer": {"agent": "designer", "model": "sonnet", "effort": "medium", "max_turns": 15, "timeout_minutes": 15,
                  "max_budget_usd": 1, "allowed_tools": ["Read", "Glob", "Grep"]},
+    # Turns an idea or an incident the owner sends from their phone into a task with its definition. Reads, never writes.
+    "po": {"agent": "product-owner", "model": "sonnet", "effort": "low", "max_turns": 12, "timeout_minutes": 10,
+           "max_budget_usd": 0.5, "allowed_tools": ["Read", "Glob", "Grep"]},
     # Keeps the documentation repository in step with an accepted task; it only edits documentation, so it needs no shell.
     "curator": {"agent": "brain-curator", "model": "haiku", "effort": "low", "max_turns": 15, "timeout_minutes": 15,
                 "max_budget_usd": 0.5, "allowed_tools": ["Read", "Edit", "Write", "Glob", "Grep"]},
@@ -2850,6 +2861,665 @@ def cmd_mcp(args):
             stdout.flush()
 
 
+# ---------------------------------------------------------------------------
+# The inbox: the owner sends a raw idea or an incident someone reported, from the phone (Telegram or the inbox page) or the
+# terminal, and the product owner turns it into a task: it reads the documentation and the board, names the task, drafts
+# the product definition and asks only what it cannot infer. The owner answers, and approves the definition with one tap.
+# What a remote channel may do stops there: starting the work (plan, design, running agents, which cost tokens) stays with
+# the board.
+
+INBOX_KINDS = ("idea", "bug", "client", "question")
+INBOX_STALE_MINUTES = 30
+OWNER_NAMES = ("owner", "human")
+
+
+def inbox_of(task):
+    return task.get("inbox") if isinstance(task.get("inbox"), dict) else {}
+
+
+def inbox_tasks(board, open_only=True):
+    """The tasks that came through the inbox and still wait for the owner's approval of their definition."""
+    return [t for t in board["tasks"] if inbox_of(t) and (not open_only or (t.get("state") == "proposed" and inbox_of(t).get("status") != "approved"))]
+
+
+def inbox_title(text):
+    first = re.split(r"[\n.!?]", " ".join(str(text).split()), maxsplit=1)[0].strip() or "New idea"
+    return first[:80]
+
+
+def inbox_submit(path, text, source="cli", task_id=None, attachments=()):
+    """Records what the owner wrote: a new proposed task, or one more message in the conversation of an existing one.
+    Returns the task's id."""
+    text = (text or "").strip()
+    if not text and not attachments:
+        raise KanvasError("There is nothing to send")
+    shown = text
+    for kept in attachments:
+        shown += f"\n[attachment: {kept}]"
+
+    def op(board):
+        if task_id:
+            t = find_task(board, task_id)
+            if t.get("state") != "proposed" or not inbox_of(t):
+                raise KanvasError(f"{t['id']} is not an idea waiting in the inbox")
+        else:
+            t = add_task(board, inbox_title(text), None, text, state="proposed", by=f"owner via {source}")
+            t["inbox"] = {"source": source, "status": "shaping", "created": now_iso()}
+        add_note(t, shown.strip(), "owner")
+        inbox_of(t)["updated"] = now_iso()
+        inbox_of(t)["status"] = "shaping"
+        return t["id"]
+    return mutate(path, op)
+
+
+def inbox_thread(task):
+    """The conversation so far, from the owner's messages and the product owner's replies."""
+    lines = []
+    for note in task.get("notes") or []:
+        by = note.get("by")
+        if by in OWNER_NAMES:
+            lines.append(f"[owner] {_clip(note.get('text'), 2000)}")
+        elif by == "product-owner":
+            lines.append(f"[product owner] {_clip(note.get('text'), 1500)}")
+    return "\n".join(lines[-24:])
+
+
+def inbox_prompt(board, task, config):
+    groups = "\n".join(f"- {g['id']}: {g['name']}" for g in board["groups"]) or "(none)"
+    open_tasks = "\n".join(f"- {t['id']} [{t['state']}] {t['title']}" for t in board["tasks"]
+                           if t["state"] not in ("done", "production") and t["id"] != task["id"])[:6000] or "(none)"
+    repos = ", ".join(f"{k}: {v['name']}" for k, v in config["repositories"].items() if k != CURATOR_REPOSITORY) or "none"
+    roles = ", ".join(r for r in config["agents"] if r not in ("reviewer", "reviewer-strong", "curator", "designer", "po"))
+    brain = config["repositories"].get(CURATOR_REPOSITORY, {}).get("path")
+    docs = f"The documentation is in {brain} (modules, adr, ops)." if brain else "Read the documentation you find in the project."
+    return f"""You are the product owner of the Kanvas board "{board['title']}". The owner sends you, from their phone, a raw idea or an incident that someone reported. Turn it into a well-formed task with as little work for the owner as possible: infer everything you can from the project, and ask only what you cannot infer, at most 3 questions.
+
+The project is in {config['root']}. {docs} Read what you need, change nothing. If the owner mentions an attachment, open the file with Read.
+
+Groups:
+{groups}
+
+Other open tasks (to spot duplicates):
+{open_tasks}
+
+Repositories (id: name): {repos}
+Agent roles: {roles}. The implementer is the default; choose complex only for security, multi-club isolation, permissions or data migrations.
+
+Conversation so far:
+{inbox_thread(task)}
+
+Decide what it is: "idea", "bug" (something that works wrong for a user), "client" (a request from a club) or "question" (the owner only wants an answer; then the draft stays empty).
+- A bug: write the steps to reproduce, who is affected, how bad it is (low, medium, high or blocker), the module and repository that most likely hold it (look at the documentation and the code) and a workaround if there is one.
+- A client request: say whether it exists already or what it would touch.
+- If an open task already covers it, list it in "duplicates".
+
+Write "reply" for the owner's phone, in the language they write in, in at most 6 short lines: what you understood, what you decided (title, repository, agent) and your questions if any. Set "ready" to true only when the draft is complete enough to approve without more answers.
+
+End your reply with one fenced json block and nothing after it:
+```json
+{{"kind": "idea", "title": "...", "group": "<group id or empty>", "desc": "<2 to 6 lines of markdown>", "duplicates": ["<task id>"], "reply": "...", "questions": ["..."], "ready": false, "draft": {{"outcome": "...", "needs": "...", "acceptance": "...", "non_goals": "...", "repositories": ["<repository id>"], "agent": "implementer"}}}}
+```
+"""
+
+
+def clean_inbox(data, board, config):
+    """The product owner's JSON checked, or None. Unknown groups, tasks and repositories are dropped."""
+    if not isinstance(data, dict) or data.get("kind") not in INBOX_KINDS:
+        return None
+    groups = {g["id"] for g in board["groups"]}
+    known = {t["id"] for t in board["tasks"]}
+    draft = data.get("draft") if isinstance(data.get("draft"), dict) else {}
+    repos = [r for r in draft.get("repositories") or [] if isinstance(r, str) and r in config["repositories"] and r != CURATOR_REPOSITORY]
+    agent = draft.get("agent") if draft.get("agent") in config["agents"] and draft.get("agent") not in (
+        "reviewer", "reviewer-strong", "curator", "designer", "po") else DEFAULT_AGENT
+    cleaned = {"outcome": _clip(draft.get("outcome"), 1500), "needs": _clip(draft.get("needs"), 2500),
+               "acceptance": _clip(draft.get("acceptance"), 2500), "non_goals": _clip(draft.get("non_goals"), 1500),
+               "repositories": repos, "agent": agent}
+    complete = bool(cleaned["outcome"] and cleaned["acceptance"] and repos)
+    return {"kind": data["kind"], "title": _clip(data.get("title"), 120), "desc": _clip(data.get("desc"), 3000),
+            "group": data.get("group") if data.get("group") in groups else None,
+            "duplicates": [d for d in data.get("duplicates") or [] if d in known][:5],
+            "reply": _clip(data.get("reply"), 1200), "questions": [_clip(q, 300) for q in data.get("questions") or [] if isinstance(q, str)][:3],
+            "ready": bool(data.get("ready")) and complete and data["kind"] != "question", "draft": cleaned}
+
+
+def inbox_po_turn(path, task_id):
+    """One turn of the product owner over an idea in the inbox: it updates the task and its draft definition and returns
+    {"reply", "ready", "kind", "questions", "duplicates"}. A turn that fails leaves a note and raises."""
+    board = load_board(path)
+    config = automation_config(board, path)
+    if config is None:
+        raise KanvasError("Automation is not enabled for this board, so the product owner has no way to run")
+    task = find_task(board, task_id)
+    role = config["agents"].get("po")
+    if role is None:
+        raise KanvasError("The board does not define the agent role po")
+    if not shutil.which("claude"):
+        raise KanvasError("Claude Code (claude) is not installed or not on PATH; the product owner needs it")
+    os.makedirs(config["runs"], exist_ok=True)
+    log = os.path.join(config["runs"], f"{automation_slug(task_id)}-po.jsonl")
+    prompt = inbox_prompt(board, task, config)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    mark_busy(path, task_id, "product-owner")
+    clear_stop(path, task_id)
+    try:
+        with open(log, "w", encoding="utf-8", newline="\n") as output:
+            proc = agent_run(claude_command(config, [{"worktree": config["root"]}], role), input=prompt, text=True,
+                             encoding="utf-8", errors="replace", stdout=output, stderr=subprocess.STDOUT, creationflags=flags,
+                             cwd=config["root"], env=agent_environment(), limits=agent_limits(config, role),
+                             stop=lambda: stop_requested(path, task_id))
+        clear_stop(path, task_id)
+        if stop_text(proc):
+            raise KanvasError(f"the product owner did not finish. {stop_text(proc)}")
+        result = read_result(log)
+        if result is None or proc.returncode or result.get("is_error"):
+            detail = str((result or {}).get("result") or f"it exited with code {proc.returncode}. See {log}")
+            raise KanvasError(f"the product owner could not answer: {_clip(detail, 300)}")
+        prose, data = split_assist_reply(str(result.get("result") or ""))
+        outcome = clean_inbox(data, load_board(path), config)
+        if outcome is None:
+            raise KanvasError("the product owner did not return a task")
+    except Exception as e:
+        def fail(fresh):
+            t = find_task(fresh, task_id)
+            add_note(t, f"The product owner could not shape this: {e}", "kanvas-runner")
+        try:
+            mutate(path, fail)
+        except (KanvasError, OSError):
+            pass
+        raise
+    finally:
+        mark_busy(path, task_id, None)
+    reply = outcome["reply"] or prose or "Done."
+
+    def record(fresh):
+        t = find_task(fresh, task_id)
+        if t.get("state") != "proposed":
+            return
+        info = t.setdefault("inbox", {})
+        if outcome["title"]:
+            t["title"] = outcome["title"]
+        if outcome["desc"]:
+            t["desc"] = outcome["desc"]
+        if outcome["group"]:
+            t["group"] = outcome["group"]
+        info.update(kind=outcome["kind"], draft=outcome["draft"], ready=outcome["ready"], questions=outcome["questions"],
+                    duplicates=outcome["duplicates"], status="ready" if outcome["ready"] else "shaping", updated=now_iso(),
+                    turns=int(info.get("turns") or 0) + 1)
+        add_note(t, reply, "product-owner")
+    mutate(path, record)
+    return {"reply": reply, "ready": outcome["ready"], "kind": outcome["kind"], "questions": outcome["questions"],
+            "duplicates": outcome["duplicates"], "task": task_id}
+
+
+def inbox_send(path, text, source="cli", task_id=None, attachments=()):
+    """The whole round: record the message, let the product owner answer, and return its answer."""
+    task_id = inbox_submit(path, text, source, task_id, attachments)
+    return inbox_po_turn(path, task_id)
+
+
+def inbox_approve(path, task_id, via="the inbox"):
+    """The owner approves the draft definition: the task becomes To do, ready for its construction plan."""
+    def op(board):
+        t = find_task(board, task_id)
+        info = inbox_of(t)
+        if t.get("state") != "proposed" or not info:
+            raise KanvasError(f"{t['id']} is not an idea waiting for approval in the inbox")
+        draft = info.get("draft") if isinstance(info.get("draft"), dict) else {}
+        missing = [k for k, label in (("outcome", "an outcome"), ("acceptance", "acceptance criteria"), ("repositories", "a repository")) if not draft.get(k)]
+        if missing:
+            raise KanvasError(f"The draft of {t['id']} still lacks {', '.join(missing)}: answer the product owner's questions first")
+        t["definition"] = {**draft, "approved": True, "by": "human", "at": now_iso(), "via": via}
+        t["state"] = "todo"
+        info["status"] = "approved"
+        add_note(t, f"PO/TL product definition approved from {via}.", "owner")
+        return t
+    return mutate(path, op)
+
+
+def inbox_drop(path, task_id):
+    """The owner throws the idea away: the proposed task is removed."""
+    def op(board):
+        t = find_task(board, task_id)
+        if t.get("state") != "proposed" or not inbox_of(t):
+            raise KanvasError(f"{t['id']} is not an idea waiting in the inbox")
+        board["tasks"].remove(t)
+        for other in board["tasks"]:
+            other["deps"] = [d for d in other.get("deps") or [] if d != t["id"]]
+        return t["id"]
+    return mutate(path, op)
+
+
+def inbox_summary(task):
+    info = inbox_of(task)
+    thread = [{"by": n.get("by"), "at": n.get("at"), "text": n.get("text")} for n in task.get("notes") or []
+              if n.get("by") in OWNER_NAMES + ("product-owner",)]
+    return {"id": task["id"], "title": task["title"], "status": info.get("status"), "kind": info.get("kind"),
+            "ready": bool(info.get("ready")), "questions": info.get("questions") or [], "duplicates": info.get("duplicates") or [],
+            "draft": info.get("draft") or {}, "thread": thread[-12:]}
+
+
+def inbox_token_file():
+    return os.path.join(os.path.dirname(state_file()), "inbox-token.json")
+
+
+def new_inbox_token():
+    """A new pairing token for phones. Only its hash is kept, so the token is shown once, here."""
+    token = base64.urlsafe_b64encode(os.urandom(24)).decode("ascii").rstrip("=")
+    os.makedirs(os.path.dirname(inbox_token_file()), exist_ok=True)
+    write_text_atomic(inbox_token_file(), json.dumps({"hash": hashlib.sha256(token.encode("utf-8")).hexdigest(), "at": now_iso()}) + "\n")
+    return token
+
+
+def inbox_token_ok(token):
+    if not token:
+        return False
+    try:
+        with open(inbox_token_file(), encoding="utf-8") as f:
+            kept = json.load(f).get("hash")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(kept, str) and hmac.compare_digest(kept, hashlib.sha256(token.encode("utf-8")).hexdigest())
+
+
+def phone_bases():
+    """The addresses a phone on Tailscale uses to reach this computer's Kanvas, or none without Tailscale."""
+    try:
+        ip, name, magic = tailscale_self()
+    except KanvasError:
+        return []
+    return [f"http://{h}:{DEFAULT_PORT}/" for h in ([name] if magic else []) + [ip]]
+
+
+INBOX_PAGE = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Inbox</title>
+<style>
+:root { color-scheme: light dark; font: 16px/1.45 system-ui, sans-serif; --line: #8884; --brand: #4f46e5; }
+* { box-sizing: border-box; } body { margin: 0; display: flex; flex-direction: column; height: 100dvh; }
+header { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; }
+header b { flex: 1; } button { font: inherit; border: 1px solid var(--line); background: transparent; color: inherit; border-radius: 10px; padding: 8px 12px; }
+button.primary { background: var(--brand); color: #fff; border-color: var(--brand); } button:disabled { opacity: .45; }
+main { flex: 1; overflow: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.card { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; cursor: pointer; }
+.card small { opacity: .65; display: block; } .chip { font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; margin-left: 6px; }
+.msg { max-width: 88%; padding: 8px 12px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.owner { align-self: flex-end; background: var(--brand); color: #fff; } .msg.po { align-self: flex-start; border: 1px solid var(--line); }
+.draft { border: 1px dashed var(--line); border-radius: 12px; padding: 10px 12px; font-size: 14px; } .draft b { display: block; }
+.actions { display: flex; gap: 8px; } .actions button { flex: 1; }
+form { display: flex; gap: 8px; padding: 10px 14px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); }
+textarea { flex: 1; font: inherit; border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; background: transparent; color: inherit; resize: none; }
+.err { color: #dc2626; } .muted { opacity: .65; }
+</style></head><body>
+<header><button id="back" hidden>&larr;</button><b id="title">Inbox</b><button id="new">New idea</button></header>
+<main id="main"></main>
+<form id="form"><textarea id="text" rows="2" placeholder="An idea, or an incident someone reported&hellip;"></textarea><button class="primary" id="send">Send</button></form>
+<script>
+const base = location.pathname.replace(/inbox\/?$/, "") + "api/inbox";
+const saved = new URLSearchParams(location.hash.slice(1)).get("token");
+if (saved) { localStorage.setItem("kanvas-inbox-token", saved); history.replaceState(null, "", location.pathname); }
+const token = localStorage.getItem("kanvas-inbox-token") || "";
+const $ = (id) => document.getElementById(id);
+let items = [], current = null, busy = false;
+async function api(path, body) {
+  const r = await fetch(base + path, { method: body ? "POST" : "GET", cache: "no-store",
+    headers: { "Content-Type": "application/json", "X-Kanvas-Token": token }, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function show() {
+  const main = $("main"); main.replaceChildren(); $("back").hidden = !current; $("new").hidden = !!current === false && false;
+  const task = items.find((t) => t.id === current);
+  $("title").textContent = task ? `${task.id} · ${task.title}` : "Inbox";
+  if (!task) {
+    if (!items.length) main.append(el("p", "muted", "Nothing waits here. Send an idea or an incident below."));
+    for (const t of items) {
+      const card = el("div", "card"); const top = el("div", "", t.title);
+      top.append(el("span", "chip", t.ready ? "ready" : t.status || "new"), el("span", "chip", t.kind || "..."));
+      card.append(top, el("small", "", t.questions[0] || t.id)); card.onclick = () => { current = t.id; show(); }; main.append(card);
+    }
+    return;
+  }
+  for (const m of task.thread) main.append(el("div", "msg " + (m.by === "product-owner" ? "po" : "owner"), m.text));
+  if (busy) main.append(el("p", "muted", "The product owner is thinking…"));
+  const d = task.draft || {};
+  if (d.outcome) {
+    const box = el("div", "draft"); for (const [k, label] of [["outcome", "Outcome"], ["acceptance", "Acceptance"], ["repositories", "Repositories"], ["agent", "Agent"]]) {
+      const v = Array.isArray(d[k]) ? d[k].join(", ") : d[k]; if (v) { box.append(el("b", "", label), el("span", "", v)); } }
+    main.append(box);
+  }
+  if (task.duplicates.length) main.append(el("p", "muted", "Looks like: " + task.duplicates.join(", ")));
+  const bar = el("div", "actions"); const ok = el("button", "primary", "Approve definition"); ok.disabled = !task.ready || busy;
+  ok.onclick = () => act(task.id, "approve"); const drop = el("button", "", "Drop"); drop.disabled = busy; drop.onclick = () => act(task.id, "drop");
+  bar.append(ok, drop); main.append(bar); main.scrollTop = main.scrollHeight;
+}
+async function load() { try { items = (await api("")).items; } catch (e) { $("main").replaceChildren(el("p", "err", e.message)); return; } show(); }
+async function act(id, what) {
+  try { await api(`/${id}/${what}`, {}); if (what === "drop" || what === "approve") { current = null; } await load(); alert(what === "approve" ? `${id} is To do` : "Dropped"); }
+  catch (e) { alert(e.message); }
+}
+async function send(text) {
+  busy = true; const start = items.find((t) => t.id === current);
+  if (start) start.thread.push({ by: "owner", text }); show();
+  try {
+    const job = await api("", { text, task: current || undefined, source: "web" });
+    current = job.task;
+    for (;;) { const s = await api(`/job/${job.job}`); if (s.status !== "running") { if (s.error) throw new Error(s.error); break; } await new Promise((r) => setTimeout(r, 1500)); }
+  } catch (e) { alert(e.message); }
+  busy = false; await load();
+}
+$("form").onsubmit = (e) => { e.preventDefault(); const text = $("text").value.trim(); if (!text || busy) return; $("text").value = ""; send(text); };
+$("back").onclick = () => { current = null; show(); }; $("new").onclick = () => { current = null; show(); $("text").focus(); };
+load();
+</script></body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# Telegram: a private bot for the owner. Anything the owner writes is an idea or an incident for the inbox, a reply goes
+# to the same idea while the product owner is still shaping it, and two buttons approve the definition or drop it. Only the
+# Telegram users named in KANVAS_TELEGRAM_USERS are heard; everyone else is ignored without a word. The bot's token comes
+# from KANVAS_TELEGRAM_TOKEN, which the agents never inherit.
+
+TELEGRAM_API = "https://api.telegram.org"
+TELEGRAM_MAX_FILE = 8 * 1024 * 1024
+TELEGRAM_HELP = ("Mandame una idea o una incidencia tal cual y la convierto en tarea con el PO.\n"
+                 "Si te pregunta algo, contesta aqui mismo. Cuando este lista, pulsa Aprobar.\n\n"
+                 "/new empieza una idea nueva aunque haya una a medias\n/list ideas pendientes\n"
+                 "/approve ID   /drop ID\n/help esta ayuda")
+
+
+class TelegramError(KanvasError):
+    pass
+
+
+PAIRING_MINUTES = 10
+
+
+def telegram_file():
+    return os.path.join(os.path.dirname(state_file()), "telegram.json")
+
+
+def telegram_config():
+    """The bot's connection: what `Connect Telegram` saved, or KANVAS_TELEGRAM_TOKEN and KANVAS_TELEGRAM_USERS. {} when
+    there is none."""
+    token = os.environ.get("KANVAS_TELEGRAM_TOKEN", "").strip()
+    users = [int(u) for u in os.environ.get("KANVAS_TELEGRAM_USERS", "").replace(" ", "").split(",") if u.isdigit()]
+    if token and users:
+        return {"token": token, "users": users, "board": None, "bot": None, "pairing": None}
+    try:
+        with open(telegram_file(), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or not isinstance(data.get("token"), str):
+        return {}
+    data["users"] = [u for u in data.get("users") or [] if isinstance(u, int)]
+    return data
+
+
+def save_telegram_config(config):
+    os.makedirs(os.path.dirname(telegram_file()), exist_ok=True)
+    write_text_atomic(telegram_file(), json.dumps(config, indent=1) + "\n")
+    try:
+        os.chmod(telegram_file(), 0o600)
+    except OSError:
+        pass
+
+
+def new_pairing():
+    """A code to send to the bot from the Telegram account that should be heard. It works once, for ten minutes."""
+    return {"code": f"{secrets.randbelow(1000000):06d}", "expires": time.time() + PAIRING_MINUTES * 60}
+
+
+def telegram_api(token):
+    """A function (method, params) -> result over the Telegram Bot API. The token never appears in an error."""
+    base = os.environ.get("KANVAS_TELEGRAM_API") or TELEGRAM_API
+
+    def call(method, params=None, timeout=40):
+        request = urllib.request.Request(f"{base}/bot{token}/{method}", data=json.dumps(params or {}).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise TelegramError(str(e).replace(token, "<token>"))
+        if not data.get("ok"):
+            raise TelegramError(str(data.get("description") or "Telegram refused the request").replace(token, "<token>"))
+        return data["result"]
+
+    def download(file_path):
+        with urllib.request.urlopen(f"{base}/file/bot{token}/{file_path}", timeout=60) as response:
+            return response.read(TELEGRAM_MAX_FILE + 1)
+
+    call.download = download
+    return call
+
+
+class TelegramBridge:
+    def __init__(self, path, api, users, say=print, pairing=None, on_pair=None):
+        self.path, self.api, self.users, self.say = path, api, set(users), say
+        self.pairing, self.on_pair = pairing, on_pair
+        self.offset = 0
+        self.ignored = 0
+        self.stopping = False
+
+    def try_pair(self, message):
+        """The owner sends the code Kanvas showed on the board: from then on this Telegram account is heard."""
+        chat, sender = message.get("chat") or {}, message.get("from") or {}
+        code = str(message.get("text") or "").strip()
+        pairing = self.pairing
+        if (not pairing or time.time() > pairing["expires"] or chat.get("type") != "private" or not sender.get("id")
+                or sender.get("id") != chat.get("id") or not hmac.compare_digest(code, pairing["code"])):
+            return False
+        self.users.add(sender["id"])
+        self.pairing = None
+        if self.on_pair:
+            self.on_pair(sender["id"])
+        self.reply(chat["id"], "✅ Conectado. Desde ahora te escucho solo a ti. Mandame una idea o una incidencia.\n\n" + TELEGRAM_HELP)
+        return True
+
+    def reply(self, chat, text, buttons=None):
+        params = {"chat_id": chat, "text": text[:3900]}
+        if buttons:
+            params["reply_markup"] = {"inline_keyboard": [[{"text": label, "callback_data": data} for label, data in buttons]]}
+        try:
+            self.api("sendMessage", params)
+        except TelegramError as e:
+            self.say(f"Could not answer in Telegram: {e}")
+
+    def buttons(self, task_id, ready):
+        return ([("✅ Aprobar", f"ap:{task_id}")] if ready else []) + [("🗑 Descartar", f"dr:{task_id}")]
+
+    def waiting_thread(self):
+        """The idea the owner is probably still talking about: the last one from Telegram that the product owner has
+        questions on, or has not finished, touched in the last half hour."""
+        best = None
+        for t in inbox_tasks(load_board(self.path)):
+            info = inbox_of(t)
+            if info.get("source") != "telegram" or info.get("ready"):
+                continue
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(str(info.get("updated")).replace("Z", "+00:00"))).total_seconds()
+            except ValueError:
+                continue
+            if age <= INBOX_STALE_MINUTES * 60 and (best is None or age < best[0]):
+                best = (age, t["id"])
+        return best[1] if best else None
+
+    def save_photo(self, message):
+        """The largest photo of a message, kept in the inbox folder; returns its path or None."""
+        photos = message.get("photo") or []
+        if not photos:
+            return None
+        info = self.api("getFile", {"file_id": photos[-1]["file_id"]})
+        data = self.api.download(info["file_path"])
+        if len(data) > TELEGRAM_MAX_FILE:
+            raise TelegramError("That photo is too big")
+        board = load_board(self.path)
+        config = automation_config(board, self.path)
+        root = config["root"] if config else os.path.dirname(self.path)
+        folder = os.path.join(root, ".kanvas", "inbox")
+        os.makedirs(folder, exist_ok=True)
+        kept = os.path.join(folder, f"{int(time.time())}-{os.urandom(3).hex()}.jpg")
+        with open(kept, "wb") as f:
+            f.write(data)
+        return kept
+
+    def idea(self, chat, text, new=False, attachments=()):
+        task_id = None if new else self.waiting_thread()
+        try:
+            self.api("sendChatAction", {"chat_id": chat, "action": "typing"})
+        except TelegramError:
+            pass
+        try:
+            result = inbox_send(self.path, text, "telegram", task_id, attachments)
+        except KanvasError as e:
+            return self.reply(chat, f"No pude con eso: {e}")
+        suffix = ""
+        if result["duplicates"]:
+            suffix = f"\n(Parecida a {', '.join(result['duplicates'])})"
+        self.reply(chat, f"{result['task']} · {result['kind']}\n{result['reply']}{suffix}", self.buttons(result["task"], result["ready"]))
+
+    def command(self, chat, text):
+        word, _, rest = text.partition(" ")
+        word, rest = word.split("@")[0].lower(), rest.strip()
+        if word in ("/start", "/help"):
+            return self.reply(chat, TELEGRAM_HELP)
+        if word == "/list":
+            waiting = inbox_tasks(load_board(self.path))
+            return self.reply(chat, "\n".join(f"{t['id']} · {inbox_of(t).get('status')} · {t['title']}" for t in waiting) or "No hay ideas pendientes.")
+        if word in ("/approve", "/drop"):
+            try:
+                if word == "/approve":
+                    inbox_approve(self.path, rest.upper(), "Telegram")
+                    return self.reply(chat, f"✅ {rest.upper()} aprobado: pasa a To do. Falta su plan en el tablero.")
+                return self.reply(chat, f"🗑 {inbox_drop(self.path, rest.upper())} descartado.")
+            except KanvasError as e:
+                return self.reply(chat, str(e))
+        if word == "/new":
+            return self.idea(chat, rest, new=True) if rest else self.reply(chat, "Escribe la idea despues de /new, o simplemente mandamela.")
+        self.reply(chat, "No conozco ese comando. /help")
+
+    def button(self, query):
+        chat = query["message"]["chat"]["id"]
+        action, _, task_id = str(query.get("data") or "").partition(":")
+        try:
+            if action == "ap":
+                inbox_approve(self.path, task_id, "Telegram")
+                answer = f"✅ {task_id} aprobado: pasa a To do. Falta su plan en el tablero."
+            elif action == "dr":
+                answer = f"🗑 {inbox_drop(self.path, task_id)} descartado."
+            else:
+                answer = "No entiendo ese boton."
+        except KanvasError as e:
+            answer = str(e)
+        try:
+            self.api("answerCallbackQuery", {"callback_query_id": query["id"]})
+        except TelegramError:
+            pass
+        self.reply(chat, answer)
+
+    def handle(self, update):
+        """One update from Telegram. Only the owner's own private chat is heard."""
+        query = update.get("callback_query")
+        message = update.get("message")
+        if message and self.try_pair(message):
+            return
+        sender = (query or message or {}).get("from") or {}
+        chat = ((query or {}).get("message") or message or {}).get("chat") or {}
+        if sender.get("id") not in self.users or chat.get("type") != "private" or sender.get("id") != chat.get("id"):
+            self.ignored += 1
+            return
+        if query:
+            return self.button(query)
+        text = str(message.get("text") or message.get("caption") or "").strip()
+        attachments = []
+        try:
+            photo = self.save_photo(message)
+        except (TelegramError, KeyError, OSError) as e:
+            return self.reply(chat["id"], f"No pude guardar la foto: {e}")
+        if photo:
+            attachments.append(photo)
+        if text.startswith("/") and not attachments:
+            return self.command(chat["id"], text)
+        if not text and not attachments:
+            return self.reply(chat["id"], "Solo entiendo texto y fotos. /help")
+        self.idea(chat["id"], text, attachments=attachments)
+
+    def run(self, once=False):
+        """Listens until stopped. A dropped connection is retried."""
+        while not self.stopping:
+            try:
+                updates = self.api("getUpdates", {"offset": self.offset, "timeout": 0 if once else 25,
+                                                  "allowed_updates": ["message", "callback_query"]}, timeout=35)
+            except TelegramError as e:
+                self.say(f"Telegram: {e}")
+                if once:
+                    return
+                time.sleep(5)
+                continue
+            for update in updates:
+                self.offset = max(self.offset, int(update.get("update_id") or 0) + 1)
+                try:
+                    self.handle(update)
+                except Exception as e:
+                    self.say(f"Telegram update failed: {type(e).__name__}: {e}")
+            if once:
+                return
+
+
+def cmd_telegram(args):
+    path = board_path(args)
+    config = telegram_config()
+    token = config.get("token", "")
+    users = [str(u) for u in config.get("users") or []]
+    if not token:
+        raise KanvasError("Connect Telegram first: open the board's menu, Connect Telegram, and paste the token BotFather gave you "
+                          "(or set KANVAS_TELEGRAM_TOKEN and KANVAS_TELEGRAM_USERS in the environment of this terminal)")
+    if not users:
+        raise KanvasError("No Telegram user is paired yet: open the board's menu, Connect Telegram, and send the code it shows "
+                          "to your bot (or set KANVAS_TELEGRAM_USERS to your numeric Telegram user id)")
+    api = telegram_api(token)
+    me = api("getMe")
+    print(f"Telegram bot @{me.get('username')} listening for {len(users)} user(s) on {board_name(path)}. Ctrl+C stops it.", flush=True)
+    try:
+        TelegramBridge(path, api, [int(u) for u in users], lambda m: print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)).run(args.once)
+    except KeyboardInterrupt:
+        print("Stopped.")
+
+
+def cmd_inbox(args):
+    path = board_path(args)
+    if args.pair:
+        token = new_inbox_token()
+        print("Open this on the phone once; it keeps the token. Anyone with it can send ideas to this board, and a new "
+              "pairing replaces the old one:\n")
+        urls = [f"{base}{quote(board_name(path))}/inbox#token={token}" for base in (phone_bases() or ["http://127.0.0.1:%d/" % DEFAULT_PORT])]
+        print("\n".join(urls))
+        return
+    if args.approve:
+        inbox_approve(path, args.approve, "the terminal")
+        print(f"Approved the definition of {args.approve}; it is To do and waits for its construction plan")
+        return
+    if args.drop:
+        print(f"Dropped {inbox_drop(path, args.drop)}")
+        return
+    if not args.text:
+        board = load_board(path)
+        waiting = inbox_tasks(board)
+        if not waiting:
+            print("The inbox is empty.")
+        for t in waiting:
+            info = inbox_of(t)
+            print(f"{t['id']}  {info.get('status') or '-':8}  {info.get('kind') or '-':8}  {t['title']}")
+        return
+    result = inbox_send(path, read_input(args.text, False, None, "idea"), "terminal", args.task)
+    print(f"{result['task']}: {result['reply']}")
+    if result["ready"]:
+        print(f"\nReady. Approve it with `kanvas inbox --approve {result['task']}`.")
+
+
 def cmd_review(args):
     path = board_path(args)
     board = load_board(path)
@@ -2889,7 +3559,7 @@ def usage_runs(board, config):
         if result is None:
             continue
         stem, reviewer = name[:-len(".jsonl")], None
-        for suffix, role in (("-review-strong", "reviewer-strong"), ("-review", "reviewer"), ("-design", "designer")):
+        for suffix, role in (("-review-strong", "reviewer-strong"), ("-review", "reviewer"), ("-design", "designer"), ("-po", "po")):
             if stem.endswith(suffix):
                 stem, reviewer = stem[:-len(suffix)], role
                 break
@@ -3746,14 +4416,15 @@ class AutomationDispatcher:
                         print(f"Automation skipped {path}: {e}", file=sys.stderr, flush=True)
 
     def scan(self, path):
-        cleaned = self.__dict__.setdefault("cleaned", set())
-        if path not in cleaned:
-            cleaned.add(path)
-            clear_busy_marks(path)
         board = load_board(path)
         config = automation_config(board, path)
         if config is None:
             return
+        cleaned = self.__dict__.setdefault("cleaned", set())
+        if path not in cleaned:
+            cleaned.add(path)
+            clear_busy_marks(path)
+            board = load_board(path)
         self._settle_orphan_stops(path, board)
         for task in list(board["tasks"]):
             work = task.get("work") if isinstance(task.get("work"), dict) else {}
@@ -3920,6 +4591,9 @@ class BoardServer(ThreadingHTTPServer):
         self.dispatcher = share.dispatcher if share else AutomationDispatcher(self)
         self.assist = share.assist if share else {}  # job id -> the agents' help running or finished, oldest first
         self.assist_lock = share.assist_lock if share else threading.Lock()
+        self.inbox = share.inbox if share else {}  # job id -> a turn of the product owner over an idea, running or finished
+        self.telegram = None  # the bot's bridge while it runs, on the main server only
+        self.telegram_lock = threading.Lock()
         if path:
             self.add_board(path)
 
@@ -4061,6 +4735,80 @@ class BoardServer(ThreadingHTTPServer):
         threading.Thread(target=self._run_assist, args=(job, path, kind, task_id, fields), daemon=True).start()
         return job
 
+    def start_telegram(self, path=None):
+        """Starts (or restarts) the Telegram bot of the saved connection on this server, in the background."""
+        if not self.opens_boards:
+            return
+        config = telegram_config()
+        if not config.get("token"):
+            return
+        board = path or config.get("board")
+        if not board or not os.path.isfile(board):
+            with self.boards_lock:
+                board = next(iter(self.boards.values()), None)
+        if not board:
+            return
+        pairing = config.get("pairing") if isinstance(config.get("pairing"), dict) else None
+
+        def paired(user_id):
+            fresh = telegram_config()
+            if fresh.get("token") and user_id not in fresh["users"]:
+                fresh["users"].append(user_id)
+            fresh["pairing"] = None
+            save_telegram_config(fresh)
+
+        say = (lambda m: None) if self.quiet else (lambda m: print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True))
+        bridge = TelegramBridge(board, telegram_api(config["token"]), config["users"], say, pairing, paired)
+        with self.telegram_lock:
+            if self.telegram:
+                self.telegram.stopping = True
+            self.telegram = bridge
+        threading.Thread(target=bridge.run, name="kanvas-telegram", daemon=True).start()
+
+    def stop_telegram(self):
+        with self.telegram_lock:
+            if self.telegram:
+                self.telegram.stopping = True
+            self.telegram = None
+
+    def telegram_status(self):
+        config = telegram_config()
+        pairing = config.get("pairing") if isinstance(config.get("pairing"), dict) else None
+        live = pairing and time.time() < pairing["expires"]
+        return {"connected": bool(config.get("token")), "bot": config.get("bot"), "users": len(config.get("users") or []),
+                "code": pairing["code"] if live else None, "running": bool(self.telegram)}
+
+    def start_inbox(self, name, text, task_id, source):
+        """Records an idea or a reply of the owner and has the product owner answer it in the background."""
+        path = self.board_path(name)
+        if source not in ("web", "telegram", "terminal"):
+            source = "web"
+        if not shutil.which("claude"):
+            raise KanvasError("Claude Code (claude) is not installed or not on PATH; the product owner needs it")
+        with self.assist_lock:
+            if sum(1 for j in self.inbox.values() if j["status"] == "running") >= ASSIST_MAX_RUNNING:
+                raise AssistBusy("The product owner is already answering other ideas; wait a moment")
+        task = inbox_submit(path, text, source, task_id)
+        job = {"id": os.urandom(8).hex(), "board": name, "task": task, "status": "running", "result": None, "error": ""}
+        with self.assist_lock:
+            self.inbox[job["id"]] = job
+            for old in [k for k, j in self.inbox.items() if j["status"] != "running"][:-ASSIST_KEEP]:
+                del self.inbox[old]
+
+        def run():
+            try:
+                job["result"] = inbox_po_turn(path, task)
+                job["status"] = "done"
+            except Exception as e:
+                job["error"], job["status"] = str(e), "failed"
+        threading.Thread(target=run, daemon=True).start()
+        return job
+
+    def inbox_status(self, name, job_id):
+        with self.assist_lock:
+            job = self.inbox.get(job_id)
+            return dict(job) if job and job["board"] == name else None
+
     def assist_status(self, name, job_id):
         with self.assist_lock:
             job = self.assist.get(job_id)
@@ -4197,7 +4945,7 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
     """What one agent is asked in one step of a dialog's help. Every step starts a new session, so each prompt brings
     what that agent needs."""
     head = (f"You help the owner of the Kanvas board \"{board['title']}\" fill in a dialog. The project is in {root}: read "
-            "what you need there (the documentation in docs/ and the repositories) and change nothing. Be brief and "
+            "what you need there (the documentation in the brain repository, modules and adr, and the repositories) and change nothing. Be brief and "
             "concrete, ask only what changes what gets built, and answer in the language the owner writes in.\n\n")
     ids = lambda: ", ".join(f"{k}: {v}" for k, v in repositories.items()) or "none"
     if kind == "task":
@@ -4224,7 +4972,7 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
             f"Repositories (id: name): {ids()}\n"
             f"Agent roles: {', '.join(r for r in roles if not r.startswith('reviewer'))}. The implementer is the default; choose "
             "complex only for security, multi-club isolation, permissions or data migrations.\n\n"
-            "Look in docs/modules and docs/adr for what already exists about this, then question what is missing or "
+            "Look in the brain repository (modules and adr) for what already exists about this, then question what is missing or "
             "ambiguous and draft the form: the outcome for users or the business, needs and constraints, acceptance "
             "criteria a person can check, non-goals, the repositories the change may touch and the agent role.\n\n"
             "End your reply with one fenced json block and nothing after it:\n```json\n{\"questions\": [\"...\"], "
@@ -4392,6 +5140,11 @@ class BoardHandler(BaseHTTPRequestHandler):
         forwarded = any(self.headers.get(h) for h in ("Forwarded", "X-Forwarded-For", "X-Forwarded-Host"))
         return loopback and not forwarded and self._host_name() in LOCAL_NAMES
 
+    def _inbox_allowed(self):
+        """The inbox costs tokens and opens ideas on the board, so it answers this computer and the phones that were paired
+        with a token of their own, not every device that can reach Kanvas."""
+        return self._from_this_computer() or inbox_token_ok(self.headers.get("X-Kanvas-Token"))
+
     def _may_manage(self):
         """Whether the request may open boards and open or close Kanvas to phones, which stay with
         the computer: only the main server does that, and only for this computer."""
@@ -4478,6 +5231,24 @@ class BoardHandler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"files": files}).encode("utf-8"))
         if len(rest) >= 3 and rest[0] == "evidence":
             return self._evidence(path, rest[1], rest[2:])
+        if rest == ["api", "telegram"]:
+            if not self._may_manage():
+                return self._error(403, "Telegram is connected only from the computer running Kanvas")
+            return self._send(200, json.dumps(self.server.main.telegram_status()).encode("utf-8"))
+        if rest in (["inbox"], ["inbox", ""]):
+            return self._send(200, INBOX_PAGE.encode("utf-8"), "text/html; charset=utf-8", {"X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"})
+        if rest[:2] == ["api", "inbox"]:
+            if not self._inbox_allowed():
+                return self._error(403, "The inbox answers this computer, or a phone paired with `kanvas inbox --pair`")
+            if rest == ["api", "inbox"]:
+                items = [inbox_summary(t) for t in inbox_tasks(load_board(path))]
+                return self._send(200, json.dumps({"items": items}, ensure_ascii=False).encode("utf-8"))
+            if len(rest) == 4 and rest[2] == "job":
+                job = self.server.inbox_status(name, rest[3])
+                if job is None:
+                    return self._error(404, "Not found")
+                return self._send(200, json.dumps({k: job[k] for k in ("status", "task", "result", "error")}, ensure_ascii=False).encode("utf-8"))
+            return self._error(404, "Not found")
         if len(rest) == 3 and rest[:2] == ["api", "design"]:
             try:
                 design = design_of(find_task(load_board(path), rest[2]))
@@ -4551,6 +5322,66 @@ class BoardHandler(BaseHTTPRequestHandler):
             if fresh and not self.server.quiet:
                 print(f"[{time.strftime('%H:%M:%S')}] opened to phones on Tailscale: {'  or  '.join(urls)}", flush=True)
             return self._phone(parts[0])
+        if parts[1:] == ["api", "telegram"] and self.server.board_path(parts[0]) is not None:
+            if not self._may_manage():
+                return self._error(403, "Telegram is connected only from the computer running Kanvas")
+            text = self._read_json()
+            if text is None:
+                return
+            main = self.server.main
+            try:
+                request = json.loads(text)
+                action = request.get("action")
+                config = telegram_config()
+                if action == "connect":
+                    token = str(request.get("token") or "").strip()
+                    if not re.fullmatch(r"\d{5,}:[A-Za-z0-9_-]{20,}", token):
+                        raise KanvasError("That does not look like a bot token: it is like 123456:ABC-DEF…, from BotFather")
+                    me = telegram_api(token)("getMe", timeout=15)
+                    same = config.get("token") == token
+                    save_telegram_config({"token": token, "bot": me.get("username"), "board": self.server.board_path(parts[0]),
+                                          "users": config.get("users", []) if same else [], "pairing": new_pairing()})
+                    main.start_telegram()
+                elif action == "pair":
+                    if not config.get("token"):
+                        raise KanvasError("Connect a bot first")
+                    config["pairing"] = new_pairing()
+                    save_telegram_config(config)
+                    main.start_telegram()
+                elif action == "disconnect":
+                    main.stop_telegram()
+                    try:
+                        os.remove(telegram_file())
+                    except OSError:
+                        pass
+                else:
+                    raise KanvasError("Expected connect, pair or disconnect")
+            except (KanvasError, ValueError, AttributeError) as e:
+                return self._error(400, str(e) or "Expected a JSON object")
+            return self._send(200, json.dumps(main.telegram_status()).encode("utf-8"))
+        if parts[1:3] == ["api", "inbox"] and self.server.board_path(parts[0]) is not None:
+            if not self._inbox_allowed():
+                return self._error(403, "The inbox answers this computer, or a phone paired with `kanvas inbox --pair`")
+            text = self._read_json()
+            if text is None:
+                return
+            try:
+                request = json.loads(text)
+                if len(parts) == 3:
+                    job = self.server.start_inbox(parts[0], str(request.get("text") or ""), request.get("task") or None, request.get("source"))
+                    return self._send(202, json.dumps({"job": job["id"], "task": job["task"]}).encode("utf-8"))
+                if len(parts) == 5 and parts[4] in ("approve", "drop"):
+                    path = self.server.board_path(parts[0])
+                    if parts[4] == "approve":
+                        inbox_approve(path, parts[3], "the inbox page")
+                    else:
+                        inbox_drop(path, parts[3])
+                    return self._send(200, b"{}")
+            except AssistBusy as e:
+                return self._error(429, str(e))
+            except (KanvasError, ValueError, AttributeError) as e:
+                return self._error(400, str(e) or "Expected a JSON object")
+            return self._error(404, "Not found")
         if parts[1:] == ["api", "assist"] and self.server.board_path(parts[0]) is not None:
             if not self._from_this_computer():
                 return self._error(403, "The agents answer only requests from the computer running Kanvas")
@@ -4821,6 +5652,7 @@ def cmd_serve(args):
             webbrowser.open(board_url)
         return
     server = start_server(path, args.host, args.port, remember=state_file() if local else None)
+    server.start_telegram()
     if args.tailscale:
         try:
             server.open_to_phone()
@@ -5111,6 +5943,14 @@ def build_parser():
     text_sources(p, "note")
     p = add("retry", cmd_retry, "retry failed automation in its existing isolated worktree")
     p.add_argument("id")
+    p = add("inbox", cmd_inbox, "send an idea or an incident to the product owner, who turns it into a task; with no text, list the inbox")
+    p.add_argument("text", nargs="?", help="the idea or the incident, as you would say it")
+    p.add_argument("--task", metavar="ID", help="answer the product owner on this idea instead of starting a new one")
+    p.add_argument("--approve", metavar="ID", help="approve the draft definition of an idea, which makes it To do")
+    p.add_argument("--drop", metavar="ID", help="throw an idea away")
+    p.add_argument("--pair", action="store_true", help="print the address that pairs a phone with the inbox (run it in your own terminal)")
+    p = add("telegram", cmd_telegram, "listen to a private Telegram bot: what you write is an idea or an incident for the inbox")
+    p.add_argument("--once", action="store_true", help="handle what is waiting and stop")
     p = add("mcp", cmd_mcp, "serve the board and the documentation to Claude over MCP (stdio), for agents that need to look things up")
     p.add_argument("--read-only", action="store_true", help="offer only the tools that read, without proposing tasks or adding notes")
     p = add("shots", cmd_shots, "screenshot a page at phone, iPad and desktop size and keep them as the task's evidence")

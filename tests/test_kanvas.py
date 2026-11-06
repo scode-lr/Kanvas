@@ -1630,6 +1630,333 @@ class AutomationTests(TempBoard):
         usage = json.loads(self.call("kanvas_usage")[0])
         self.assertEqual((usage["runs"], usage["total_usd"], usage["rows"][0]["turns"]), (1, 0.25, 7))
 
+    def inbox_board(self):
+        board = self.mcp_board()
+        write_board(self.path, board)
+        return board
+
+    def po_reply(self, **data):
+        """What the product owner answers: prose and the json block that ends it."""
+        base = {"kind": "idea", "title": "Export players to Google Sheets weekly", "group": "DV", "desc": "A club wants a weekly export.",
+                "duplicates": ["DV-01"], "reply": "Entendido: exportacion semanal. Repo front, agente implementer.", "questions": [],
+                "ready": True, "draft": {"outcome": "Coordinators get the player list in a sheet every week",
+                                        "needs": "No data of other clubs", "acceptance": "A sheet updates weekly with the active players",
+                                        "non_goals": "Real-time sync", "repositories": ["front"], "agent": "implementer"}}
+        base.update(data)
+        return "Thinking about it.\n```json\n" + json.dumps(base) + "\n```"
+
+    def run_po(self, task_id, reply):
+        calls = []
+
+        def fake(command, **kwargs):
+            calls.append({"command": command, "prompt": kwargs["input"], "cwd": kwargs["cwd"]})
+            event = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 3, "total_cost_usd": 0.03, "result": reply}
+            kwargs["stdout"].write(json.dumps(event) + "\n")
+            return mock.Mock(returncode=0, stopped=None)
+
+        with mock.patch.object(kanvas, "agent_run", side_effect=fake), mock.patch.object(kanvas.shutil, "which", return_value="claude"):
+            result = kanvas.inbox_po_turn(self.path, task_id)
+        self.po_call = calls[0]
+        return result
+
+    def test_an_idea_sent_to_the_inbox_becomes_a_proposed_task_the_product_owner_shapes(self):
+        self.inbox_board()
+        task_id = kanvas.inbox_submit(self.path, "Los clubs piden exportar jugadores a Sheets cada semana", "telegram")
+        task = self.get(task_id)
+        self.assertEqual((task["state"], task["by"]), ("proposed", "owner via telegram"))
+        self.assertEqual((task["inbox"]["source"], task["inbox"]["status"]), ("telegram", "shaping"))
+        self.assertEqual((task["notes"][-1]["by"], task["notes"][-1]["text"]), ("owner", "Los clubs piden exportar jugadores a Sheets cada semana"))
+        result = self.run_po(task_id, self.po_reply())
+        self.assertEqual((result["ready"], result["kind"], result["duplicates"]), (True, "idea", ["DV-01"]))
+        task = self.get(task_id)
+        self.assertEqual(task["title"], "Export players to Google Sheets weekly")
+        self.assertEqual((task["group"], task["state"]), ("DV", "proposed"))
+        self.assertEqual((task["inbox"]["status"], task["inbox"]["ready"], task["inbox"]["turns"]), ("ready", True, 1))
+        self.assertEqual(task["inbox"]["draft"]["repositories"], ["front"])
+        self.assertEqual(task["notes"][-1]["by"], "product-owner")
+        self.assertIn("exportacion semanal", task["notes"][-1]["text"])
+        self.assertNotIn("busy", task.get("work") or {})
+        command = " ".join(self.po_call["command"])
+        self.assertIn("--agent product-owner", command)
+        self.assertIn("--tools Read,Glob,Grep", command)
+        for text in ("[owner] Los clubs piden exportar", "at most 3 questions", "DV-03"):
+            self.assertIn(text, self.po_call["prompt"])
+        self.assertIn(os.path.join(self.dir, "brain"), self.po_call["prompt"])
+
+    def test_the_owner_answers_the_product_owner_in_the_same_thread(self):
+        self.inbox_board()
+        task_id = kanvas.inbox_submit(self.path, "Algo falla al subir fotos", "web")
+        self.run_po(task_id, self.po_reply(kind="bug", ready=False, questions=["Que pantalla es?", "Pasa en iPhone y Android?"],
+                                           reply="Parece un bug. Que pantalla es?"))
+        self.assertEqual(self.get(task_id)["inbox"]["status"], "shaping")
+        self.assertEqual(kanvas.inbox_submit(self.path, "Es la de noticias, solo en iPhone", "web", task_id), task_id)
+        self.run_po(task_id, self.po_reply(kind="bug"))
+        thread = self.po_call["prompt"]
+        self.assertLess(thread.index("[owner] Algo falla"), thread.index("[product owner] Parece un bug"))
+        self.assertLess(thread.index("[product owner] Parece un bug"), thread.index("[owner] Es la de noticias"))
+        self.assertEqual(len([n for n in self.get(task_id)["notes"] if n["by"] == "owner"]), 2)
+        self.assertEqual(self.get(task_id)["inbox"]["turns"], 2)
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.inbox_submit(self.path, "more", "web", "DV-02")
+
+    def test_the_product_owners_answer_is_checked_before_it_touches_the_board(self):
+        board = self.inbox_board()
+        config = kanvas.automation_config(board, self.path)
+        raw = json.loads(self.po_reply(group="NOPE", duplicates=["NOPE-9", "DV-01"], draft={
+            "outcome": "o", "acceptance": "a", "repositories": ["front", "ghost", "brain"], "agent": "reviewer"}).split("```json\n")[1].split("\n```")[0])
+        clean = kanvas.clean_inbox(raw, board, config)
+        self.assertEqual((clean["group"], clean["duplicates"]), (None, ["DV-01"]))
+        self.assertEqual((clean["draft"]["repositories"], clean["draft"]["agent"]), (["front"], "implementer"))
+        self.assertTrue(clean["ready"])
+        self.assertFalse(kanvas.clean_inbox({**raw, "draft": {"outcome": "o", "repositories": ["front"]}}, board, config)["ready"])
+        self.assertFalse(kanvas.clean_inbox({**raw, "kind": "question"}, board, config)["ready"])
+        self.assertIsNone(kanvas.clean_inbox({**raw, "kind": "joke"}, board, config))
+        self.assertIsNone(kanvas.clean_inbox("nothing", board, config))
+
+    def test_approving_an_idea_needs_a_complete_draft_and_makes_it_to_do(self):
+        self.inbox_board()
+        task_id = kanvas.inbox_submit(self.path, "Idea", "terminal")
+        with self.assertRaises(kanvas.KanvasError) as caught:
+            kanvas.inbox_approve(self.path, task_id)
+        self.assertIn("still lacks", str(caught.exception))
+        self.run_po(task_id, self.po_reply())
+        kanvas.inbox_approve(self.path, task_id, "Telegram")
+        task = self.get(task_id)
+        self.assertEqual(task["state"], "todo")
+        self.assertEqual((task["definition"]["approved"], task["definition"]["via"], task["definition"]["by"]), (True, "Telegram", "human"))
+        self.assertEqual(task["definition"]["repositories"], ["front"])
+        self.assertEqual(task["inbox"]["status"], "approved")
+        self.assertEqual(kanvas.inbox_tasks(self.board()), [])
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.inbox_approve(self.path, task_id)
+
+    def test_dropping_an_idea_removes_it_and_only_ideas(self):
+        self.inbox_board()
+        task_id = kanvas.inbox_submit(self.path, "Silly idea", "web")
+        self.assertEqual(kanvas.inbox_drop(self.path, task_id), task_id)
+        with self.assertRaises(kanvas.KanvasError):
+            self.get(task_id)
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.inbox_drop(self.path, "DV-02")
+
+    def test_a_turn_that_fails_leaves_a_note_and_the_idea_waiting(self):
+        self.inbox_board()
+        task_id = kanvas.inbox_submit(self.path, "Idea", "web")
+        with mock.patch.object(kanvas, "agent_run", return_value=mock.Mock(returncode=1, stopped=None)), \
+             mock.patch.object(kanvas.shutil, "which", return_value="claude"):
+            with self.assertRaises(kanvas.KanvasError):
+                kanvas.inbox_po_turn(self.path, task_id)
+        task = self.get(task_id)
+        self.assertIn("could not shape this", task["notes"][-1]["text"])
+        self.assertEqual(task["state"], "proposed")
+        self.assertNotIn("busy", task.get("work") or {})
+
+    def test_the_inbox_command_lists_approves_and_drops(self):
+        self.inbox_board()
+        keep, silly = kanvas.inbox_submit(self.path, "Keep", "web"), kanvas.inbox_submit(self.path, "Silly", "web")
+        self.run_po(keep, self.po_reply())
+        _, out, _ = self.run_cli("inbox")
+        self.assertIn(keep, out)
+        self.assertIn(silly, out)
+        self.assertIn("Approved", self.run_cli("inbox", "--approve", keep)[1])
+        self.assertIn("Dropped", self.run_cli("inbox", "--drop", silly)[1])
+        self.assertIn("The inbox is empty", self.run_cli("inbox")[1])
+
+    class FakeTelegram:
+        """The Bot API, with what the bot sends recorded."""
+        def __init__(self, updates=()):
+            self.updates, self.sent, self.calls = list(updates), [], []
+
+        def __call__(self, method, params=None, timeout=40):
+            self.calls.append((method, params))
+            if method == "getUpdates":
+                taken, self.updates = self.updates, []
+                return taken
+            if method == "sendMessage":
+                self.sent.append(params)
+            if method == "getFile":
+                return {"file_path": "photos/x.jpg"}
+            return {}
+
+        def download(self, file_path):
+            return b"\xff\xd8fake-jpeg"
+
+    OWNER = 4242
+
+    def bridge(self, updates=()):
+        api = self.FakeTelegram(updates)
+        return kanvas.TelegramBridge(self.path, api, [self.OWNER], say=lambda m: None), api
+
+    def tg_message(self, text, user=None, chat_type="private", **extra):
+        user = user or self.OWNER
+        return {"update_id": 1, "message": {"from": {"id": user}, "chat": {"id": user, "type": chat_type}, "text": text, **extra}}
+
+    def handle_with_po(self, bridge, update, reply):
+        def fake(command, **kwargs):
+            event = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "total_cost_usd": 0.02, "result": reply}
+            kwargs["stdout"].write(json.dumps(event) + "\n")
+            self.po_prompt = kwargs["input"]
+            return mock.Mock(returncode=0, stopped=None)
+
+        with mock.patch.object(kanvas, "agent_run", side_effect=fake), mock.patch.object(kanvas.shutil, "which", return_value="claude"):
+            bridge.handle(update)
+
+    def keyboard(self, params):
+        return [b["callback_data"] for row in params.get("reply_markup", {}).get("inline_keyboard", []) for b in row]
+
+    def test_the_bot_hears_only_the_owner_in_a_private_chat(self):
+        self.inbox_board()
+        bridge, api = self.bridge()
+        before = len(self.board()["tasks"])
+        for update in (self.tg_message("idea", user=999), self.tg_message("idea", chat_type="group"),
+                       {"update_id": 2, "callback_query": {"id": "1", "from": {"id": 999}, "data": "ap:DV-03",
+                                                           "message": {"chat": {"id": 999, "type": "private"}}}}):
+            bridge.handle(update)
+        self.assertEqual((api.sent, len(self.board()["tasks"]), bridge.ignored), ([], before, 3))
+
+    def test_an_idea_written_to_the_bot_comes_back_shaped_with_buttons_to_approve_or_drop(self):
+        self.inbox_board()
+        bridge, api = self.bridge()
+        self.handle_with_po(bridge, self.tg_message("Los clubs piden exportar jugadores a Sheets cada semana"), self.po_reply())
+        task_id = kanvas.inbox_tasks(self.board())[0]["id"]
+        sent = api.sent[-1]
+        self.assertEqual(sent["chat_id"], self.OWNER)
+        self.assertIn(task_id, sent["text"])
+        self.assertIn("exportacion semanal", sent["text"])
+        self.assertEqual(self.keyboard(sent), [f"ap:{task_id}", f"dr:{task_id}"])
+        self.assertIn(("sendChatAction", {"chat_id": self.OWNER, "action": "typing"}), api.calls)
+        self.assertEqual(self.get(task_id)["inbox"]["source"], "telegram")
+
+    def test_a_question_from_the_product_owner_is_answered_in_the_same_thread_until_it_is_ready(self):
+        self.inbox_board()
+        bridge, api = self.bridge()
+        self.handle_with_po(bridge, self.tg_message("Falla algo al subir fotos"),
+                            self.po_reply(kind="bug", ready=False, questions=["Que pantalla?"], reply="Que pantalla es?"))
+        first = kanvas.inbox_tasks(self.board())[0]["id"]
+        self.assertEqual(self.keyboard(api.sent[-1]), [f"dr:{first}"])
+        self.handle_with_po(bridge, self.tg_message("Noticias, en iPhone"), self.po_reply(kind="bug"))
+        self.assertEqual([t["id"] for t in kanvas.inbox_tasks(self.board())], [first])
+        self.assertIn("[owner] Noticias, en iPhone", self.po_prompt)
+        self.assertEqual(self.keyboard(api.sent[-1]), [f"ap:{first}", f"dr:{first}"])
+        self.handle_with_po(bridge, self.tg_message("Otra cosa distinta"), self.po_reply(title="Otra", ready=False))
+        self.assertEqual(len(kanvas.inbox_tasks(self.board())), 2)
+
+    def test_new_starts_another_idea_even_when_one_is_half_done(self):
+        self.inbox_board()
+        bridge, _ = self.bridge()
+        self.handle_with_po(bridge, self.tg_message("Idea uno"), self.po_reply(ready=False, questions=["q?"]))
+        self.handle_with_po(bridge, self.tg_message("/new Idea dos"), self.po_reply(title="Dos", ready=False))
+        self.assertEqual(len(kanvas.inbox_tasks(self.board())), 2)
+
+    def test_the_buttons_approve_or_drop_the_idea(self):
+        self.inbox_board()
+        bridge, api = self.bridge()
+        self.handle_with_po(bridge, self.tg_message("Idea"), self.po_reply())
+        task_id = kanvas.inbox_tasks(self.board())[0]["id"]
+        query = lambda data: {"update_id": 5, "callback_query": {"id": "q", "from": {"id": self.OWNER}, "data": data,
+                                                                  "message": {"chat": {"id": self.OWNER, "type": "private"}}}}
+        bridge.handle(query(f"ap:{task_id}"))
+        self.assertEqual(self.get(task_id)["state"], "todo")
+        self.assertEqual(self.get(task_id)["definition"]["via"], "Telegram")
+        self.assertIn("aprobado", api.sent[-1]["text"])
+        self.assertIn(("answerCallbackQuery", {"callback_query_id": "q"}), api.calls)
+        bridge.handle(query(f"ap:{task_id}"))
+        self.assertIn("not an idea", api.sent[-1]["text"])
+        silly = kanvas.inbox_submit(self.path, "Tonteria", "telegram")
+        bridge.handle(query(f"dr:{silly}"))
+        self.assertIn("descartado", api.sent[-1]["text"])
+        self.assertEqual([t["id"] for t in kanvas.inbox_tasks(self.board())], [])
+
+    def test_the_bot_commands_list_approve_drop_and_explain(self):
+        self.inbox_board()
+        bridge, api = self.bridge()
+        bridge.handle(self.tg_message("/help"))
+        self.assertIn("/new", api.sent[-1]["text"])
+        bridge.handle(self.tg_message("/list"))
+        self.assertEqual(api.sent[-1]["text"], "No hay ideas pendientes.")
+        idea = kanvas.inbox_submit(self.path, "Una idea", "telegram")
+        bridge.handle(self.tg_message("/list"))
+        self.assertIn(idea, api.sent[-1]["text"])
+        bridge.handle(self.tg_message(f"/approve {idea}"))
+        self.assertIn("still lacks", api.sent[-1]["text"])
+        bridge.handle(self.tg_message(f"/drop {idea.lower()}"))
+        self.assertIn("descartado", api.sent[-1]["text"])
+        bridge.handle(self.tg_message("/nope"))
+        self.assertIn("No conozco", api.sent[-1]["text"])
+
+    def test_a_photo_with_a_caption_is_kept_and_given_to_the_product_owner(self):
+        self.inbox_board()
+        bridge, api = self.bridge()
+        update = self.tg_message("", photo=[{"file_id": "small"}, {"file_id": "big"}], caption="Un club nos manda esta captura")
+        self.handle_with_po(bridge, update, self.po_reply(kind="bug"))
+        task = self.get(kanvas.inbox_tasks(self.board())[0]["id"])
+        note = task["notes"][0]["text"]
+        self.assertIn("Un club nos manda esta captura", note)
+        kept = re.search(r"\[attachment: (.*)\]", note).group(1)
+        with open(kept, "rb") as f:
+            self.assertEqual(f.read(), b"\xff\xd8fake-jpeg")
+        self.assertIn(os.path.join(self.dir, ".kanvas", "inbox"), kept)
+        self.assertIn(kept, self.po_prompt)
+
+    def test_the_bot_polls_for_updates_and_moves_its_offset(self):
+        self.inbox_board()
+        bridge, api = self.bridge([{**self.tg_message("/help"), "update_id": 7}, {**self.tg_message("/list"), "update_id": 9}])
+        bridge.run(once=True)
+        self.assertEqual(bridge.offset, 10)
+        self.assertEqual(len(api.sent), 2)
+
+    def test_the_bot_token_is_never_shown_nor_given_to_an_agent(self):
+        with mock.patch.dict(os.environ, {"KANVAS_TELEGRAM_TOKEN": "123:SECRET", "KEEP_THIS": "yes"}):
+            env = kanvas.agent_environment()
+        self.assertNotIn("KANVAS_TELEGRAM_TOKEN", env)
+        self.assertEqual(env["KEEP_THIS"], "yes")
+        with mock.patch.object(kanvas.urllib.request, "urlopen", side_effect=kanvas.urllib.error.URLError("failed for https://x/bot123:SECRET/getMe")):
+            with self.assertRaises(kanvas.TelegramError) as caught:
+                kanvas.telegram_api("123:SECRET")("getMe")
+        self.assertNotIn("SECRET", str(caught.exception))
+
+    def test_the_bot_refuses_to_start_without_a_token_and_the_owner_id(self):
+        self.inbox_board()
+        clean = {"KANVAS_TELEGRAM_TOKEN": "", "KANVAS_TELEGRAM_USERS": "", "KANVAS_STATE_DIR": os.path.join(self.dir, "state")}
+        self.assertIn("Connect Telegram first", self.fails("telegram", env=clean))
+        self.assertIn("KANVAS_TELEGRAM_USERS", self.fails("telegram", env={**clean, "KANVAS_TELEGRAM_TOKEN": "1:x"}))
+        self.assertIn("KANVAS_TELEGRAM_USERS", self.fails("telegram", env={**clean, "KANVAS_TELEGRAM_TOKEN": "1:x", "KANVAS_TELEGRAM_USERS": "me"}))
+
+    def test_the_owner_pairs_by_sending_the_code_the_board_showed_and_only_that_account_is_heard_after(self):
+        self.inbox_board()
+        paired = []
+        api = self.FakeTelegram()
+        bridge = kanvas.TelegramBridge(self.path, api, [], say=lambda m: None, pairing={"code": "123456", "expires": time.time() + 60},
+                                       on_pair=paired.append)
+        for update in (self.tg_message("123456", user=7, chat_type="group"), self.tg_message("654321", user=7), self.tg_message("hola", user=7)):
+            bridge.handle(update)
+        self.assertEqual((api.sent, paired, bridge.users), ([], [], set()))
+        bridge.handle(self.tg_message("123456", user=7))
+        self.assertEqual((paired, bridge.users), ([7], {7}))
+        self.assertIn("Conectado", api.sent[-1]["text"])
+        self.assertIsNone(bridge.pairing)
+        sent = len(api.sent)
+        bridge.handle(self.tg_message("123456", user=8))
+        self.assertEqual((len(api.sent), bridge.users), (sent, {7}))
+        bridge.handle(self.tg_message("/help", user=7))
+        self.assertIn("/new", api.sent[-1]["text"])
+
+    def test_an_expired_pairing_code_pairs_nobody(self):
+        bridge = kanvas.TelegramBridge(self.path, self.FakeTelegram(), [], say=lambda m: None,
+                                       pairing={"code": "123456", "expires": time.time() - 1}, on_pair=lambda u: self.fail("paired"))
+        bridge.handle(self.tg_message("123456", user=7))
+        self.assertEqual(bridge.users, set())
+
+    def test_the_saved_connection_is_read_and_the_environment_wins_when_it_is_complete(self):
+        with tempfile.TemporaryDirectory() as state, mock.patch.dict(os.environ, {"KANVAS_STATE_DIR": state, "KANVAS_TELEGRAM_TOKEN": "",
+                                                                                   "KANVAS_TELEGRAM_USERS": ""}):
+            self.assertEqual(kanvas.telegram_config(), {})
+            kanvas.save_telegram_config({"token": "1:abc", "users": [5, "x"], "bot": "mybot", "pairing": None})
+            self.assertEqual(kanvas.telegram_config()["users"], [5])
+            with mock.patch.dict(os.environ, {"KANVAS_TELEGRAM_TOKEN": "9:env", "KANVAS_TELEGRAM_USERS": "11, 12"}):
+                self.assertEqual((kanvas.telegram_config()["token"], kanvas.telegram_config()["users"]), ("9:env", [11, 12]))
+            self.assertEqual(len(kanvas.new_pairing()["code"]), 6)
+
     def png_size(self, path):
         with open(path, "rb") as f:
             head = f.read(24)
@@ -3666,6 +3993,99 @@ class ServerTests(TempBoard):
         self.assertEqual(self.request("GET", f"/{self.name}/api/design/DV-02")[2].decode("utf-8"), page)
         self.assertEqual(self.request("GET", f"/{self.name}/api/design/DV-02?round=9")[0], 404)
         self.assertEqual(self.request("GET", f"/{self.name}/api/design/NOPE-1")[0], 404)
+
+    def inbox_request(self, method, path, body=None, headers=None):
+        payload = json.dumps(body).encode("utf-8") if body is not None else None
+        return self.request(method, f"/{self.name}/api/inbox{path}", payload, {"Content-Type": "application/json", **(headers or {})})
+
+    def test_the_inbox_page_and_api_answer_this_computer(self):
+        status, headers, body = self.request("GET", f"/{self.name}/inbox")
+        self.assertEqual(status, 200)
+        self.assertIn(b"An idea, or an incident", body)
+        fake = {"reply": "ok", "ready": False, "kind": "idea", "questions": [], "duplicates": [], "task": ""}
+        with mock.patch.object(kanvas, "inbox_po_turn", side_effect=lambda path, tid: {**fake, "task": tid}), \
+             mock.patch.object(kanvas.shutil, "which", return_value="claude"):
+            status, _, raw = self.inbox_request("POST", "", {"text": "Una idea", "source": "web"})
+            self.assertEqual(status, 202)
+            job = json.loads(raw)
+            for _ in range(50):
+                _, _, polled = self.inbox_request("GET", f"/job/{job['job']}")
+                if json.loads(polled)["status"] != "running":
+                    break
+                time.sleep(0.1)
+        self.assertEqual(json.loads(polled)["status"], "done")
+        listed = json.loads(self.inbox_request("GET", "")[2])["items"]
+        self.assertEqual([i["id"] for i in listed], [job["task"]])
+        self.assertEqual(listed[0]["thread"][0]["text"], "Una idea")
+        self.assertEqual(self.inbox_request("POST", f"/{job['task']}/drop", {})[0], 200)
+        self.assertEqual(json.loads(self.inbox_request("GET", "")[2])["items"], [])
+
+    def test_a_phone_needs_the_paired_token_to_use_the_inbox(self):
+        with tempfile.TemporaryDirectory() as state, mock.patch.dict(os.environ, {"KANVAS_STATE_DIR": state}):
+            phone = {"X-Forwarded-For": "100.64.0.9"}
+            self.assertEqual(self.inbox_request("GET", "", headers=phone)[0], 403)
+            self.assertEqual(self.inbox_request("POST", "", {"text": "x"}, phone)[0], 403)
+            token = kanvas.new_inbox_token()
+            self.assertEqual(self.inbox_request("GET", "", headers={**phone, "X-Kanvas-Token": "wrong"})[0], 403)
+            self.assertEqual(self.inbox_request("GET", "", headers={**phone, "X-Kanvas-Token": token})[0], 200)
+            with open(kanvas.inbox_token_file(), encoding="utf-8") as f:
+                self.assertNotIn(token, f.read())
+            newer = kanvas.new_inbox_token()
+            self.assertEqual(self.inbox_request("GET", "", headers={**phone, "X-Kanvas-Token": token})[0], 403)
+            self.assertEqual(self.inbox_request("GET", "", headers={**phone, "X-Kanvas-Token": newer})[0], 200)
+
+    def telegram_request(self, body=None, headers=None):
+        method = "POST" if body is not None else "GET"
+        return self.request(method, f"/{self.name}/api/telegram", json.dumps(body).encode("utf-8") if body is not None else None,
+                            {"Content-Type": "application/json", **(headers or {})})
+
+    def test_connecting_telegram_from_the_board_keeps_the_token_and_shows_a_pairing_code(self):
+        token = "123456789:" + "A" * 30
+
+        def fake_api(given):
+            self.assertEqual(given, token)
+            return lambda method, params=None, timeout=40: {"username": "mybot"}
+
+        with tempfile.TemporaryDirectory() as state, mock.patch.dict(os.environ, {"KANVAS_STATE_DIR": state, "KANVAS_TELEGRAM_TOKEN": "",
+                                                                                   "KANVAS_TELEGRAM_USERS": ""}), \
+             mock.patch.object(kanvas, "telegram_api", side_effect=fake_api), mock.patch.object(kanvas.TelegramBridge, "run"):
+            self.assertEqual(json.loads(self.telegram_request()[2])["connected"], False)
+            self.assertEqual(self.telegram_request({"action": "connect", "token": "nope"})[0], 400)
+            status, _, raw = self.telegram_request({"action": "connect", "token": token})
+            info = json.loads(raw)
+            self.assertEqual(status, 200)
+            self.assertEqual((info["connected"], info["bot"], info["users"], info["running"]), (True, "mybot", 0, True))
+            self.assertRegex(info["code"], r"^\d{6}$")
+            self.assertNotIn(token, raw.decode("utf-8"))
+            saved = kanvas.telegram_config()
+            self.assertEqual((saved["token"], saved["bot"], saved["users"], saved["board"]), (token, "mybot", [], self.path))
+            self.assertEqual(saved["pairing"]["code"], info["code"])
+            again = json.loads(self.telegram_request({"action": "pair"})[2])
+            self.assertTrue(again["code"])
+            self.assertEqual(json.loads(self.telegram_request({"action": "disconnect"})[2])["connected"], False)
+            self.assertFalse(os.path.exists(kanvas.telegram_file()))
+            self.assertEqual(self.telegram_request({"action": "dance"})[0], 400)
+
+    def test_only_this_computer_may_connect_telegram(self):
+        phone = {"X-Forwarded-For": "100.64.0.9"}
+        self.assertEqual(self.telegram_request(headers=phone)[0], 403)
+        self.assertEqual(self.telegram_request({"action": "disconnect"}, phone)[0], 403)
+
+    def test_a_token_telegram_refuses_is_reported_without_saving_it(self):
+        token = "123456789:" + "B" * 30
+
+        def refusing(given):
+            def call(method, params=None, timeout=40):
+                raise kanvas.TelegramError("Unauthorized")
+            return call
+
+        with tempfile.TemporaryDirectory() as state, mock.patch.dict(os.environ, {"KANVAS_STATE_DIR": state, "KANVAS_TELEGRAM_TOKEN": "",
+                                                                                   "KANVAS_TELEGRAM_USERS": ""}), \
+             mock.patch.object(kanvas, "telegram_api", side_effect=refusing):
+            status, _, raw = self.telegram_request({"action": "connect", "token": token})
+            self.assertEqual(status, 400)
+            self.assertIn("Unauthorized", raw.decode("utf-8"))
+            self.assertFalse(os.path.exists(kanvas.telegram_file()))
 
     def test_starting_skips_the_host_name_lookup(self):
         """socket.getfqdn, which HTTPServer calls on start, can take half a minute on macOS."""
