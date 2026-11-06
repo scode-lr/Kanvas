@@ -2982,7 +2982,8 @@ function renderPlant() {
       who ? h("span", { class: "who" }, `The ${who} is working`) : need ? h("span", { class: "who" }, PLANT_NEEDS[need]) : null);
   };
   const stations = PLANT_STATIONS.map(({ state, name, art }) => {
-    const here = shown.filter((t) => (state === "todo" ? ["todo", "blocked"].includes(vstate(t)) : vstate(t) === state));
+    // Merged to dev is as far as the loading dock goes: Develop and Done share it.
+    const here = shown.filter((t) => ({ todo: ["todo", "blocked"], done: ["develop", "done"] }[state] || [state]).includes(vstate(t)));
     const finished = state === "done" || state === "production";
     const list = finished ? here.slice(-5).reverse() : here;
     const working = here.some((t) => agentBusy(t) || ["queued", "running"].includes(t.work?.automation?.status));

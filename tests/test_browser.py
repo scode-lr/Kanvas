@@ -467,6 +467,7 @@ class BrowserSmokeTests(unittest.TestCase):
             waiting = kanvas.find_task(board, "BE-05")
             waiting["state"] = "review"
             waiting["review"] = {"agent": {"status": "approved"}, "manual": {"status": "pending"}}
+            kanvas.find_task(board, "BE-04")["state"] = "develop"
         kanvas.mutate(self.path, staged)
         self.load()
         self.page.js("document.querySelector('#view-plant').click()")
@@ -474,6 +475,7 @@ class BrowserSmokeTests(unittest.TestCase):
         station = lambda state, task: self.page.js(f"!!document.querySelector('#plant .st-{state} .crate[data-id=\"{task}\"]')")
         self.assertTrue(station("doing", "BE-03"))
         self.assertTrue(station("review", "BE-05"))
+        self.assertTrue(station("done", "BE-04"))  # merged to dev stays at the loading dock
         self.assertTrue(self.page.js("!!document.querySelector('#plant .st-doing.running')"))
         self.assertFalse(self.page.js("!!document.querySelector('#plant .st-review.running')"))
         self.assertTrue(self.page.js("!!document.querySelector('#plant .belt.flow')"))
