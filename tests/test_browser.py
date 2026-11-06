@@ -593,6 +593,35 @@ class BrowserSmokeTests(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(kanvas.find_task(kanvas.load_board(self.path), "BE-03")["state"], before)
 
+    def test_a_task_the_agent_builds_goes_to_review_by_itself_and_a_failed_run_has_retry(self):
+        def automated(status):
+            def op(board):
+                board["automation"] = {"repositories": [{"id": "front", "name": "front", "path": self.dir}]}
+                task = kanvas.find_task(board, "BE-03")
+                task["state"] = "doing"
+                task["work"] = {"by": "human", "plan": "Build it", "repositories": ["front"],
+                                "automation": {"status": status, "round": 1, "updated": kanvas.now_iso()}}
+            return op
+        buttons = "[...document.querySelectorAll('#panel button')].map((b) => b.textContent.trim())"
+        kanvas.mutate(self.path, automated("completed"))
+        self.load("#BE-03")
+        self.until("the panel", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")
+        self.assertFalse(self.page.js(f"{buttons}.some((b) => /Send to review|Retry/.test(b))"))
+        kanvas.mutate(self.path, automated("failed"))
+        self.load("#BE-03")
+        self.until("Retry", f"{buttons}.some((b) => b === 'Retry')")
+        self.assertTrue(self.page.js(f"{buttons}.some((b) => /finished it by hand/.test(b))"))
+        self.page.js("[...document.querySelectorAll('#panel button')].find((b) => b.textContent.trim() === 'Retry').click()")
+        self.until("the retry", "true", timeout=5)
+        for _ in range(30):
+            time.sleep(0.2)
+            if "automation" not in (kanvas.find_task(kanvas.load_board(self.path), "BE-03")["work"] or {}) or                     kanvas.find_task(kanvas.load_board(self.path), "BE-03")["work"]["automation"].get("status") != "failed":
+                break
+        run = kanvas.find_task(kanvas.load_board(self.path), "BE-03")["work"].get("automation", {})
+        self.assertNotEqual(run.get("status"), "failed")
+        self.assertEqual(run.get("round"), 1)
+        self.assertEqual(self.page.logged(), [])
+
     def test_the_one_thing_allowed_on_a_busy_task_is_asking_the_agent_to_stop(self):
         def busy(board):
             task = kanvas.find_task(board, "BE-03")

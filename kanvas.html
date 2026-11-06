@@ -2710,6 +2710,14 @@ const ops = {
     t.state = "todo";
     addNote(t, "PO/TL product definition approved after Grill me.", at);
   },
+  // Runs a failed automation again in its worktree, as `kanvas retry` does.
+  retry: (id, at = nowIso()) => (b) => {
+    const t = mustFind(b, id), run = t.work?.automation;
+    if (t.state !== "doing" || run?.status !== "failed") throw new Error(`${t.id} has no failed automation to retry`);
+    const kept = Object.fromEntries(["round", "since", "pull_requests", "cycle_start"].filter((k) => k in run).map((k) => [k, run[k]]));
+    if (Object.keys(kept).length) t.work.automation = kept; else delete t.work.automation;
+    addNote(t, "Retrying failed automation in its existing isolated worktree.", at);
+  },
   startWork: (id, plan, design = null, at = nowIso()) => (b) => {
     const t = mustFind(b, id);
     if (vstateIn(indexOf(b), t) !== "todo") throw new Error(`${t.id} is not ready to start`);
@@ -4538,7 +4546,17 @@ function stateMoves(t) {
     case "blocked": return !t.definition?.approved
       ? [{ label: "PO/TL Grill me", icon: "check", run: () => approveDefinition(t), to: "todo", primary: true, asks: true }]
       : [];
-    case "doing": return [{ label: "Send to review", icon: "check", run: to("review"), to: "review", primary: true }, { label: "Pause", icon: "pause", run: to("todo"), to: "todo" }];
+    case "doing": {
+      const pause = { label: "Pause", icon: "pause", run: to("todo"), to: "todo" };
+      // A task Factory builds goes to Review by itself when its agent finishes. The button only appears when it cannot:
+      // a failed run (retry it, or say you finished it by hand), or a task nobody automates.
+      const automated = Boolean(board.automation?.repositories?.length && t.work?.repositories?.length);
+      if (!automated) return [{ label: "Send to review", icon: "check", run: to("review"), to: "review", primary: true }, pause];
+      if (t.work?.automation?.status === "failed") return [
+        { label: "Retry", icon: "play", run: () => undoable(ops.retry(t.id), `Retrying ${t.id}`), primary: true },
+        { label: "I finished it by hand: send to review", icon: "check", run: to("review"), to: "review" }, pause];
+      return [pause];
+    }
     case "review": {
       const agent = t.review?.agent?.status === "approved", manual = t.review?.manual?.status === "approved";
       return [
