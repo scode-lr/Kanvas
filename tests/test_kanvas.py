@@ -2925,6 +2925,54 @@ class AutomationTests(TempBoard):
             done.wait(2)
         return launched
 
+    def yolo_todo_board(self, repo, yolo=True):
+        board = self.automated_board(repo)
+        task = kanvas.find_task(board, "DV-02")
+        task["state"], task["yolo"] = "todo", yolo
+        task.pop("work", None)
+        task["definition"] = {"outcome": "o", "needs": "n", "acceptance": "a", "approved": True, "repositories": ["front"]}
+        return board
+
+    def plan_by_itself(self, board, job):
+        write_board(self.path, board)
+        dispatcher = object.__new__(kanvas.AutomationDispatcher)
+        dispatcher.lock, dispatcher.active, dispatcher.stop_event = threading.Lock(), set(), threading.Event()
+        dispatcher.server = mock.Mock(boards={"b": self.path})
+        dispatcher.server.start_assist.return_value = job
+        with mock.patch.object(kanvas, "run_automation"):
+            dispatcher.scan(self.path)
+            for _ in range(50):
+                time.sleep(0.1)
+                if not dispatcher.active:
+                    break
+        return dispatcher
+
+    def test_yolo_writes_the_plan_of_a_defined_task_and_starts_it(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        job = {"status": "done", "result": {"draft": {"plan": "Plan by the architect."}, "questions": [{"text": "Which clubs?"}]}}
+        dispatcher = self.plan_by_itself(self.yolo_todo_board(repo), job)
+        dispatcher.server.start_assist.assert_called_once()
+        task = self.get("DV-02")
+        self.assertEqual(task["state"], "doing")
+        self.assertEqual(task["work"]["plan"], "Plan by the architect.")
+        self.assertIn("Which clubs?", task["notes"][-1]["text"])
+
+    def test_without_yolo_nothing_plans_by_itself(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        dispatcher = self.plan_by_itself(self.yolo_todo_board(repo, yolo=False), {"status": "done", "result": {}})
+        dispatcher.server.start_assist.assert_not_called()
+        self.assertEqual(self.get("DV-02")["state"], "todo")
+
+    def test_a_plan_yolo_could_not_write_leaves_a_note_and_the_task_in_todo(self):
+        repo = os.path.join(self.dir, "front")
+        os.makedirs(repo)
+        dispatcher = self.plan_by_itself(self.yolo_todo_board(repo), {"status": "failed", "error": "boom"})
+        task = self.get("DV-02")
+        self.assertEqual(task["state"], "todo")
+        self.assertIn("could not write the technical plan: boom", task["notes"][-1]["text"])
+
     def test_a_task_sent_back_to_doing_runs_again_as_the_next_round(self):
         repo = os.path.join(self.dir, "front")
         os.makedirs(repo)

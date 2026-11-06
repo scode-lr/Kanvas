@@ -2328,8 +2328,8 @@ def cmd_status(args):
     yolo = [t["id"] for t in board["tasks"] if cover.get(t["id"].upper()) == t["id"]]
     if yolo:
         names = ", ".join(yolo)
-        print(f"YOLO on {names}: tasks marked (YOLO) still require definition and review gates; "
-              "YOLO only keeps the chain selected for autonomous work.")
+        print(f"YOLO on {names}: tasks marked (YOLO) still require definition, design and review gates; "
+              "YOLO writes their plans and keeps the chain selected for autonomous work.")
     sections = (
         ("doing", "Doing"),
         ("review", "Waiting for agent/manual review"),
@@ -4407,6 +4407,7 @@ class AutomationDispatcher:
         self.server = server
         self.stop_event = threading.Event()
         self.active = set()
+        self.tried = set()
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self._loop, name="kanvas-automation", daemon=True)
         self.thread.start()
@@ -4436,6 +4437,7 @@ class AutomationDispatcher:
             clear_busy_marks(path)
             board = load_board(path)
         self._settle_orphan_stops(path, board)
+        cover, tasks = yolo_cover(board), task_map(board)
         for task in list(board["tasks"]):
             work = task.get("work") if isinstance(task.get("work"), dict) else {}
             run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
@@ -4449,6 +4451,13 @@ class AutomationDispatcher:
                     and ((task.get("review") or {}).get("agent") or {}).get("status") == "pending"
                     and run.get("reviewed_round") != int(run.get("round") or 1)):
                 self._start_review(path, task["id"])
+                continue
+            # YOLO writes the plan by itself for a defined task of the chain that is free to start. The human still
+            # approves the design, if the task has one, and the pull request.
+            if (task.get("state") == "todo" and not work and cover.get(task["id"].upper()) and task_repository_ids(task)
+                    and view_state(task, tasks) == "todo" and isinstance(task.get("definition"), dict)
+                    and task["definition"].get("approved")):
+                self._start_auto_plan(path, task["id"])
                 continue
             # A completed run moves its task to Review, so a completed run on a task in Doing was sent back.
             sent_back = run.get("status") == "completed"
@@ -4538,6 +4547,67 @@ class AutomationDispatcher:
                                        "summary": "Stopped by you; it was not running any more."}
                     add_note(t, "Automation failed: stopped by you; it was not running any more.", "kanvas-runner")
             mutate(path, settle)
+
+    def _start_auto_plan(self, path, task_id):
+        """YOLO: has the architect and the senior write the construction plan of a task the human already defined, and starts it.
+        It tries once per task while the server runs; a failure leaves a note and the task in To do for the human."""
+        token = ("plan", os.path.normcase(os.path.abspath(path)), task_id.upper())
+        tried = self.__dict__.setdefault("tried", set())
+        with self.lock:
+            if token in self.active or token in tried:
+                return
+            self.active.add(token)
+
+        def note_failure(reason):
+            def add(board):
+                t = find_task(board, task_id)
+                if t.get("state") == "todo" and not t.get("work"):
+                    add_note(t, f"YOLO could not write the technical plan: {reason}. Plan it by hand with Architect/Senior Grill me.", "factory")
+            try:
+                mutate(path, add)
+            except Exception:
+                pass
+
+        def execute():
+            retry = False
+            try:
+                name = next((n for n, p in self.server.boards.items()
+                             if os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(path))), None)
+                if name is None:
+                    return
+                try:
+                    job = self.server.start_assist(name, "plan", task_id, {"plan": ""})
+                except AssistBusy:
+                    retry = True
+                    return
+                while job["status"] == "running" and not self.stop_event.wait(2):
+                    pass
+                if job["status"] != "done":
+                    raise KanvasError(job.get("error") or "the agents did not finish")
+                plan = job["result"]["draft"]["plan"]
+                settled = "; ".join(q["text"] if isinstance(q, dict) else str(q) for q in job["result"].get("questions") or [])
+
+                def start(board):
+                    t = find_task(board, task_id)
+                    definition = t.get("definition") if isinstance(t.get("definition"), dict) else {}
+                    if t.get("state") != "todo" or t.get("work") or not definition.get("approved"):
+                        return None
+                    at = now_iso()
+                    t["work"] = {"by": "factory (YOLO)", "at": at, "plan": plan, "repositories": list(definition.get("repositories") or [])}
+                    t.pop("review", None)
+                    t["state"] = "doing"
+                    add_note(t, plan + (f"\n\nOpen questions it settled with its best option: {settled}" if settled else ""), "factory")
+                    return t
+                mutate(path, start)
+            except Exception as e:
+                note_failure(str(e))
+            finally:
+                with self.lock:
+                    self.active.discard(token)
+                    if not retry:
+                        tried.add(token)
+
+        threading.Thread(target=execute, name=f"kanvas-plan-{task_id}", daemon=True).start()
 
     def _start_design(self, path, task_id):
         """Has the designer propose the UI/UX of a task that is about to start, unless it is already doing so."""
@@ -5953,8 +6023,9 @@ workflow:  proposed -> todo -> doing -> review -> develop -> done -> production
   A todo task with unfinished dependencies shows as blocked.
   An agent that needs the human's reply in the conversation runs `ask`
   first, so the board shows the task waiting for them until the next note.
-  YOLO selects a dependency chain for autonomous attention; it never bypasses
-  definitions, plans, reviews, merges or production evidence.
+  YOLO selects a dependency chain for autonomous attention: Factory writes the plans
+  of its defined tasks by itself; it never bypasses definitions, designs, reviews,
+  merges or production evidence.
 
 examples:
   %(prog)s status
