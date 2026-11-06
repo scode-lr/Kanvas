@@ -4543,11 +4543,13 @@ async function approveManualReview(t) {
 async function recordDevMerge(t) {
   const data = await modal(`Merge to dev · ${t.id}`, [
     h("p", {}, "Record the pull request and commit evidence merged into every affected dev branch. The task moves to Develop."),
-    h("label", { class: "field" }, "PR / dev commit evidence", h("textarea", { name: "evidence", rows: 5, required: true,
+    h("label", { class: "field" }, "PR / dev commit evidence (optional)", h("textarea", { name: "evidence", rows: 5,
+      value: (t.work?.automation?.pull_requests || []).map((pr) => `${pr.name || pr.id}: ${pr.url || pr.branch || ""}`).join("
+"),
       placeholder: "Repository, pull request URL and merge commit SHA for frontend/API…" })),
   ], { ok: "Record merge to dev" });
   if (!data) return;
-  review(t, "develop", "", () => recordDevMerge(t), ops.mergeDev(t.id, data.get("evidence").trim()));
+  review(t, "develop", "", () => recordDevMerge(t), ops.mergeDev(t.id, data.get("evidence").trim() || "no evidence written"));
 }
 
 async function recordProduction(t) {
