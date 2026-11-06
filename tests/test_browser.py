@@ -655,6 +655,31 @@ class BrowserSmokeTests(unittest.TestCase):
         run = task["work"]["automation"]
         self.assertEqual((task["state"], run.get("status"), run["round"], run["cycle_start"]), ("doing", None, 3, 3))
 
+    def test_the_description_definition_and_plan_fold_with_one_click_and_the_pull_requests_sit_under_the_status(self):
+        def work(board):
+            task = kanvas.find_task(board, "BE-03")
+            task["state"] = "doing"
+            task["desc"] = "A description to read."
+            task["definition"] = {"outcome": "An outcome", "needs": "n", "acceptance": "a", "approved": True}
+            task["work"] = {"by": "human", "plan": "The plan to read", "automation": {"status": "completed", "round": 1, "pull_requests": [
+                {"id": "front", "name": "Front", "branch": "feature/BE-03", "url": "https://github.com/a/b/pull/1"}]}}
+        kanvas.mutate(self.path, work)
+        self.load("#BE-03")
+        self.until("the panel", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")
+        self.assertTrue(self.page.js("document.querySelector('#panel .now').nextElementSibling.classList.contains('pr-strip')"))
+        self.assertIn("pull/1", self.page.js("document.querySelector('#panel .pr-strip a').href"))
+        visible = "(text) => [...document.querySelectorAll('#panel .md, #panel .p-sec > div')].some((e) => e.textContent.includes(text) && !e.hidden && e.offsetParent !== null)"
+        for text, head in (("A description to read.", "Description"), ("An outcome", "Product definition"), ("The plan to read", "Construction plan")):
+            self.assertTrue(self.page.js(f"({visible})('{text}')"), text)
+            self.page.js(f"[...document.querySelectorAll('#panel .section-head.foldable')].find((h) => h.textContent.startsWith('{head}')).click()")
+            self.assertFalse(self.page.js(f"({visible})('{text}')"), f"{head} should be folded")
+        self.load("#BE-03")
+        self.until("the panel again", "document.querySelector('#panel .cid')?.textContent === 'BE-03'")
+        self.assertFalse(self.page.js(f"({visible})('The plan to read')"))
+        self.page.js("[...document.querySelectorAll('#panel .section-head.foldable')].find((h) => h.textContent.startsWith('Construction plan')).click()")
+        self.assertTrue(self.page.js(f"({visible})('The plan to read')"))
+        self.assertEqual(self.page.logged(), [])
+
     def test_the_one_thing_allowed_on_a_busy_task_is_asking_the_agent_to_stop(self):
         def busy(board):
             task = kanvas.find_task(board, "BE-03")

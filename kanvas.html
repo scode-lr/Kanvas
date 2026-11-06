@@ -490,6 +490,15 @@ button.say { padding: 1px 6px; gap: 5px; font: 600 12px var(--mono); vertical-al
 .qa-item textarea, .qa-item input { width: 100%; }
 .section-head { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 .section-head .count { color: var(--faint); font-weight: 600; letter-spacing: 0; }
+.section-head.foldable { cursor: pointer; user-select: none; }
+.section-head.foldable::before { content: "▾"; width: 1em; color: var(--faint); font-size: 12px; letter-spacing: 0; }
+.section-head.foldable[aria-expanded="false"]::before { content: "▸"; }
+.section-head.foldable:hover::before { color: var(--text); }
+.section-head.foldable:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 2px; border-radius: 4px; }
+[hidden] { display: none !important; }
+.pr-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-size: 13px; }
+.pr-strip > b { font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.pr-link { overflow-wrap: anywhere; }
 .section-head .lane-bar { width: 36px; }
 .section-head button { margin-left: auto; padding: 2px 7px; font-size: 12px; font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--muted); }
 .section-head button:hover { color: var(--text); }
@@ -4654,6 +4663,32 @@ function keepPanelFocus(panel, render) {
   (target || panel).focus({ preventScroll: true });
 }
 
+// A section of the task panel that folds with one click. The choice is kept for every task, in this browser.
+const folded = (key) => Boolean(prefs.folded?.[key]);
+function foldable(key, head, enabled = true) {
+  if (!enabled) return head;
+  const open = !folded(key);
+  head.classList.add("foldable");
+  head.setAttribute("role", "button");
+  head.tabIndex = 0;
+  head.setAttribute("aria-expanded", String(open));
+  head.title = open ? "Click to hide" : "Click to show";
+  const flip = () => { prefs.folded = { ...prefs.folded, [key]: open }; savePrefs(); renderPanel(); };
+  head.addEventListener("click", (e) => { if (!e.target.closest("button, a")) flip(); });
+  head.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && e.target === head) { e.preventDefault(); flip(); } });
+  return head;
+}
+
+// The pull requests of the agent's work, right under its status.
+function pullRequestStrip(t) {
+  const pulls = t.work?.automation?.pull_requests || [];
+  if (!pulls.length) return null;
+  return h("div", { class: "pr-strip" }, h("b", {}, pulls.length === 1 ? "Pull request" : "Pull requests"),
+    ...pulls.map((pr) => /^https:\/\//.test(pr.url || "")
+      ? h("a", { class: "pr-link", href: pr.url, target: "_blank", rel: "noopener" }, `${pr.name || pr.id} · ${pr.branch || ""}`)
+      : h("span", { class: "pr-link" }, `${pr.name || pr.id} · ${pr.branch || ""}`)));
+}
+
 function renderPanel() {
   const panel = $("#panel");
   const t = ui.selected && get(ui.selected);
@@ -4771,8 +4806,8 @@ function fillPanel(panel, t) {
   const done = checks.filter(Boolean).length;
   const workflow = [];
   if (t.definition) workflow.push(h("section", { class: "p-sec" },
-    h("div", { class: "section-head" }, "Product definition", h("span", { class: "count" }, t.definition.approved ? "approved" : "draft")),
-    h("div", { class: "md" },
+    foldable("definition", h("div", { class: "section-head" }, "Product definition", h("span", { class: "count" }, t.definition.approved ? "approved" : "draft"))),
+    h("div", { class: "md", hidden: folded("definition") },
       t.definition.priority ? h("p", {}, h("b", {}, "Priority: "), PRIORITY_NAMES[t.definition.priority] || t.definition.priority) : null,
       h("p", {}, h("b", {}, "Outcome: "), t.definition.outcome || "—"),
       h("p", {}, h("b", {}, "Needs: "), t.definition.needs || "—"),
@@ -4781,18 +4816,14 @@ function fillPanel(panel, t) {
       t.definition.repositories?.length ? h("p", {}, h("b", {}, "Repositories: "), t.definition.repositories.join(", ")) : null,
       t.definition.agent ? h("p", {}, h("b", {}, "Agent: "), t.definition.agent) : null)));
   if (t.work) workflow.push(h("section", { class: "p-sec" },
-    h("div", { class: "section-head" }, "Construction plan", h("span", { class: "count" }, t.work.by || "?")),
-    h("div", { class: "md" },
+    foldable("plan", h("div", { class: "section-head" }, "Construction plan", h("span", { class: "count" }, t.work.by || "?"))),
+    h("div", { class: "md", hidden: folded("plan") },
       h("p", {}, t.work.plan || "—"),
       ...(t.work.git || []).map((g) => h("p", {}, h("b", {}, "Git: "),
         `${g.branch || "?"} @ ${(g.commit || "").slice(0, 12)}${g.dirty ? " + uncommitted changes" : ""}`,
         h("br"), h("span", { class: "muted" }, g.worktree || g.repo || ""))),
       t.work.automation ? h("p", {}, h("b", {}, "Automation: "), (t.work.automation.status || "unknown") + (t.work.automation.round > 1 ? ` (round ${t.work.automation.round})` : ""),
-        t.work.automation.summary ? ` · ${t.work.automation.summary}` : "") : null,
-      ...(t.work.automation?.pull_requests || []).map((pr) => h("p", {}, h("b", {}, "Pull request: "),
-        /^https:\/\//.test(pr.url || "")
-          ? h("a", { href: pr.url, target: "_blank", rel: "noopener" }, `${pr.name || pr.id} · ${pr.branch || ""}`)
-          : `${pr.name || pr.id} · ${pr.branch || ""}`)))));
+        t.work.automation.summary ? ` · ${t.work.automation.summary}` : "") : null)));
   let designTop = null;
   if (t.work?.design) {
     const design = t.work.design, waiting = design.status === "pending";
@@ -4837,6 +4868,7 @@ function fillPanel(panel, t) {
     commit(ops.note(t.id, v), { onFail: () => noteBack(t.id, v) });
   };
   noteBox.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { addNoteNow(); focusPanel(noteBox); } if (e.key === "Escape") focusPanel(); });
+  if (desc && t.desc && !ui.editingDesc && folded("desc")) desc.hidden = true;
   const earlier = t.notes.filter((n) => n !== top).reverse(); // the newest first
 
   panel.replaceChildren(head,
@@ -4846,11 +4878,12 @@ function fillPanel(panel, t) {
         h("span", { class: "busy-text" }, `The ${busyBy} is working on this task. You can look at it; nothing else until it finishes.`),
         store.readOnly ? null : h("button", { type: "button", class: "danger", title: "Stop the agent so that it spends no more tokens", onclick: () => stopAgent(t, busyBy) }, "Stop")) : null,
       nowCard(t, vs, ro, top),
+      pullRequestStrip(t),
       designTop,
       desc ? h("section", { class: "p-sec" },
-        t.desc || ui.editingDesc ? h("div", { class: "section-head" }, "Description",
+        t.desc || ui.editingDesc ? foldable("desc", h("div", { class: "section-head" }, "Description",
           checks.length ? [h("span", { class: "lane-bar", title: `${done} of ${checks.length} checked` }, h("i", { style: `width:${(100 * done) / checks.length}%` })), h("span", { class: "count" }, `${done}/${checks.length}`)] : null,
-          ro || ui.editingDesc ? null : h("button", { class: "ghost", title: "Edit the description (or double-click it)", onclick: editDesc }, icon("edit"), "Edit")) : null,
+          ro || ui.editingDesc ? null : h("button", { class: "ghost", title: "Edit the description (or double-click it)", onclick: editDesc }, icon("edit"), "Edit")), !ui.editingDesc) : null,
         desc) : null,
       workflow,
       ro && !t.deps.length && !kids.length ? null : h("section", { class: "p-sec" },
