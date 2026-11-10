@@ -153,7 +153,7 @@ kbd { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--border);
 .icon svg { width: 16px; height: 16px; }
 .s-proposed { --c: var(--proposed); } .s-todo { --c: var(--todo); --c-fill: var(--todo-fill); } .s-blocked { --c: var(--blocked); }
 .s-doing { --c: var(--doing); --c-fill: var(--doing-fill); } .s-review { --c: var(--review); --c-fill: var(--review-fill); }
-.s-done { --c: var(--done); --c-fill: var(--done-fill); } .s-develop { --c: var(--develop); --c-fill: var(--develop-fill); } .s-production { --c: var(--production); --c-fill: var(--production-fill); } .s-ask { --c: var(--accent); }
+.s-done { --c: var(--done); --c-fill: var(--done-fill); } .s-develop { --c: var(--develop); --c-fill: var(--develop-fill); } .s-production { --c: var(--production); --c-fill: var(--production-fill); } .s-ask { --c: var(--accent); } .s-halt { --c: var(--danger); }
 /* Each state's mark has a shape of its own, so the states read apart without their colors. */
 .s-proposed { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6' stroke-dasharray='2.6 2.112' stroke-dashoffset='1.3'/%3E%3C/svg%3E"); }
 .s-blocked { --mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='8' cy='8' r='6'/%3E%3Cpath d='M4 4l8 8'/%3E%3C/svg%3E"); }
@@ -293,6 +293,14 @@ svg#edges { position: absolute; left: 0; top: 0; overflow: visible; pointer-even
 :is(.card, .kcard).s-doing::before, :is(.card, .kcard).yolo::after { content: ""; position: absolute; inset: -1.5px; border-radius: inherit; padding: 2px; pointer-events: none; -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; animation: spin 2.4s linear infinite; }
 :is(.card, .kcard).s-doing::before { background: conic-gradient(from var(--spin), transparent 0 55%, color-mix(in srgb, var(--c) 50%, transparent) 75%, var(--c) 97%, transparent); }
 :is(.card, .kcard).asking::before { content: none; }
+/* A run stopped and waits for the human: the card turns red and says why. */
+:is(.card, .kcard).halted { --c: var(--danger); border-color: var(--danger); box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 22%, transparent), var(--shadow); }
+:is(.card, .kcard).halted::before { content: none; }
+:is(.card, .kcard).halted .badge { background: var(--danger); color: #fff; }
+.halt-why { font-size: 12px; line-height: 1.35; color: var(--danger); margin: 4px 0 2px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+.halt-card { border-color: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent); }
+.halt-card .section-head { color: var(--danger); }
+.halt-card .halt-text { white-space: pre-wrap; margin: 6px 0; }
 :is(.card, .kcard).yolo::after { inset: -4.5px; padding: 2.5px; border-radius: 13px; background: conic-gradient(from var(--spin), var(--y1), var(--y2), var(--y3), var(--y4), var(--y3), var(--y2), var(--y1)); animation-duration: 3.2s; filter: drop-shadow(0 0 5px color-mix(in srgb, var(--y3) 60%, transparent)); }
 @keyframes spin { to { --spin: 1turn; } }
 .card.sel, .kcard.sel { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--c), var(--shadow-lg); }
@@ -755,6 +763,7 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 .toast.go:hover { box-shadow: var(--shadow-lg), 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent); }
 .toast.error { background: #dc2626; color: #fff; }
 .toast.ask { box-shadow: var(--shadow-lg), 0 0 0 2px var(--accent); }
+.toast.halt { box-shadow: var(--shadow-lg), 0 0 0 2px var(--danger); }
 .toast .badge { --c-on: color-mix(in srgb, var(--c) var(--toast-mix), var(--bg)); color: var(--c-on); background: color-mix(in srgb, var(--c) 30%, transparent); }
 .toast .agent { width: 18px; height: 18px; font-size: 10.5px; }
 .toast .cid { color: inherit; opacity: .7; }
@@ -1074,7 +1083,7 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 
 const STATES = ["proposed", "todo", "doing", "review", "develop", "done", "production"];
 const VIEW_STATES = ["proposed", "blocked", "todo", "doing", "review", "develop", "done", "production"];
-const LABEL = { proposed: "Proposed", blocked: "Blocked", todo: "To do", doing: "Doing", review: "Review", develop: "Develop", done: "Done", production: "Production", ask: "Question" };
+const LABEL = { proposed: "Proposed", blocked: "Blocked", todo: "To do", doing: "Doing", review: "Review", develop: "Develop", done: "Done", production: "Production", ask: "Question", halt: "Stopped" };
 const ID_RE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 const PREFIX_RE = /^[A-Z][A-Z0-9]{0,5}$/;
 const UNGROUPED = "G";
@@ -2444,7 +2453,21 @@ function applyRemote(fresh) {
 
 const revised = (old, t) => old.state === "proposed" && t.state === "proposed" && ["title", "desc", "group", "deps"].some((k) => !sameJson(old[k], t[k]));
 const asked = (old, t) => !!openQuestion(t) && (!old || t.notes.length > old.notes.length);
-const moved = (old, t) => !old || old.state !== t.state || revised(old, t) || asked(old, t);
+const halted = (t) => t.state === "doing" && t.work?.automation?.status === "failed";
+const haltedAt = (t) => (halted(t) ? String(t.work.automation.updated || t.work.automation.round || "") : "");
+const stoppedNow = (old, t) => halted(t) && (!old || haltedAt(old) !== haltedAt(t));
+const haltWhy = (t) => {
+  const s = String(t.work?.automation?.summary || "").replace(/[*`_#>]/g, "").replace(/\s+/g, " ").trim();
+  return s.length > 220 ? `${s.slice(0, 217)}…` : s || "The run failed.";
+};
+const moved = (old, t) => !old || old.state !== t.state || revised(old, t) || asked(old, t) || stoppedNow(old, t);
+
+// A stopped run needs the human, so the browser says it even when the tab is in the background.
+function notifyStopped(e) {
+  if (!window.Notification || Notification.permission !== "granted" || document.visibilityState === "visible") return;
+  try { new Notification(`${e.id} stopped`, { body: e.title, tag: `halt-${e.id}` }); } catch (err) { /* the toast and the inbox still say it */ }
+}
+document.addEventListener("pointerdown", () => { if (window.Notification && Notification.permission === "default") Notification.requestPermission(); }, { once: true });
 
 // What agents did since the last poll, as toasts that lead to the task, and in the activity list of the inbox.
 // `where` is another board's { name, title }, or null for this one. The author is only known when the move added a note.
@@ -2458,6 +2481,7 @@ function announce(moves, withdrawn, where = null, b = board) {
     ...withdrawn.map((t) => ({ id: t.id, title: t.title, verb: "withdrew", state: null, by: null })),
     ...shown.map(([t, old]) => {
       const last = t.notes[t.notes.length - 1], by = last && t.notes.length > (old ? old.notes.length : 0) ? last.by : !old && t.by !== "human" ? t.by || null : null;
+      if (stoppedNow(old, t)) return { id: t.id, title: t.title, verb: "stopped", state: "halt", by: null };
       if (asked(old, t)) return { id: t.id, title: t.title, verb: "asks", state: "ask", by };
       const verb = old && revised(old, t) ? "revised" : !old && t.state === "proposed" ? "proposed" : ACTIVITY[t.state];
       return { id: t.id, title: t.title, verb, state: vstateIn(ix, t), by };
@@ -2468,10 +2492,11 @@ function announce(moves, withdrawn, where = null, b = board) {
   const there = () => where ? h("span", { class: "where" }, where.title || where.name) : null;
   // Each question has a toast of its own, shown last so the others do not push it out, and it stays longer: the agent
   // is stuck until the human replies.
-  const asks = events.filter((e) => e.verb === "asks"), rest = events.filter((e) => e.verb !== "asks");
+  const asks = events.filter((e) => e.verb === "asks"), halts = events.filter((e) => e.verb === "stopped"), rest = events.filter((e) => e.verb !== "asks" && e.verb !== "stopped");
   if (rest.length > 3) toast([there(), h("span", { class: "msg" }, `${rest.length} tasks changed`)], "activity", 4200, where ? () => goTask(where.name) : null);
   else for (const e of rest) toast([there(), ...activityLine(e)], "activity", 4200, e.state ? () => goTask(name, e.id) : null);
   for (const e of asks) toast([there(), ...activityLine(e)], "activity ask", 10000, () => goTask(name, e.id));
+  for (const e of halts) { toast([there(), ...activityLine(e)], "activity halt", 20000, () => goTask(name, e.id)); notifyStopped(e); }
 }
 
 // "claude finished BE-02 Fetch forecasts [Review]", or "Finished BE-02 Fetch forecasts" when the author is unknown.
@@ -2479,7 +2504,7 @@ function announce(moves, withdrawn, where = null, b = board) {
 const SAYS = { asks: "waits for your reply on" };
 function activityLine(e) {
   const task = [h("span", { class: "cid" }, e.id), " ", e.title];
-  const verb = e.verb === "withdrew" ? "Withdrawn" : e.verb === "asks" ? "Waiting for your reply:" : e.verb[0].toUpperCase() + e.verb.slice(1);
+  const verb = e.verb === "withdrew" ? "Withdrawn" : e.verb === "asks" ? "Waiting for your reply:" : e.verb === "stopped" ? "Stopped, needs you:" : e.verb[0].toUpperCase() + e.verb.slice(1);
   const words = e.by && e.verb !== "withdrew" ? [h("b", {}, e.by), ` ${SAYS[e.verb] || e.verb} `, task] : [h("b", {}, verb), " ", task];
   return [e.by ? agentMark(e.by) : null, h("span", { class: "msg" }, words), e.state ? h("span", { class: `badge s-${e.state}` }, LABEL[e.state]) : null];
 }
@@ -3177,13 +3202,13 @@ function yoloTag(t) {
 
 function fillCard(el, t) {
   const vs = vstate(t), asking = !!openQuestion(t);
-  el.className = `card s-${vs}${asking ? " asking" : ""}${same(ui.selected, t.id) ? " sel" : ""}${multi.has(key(t.id)) ? " multi-on" : ""}${isYoloTarget(t) ? " yolo" : ""}${["enter", "flash", "moving", "zap"].filter((c) => el.classList.contains(c)).map((c) => ` ${c}`).join("")}`;
+  el.className = `card s-${vs}${asking ? " asking" : ""}${halted(t) ? " halted" : ""}${same(ui.selected, t.id) ? " sel" : ""}${multi.has(key(t.id)) ? " multi-on" : ""}${isYoloTarget(t) ? " yolo" : ""}${["enter", "flash", "moving", "zap"].filter((c) => el.classList.contains(c)).map((c) => ` ${c}`).join("")}`;
   el.dataset.id = t.id;
   el.setAttribute("role", "option");
   el.setAttribute("aria-label", cardLabel(t, vs, unmet(t)));
   el.replaceChildren(...compact(
-    h("div", { class: "card-head" }, h("span", { class: "cid" }, t.id), h("span", { class: "head-end" }, yoloTag(t), h("span", { class: "badge" }, asking ? "Waiting for you" : LABEL[vs]))),
-    h("div", { class: "card-title", title: t.title }, t.title),
+    h("div", { class: "card-head" }, h("span", { class: "cid" }, t.id), h("span", { class: "head-end" }, yoloTag(t), h("span", { class: "badge" }, asking ? "Waiting for you" : halted(t) ? "Stopped" : LABEL[vs]))),
+    h("div", { class: "card-title", title: halted(t) ? `${t.title}: ${haltWhy(t)}` : t.title }, t.title),
     cardFoot(t),
     store.readOnly ? null : h("div", { class: "handle in", title: "Drag onto another card: this card will depend on that one" }),
     store.readOnly ? null : h("div", { class: "handle out", title: "Drag onto another card: that card will depend on this one" }),
@@ -3954,14 +3979,15 @@ function markColumn() {
 function kanbanCard(t) {
   const vs = vstate(t), g = groupOf(t), asking = !!openQuestion(t);
   const el = h("div", {
-    class: `kcard s-${vs}${asking ? " asking" : ""}${same(ui.selected, t.id) ? " sel" : ""}${multi.has(key(t.id)) ? " multi-on" : ""}`, "data-id": t.id, draggable: store.readOnly ? null : "true",
+    class: `kcard s-${vs}${asking ? " asking" : ""}${halted(t) ? " halted" : ""}${same(ui.selected, t.id) ? " sel" : ""}${multi.has(key(t.id)) ? " multi-on" : ""}`, "data-id": t.id, draggable: store.readOnly ? null : "true",
     role: "option", "aria-label": cardLabel(t, vs, unmet(t)),
     onclick: (e) => (picking ? pickToggle(t.id) : multiClick(e) ? toggleMulti(t.id) : select(t.id)),
   },
   h("div", { class: "card-head" }, h("span", { class: "cid" }, t.id), h("span", { class: "head-end" }, yoloTag(t),
-    asking ? h("span", { class: "badge" }, "Waiting for you") : null,
+    asking ? h("span", { class: "badge" }, "Waiting for you") : halted(t) ? h("span", { class: "badge" }, "Stopped") : null,
     g ? h("span", { class: "gchip", title: g.name }, groupTag(groupColor(g)), h("span", {}, g.name)) : null)),
   h("div", { class: "card-title" }, t.title),
+  halted(t) ? h("div", { class: "halt-why" }, haltWhy(t)) : null,
   cardFoot(t));
   el.addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/kanvas-id", t.id); e.dataTransfer.effectAllowed = "move"; el.classList.add("dragging"); });
   el.addEventListener("dragend", () => el.classList.remove("dragging"));
@@ -4699,6 +4725,14 @@ function pullRequestStrip(t) {
       : h("span", { class: "pr-link" }, `${pr.name || pr.id} · ${pr.branch || ""}`)));
 }
 
+function haltSection(t, ro) {
+  const run = t.work.automation;
+  return h("section", { class: "p-sec halt-card", role: "alert" },
+    h("div", { class: "section-head" }, "Stopped: the run failed", h("span", { class: "count" }, `round ${run.round || 1}`)),
+    h("p", { class: "halt-text" }, String(run.summary || "The agent gave no reason.")),
+    ro ? null : h("p", { class: "muted" }, "It needs you: retry it, finish it by hand and send it to review, or pause it, with the buttons of this task."));
+}
+
 function renderPanel() {
   const panel = $("#panel");
   const t = ui.selected && get(ui.selected);
@@ -4889,6 +4923,7 @@ function fillPanel(panel, t) {
         store.readOnly ? null : h("button", { type: "button", class: "danger", title: "Stop the agent so that it spends no more tokens", onclick: () => stopAgent(t, busyBy) }, "Stop")) : null,
       nowCard(t, vs, ro, top),
       pullRequestStrip(t),
+      halted(t) ? haltSection(t, ro) : null,
       designTop,
       desc ? h("section", { class: "p-sec" },
         t.desc || ui.editingDesc ? foldable("desc", h("div", { class: "section-head" }, "Description",
@@ -5755,6 +5790,7 @@ function waitingIn(b) {
   const lastAt = (t) => (t.notes.length ? Date.parse(t.notes[t.notes.length - 1].at) || 0 : 0);
   const latest = (x, y) => lastAt(y.t) - lastAt(x.t);
   return [
+    ...b.tasks.filter(halted).map((t) => ({ t, state: "halt" })).sort(latest),
     ...b.tasks.filter(openQuestion).map((t) => ({ t, state: "ask" })).sort(latest),
     ...b.tasks.filter((t) => t.state === "review").map((t) => ({ t, state: "review" })).sort(latest),
   ];
@@ -5771,15 +5807,15 @@ function inboxBoards() {
 function renderInboxButton() {
   if (!board) return;
   const items = inboxBoards().flatMap((b) => waitingIn(b.board)), n = items.length;
-  const asks = items.filter((x) => x.state === "ask").length, reviews = n - asks;
+  const asks = items.filter((x) => x.state === "ask").length, halts = items.filter((x) => x.state === "halt").length, reviews = n - asks - halts;
   // The tab's title counts the agents waiting for a reply, so the tab shows them while the human is elsewhere.
   const name = boardLabel();
-  document.title = `${asks && !store?.readOnly ? `(${asks}) ` : ""}${name === "Factory" ? name : `${name} · Factory`}`;
+  document.title = `${asks + halts && !store?.readOnly ? `(${asks + halts}) ` : ""}${name === "Factory" ? name : `${name} · Factory`}`;
   const btn = $("#inbox");
   if (!btn) return;
   btn.hidden = !!store?.readOnly;
   btn.replaceChildren(...compact(icon("bell"), n ? h("b", {}, n) : null));
-  btn.dataset.tip = compact(asks ? `${asks} agent${asks === 1 ? " waits" : "s wait"} for your reply` : null,
+  btn.dataset.tip = compact(halts ? `${halts} run${halts === 1 ? "" : "s"} stopped` : null, asks ? `${asks} agent${asks === 1 ? " waits" : "s wait"} for your reply` : null,
     reviews ? `${reviews} task${reviews === 1 ? "" : "s"} to review` : null).join(", ") || "Nothing waits for you";
   btn.setAttribute("aria-label", `Inbox: ${btn.dataset.tip}`);
   if (inboxBody?.isConnected) fillInbox(inboxBody);
@@ -5805,10 +5841,10 @@ function fillInbox(node) {
     return h("button", { type: "button", class: "ib-row", onclick: go(b.name, t.id) },
       h("span", { class: `badge s-${state}` }, LABEL[state]),
       h("span", { class: "ib-main" }, h("span", { class: "ib-title" }, h("span", { class: "cid" }, t.id), " ", t.title),
-        state === "ask" ? h("span", { class: "ib-q" }, questionText(last)) : null,
-        last ? h("span", { class: "ib-sub" }, agentMark(by), state === "ask" ? `${by} · ${ago(last.at)} · reply in its chat` : `${by} · ${ago(last.at)}`) : null));
+        state === "ask" ? h("span", { class: "ib-q" }, questionText(last)) : state === "halt" ? h("span", { class: "ib-q" }, haltWhy(t)) : null,
+        last ? h("span", { class: "ib-sub" }, agentMark(by), state === "ask" ? `${by} · ${ago(last.at)} · reply in its chat` : state === "halt" ? `${by} · ${ago(last.at)} · needs you` : `${by} · ${ago(last.at)}`) : null));
   };
-  const asks = sections.some((s) => s.items.some((x) => x.state === "ask"));
+  const asks = sections.some((s) => s.items.some((x) => x.state === "ask" || x.state === "halt"));
   node.replaceChildren(...compact(
     h("div", { class: "ib-head" }, asks ? "Waiting for you" : "To review"),
     sections.length ? sections.map((s) => [several ? h("div", { class: "ib-board" }, s.b.title, s.b.here ? h("small", {}, "this board") : null) : null, s.items.map((x) => row(s.b, x))])

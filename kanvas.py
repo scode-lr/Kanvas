@@ -3510,6 +3510,31 @@ class TelegramBridge:
         self.offset = 0
         self.ignored = 0
         self.stopping = False
+        self.stopped = None
+
+    def notify_stopped(self):
+        """Tells the owner, once, when the run of a task stops and waits for them. What was already stopped when the
+        bridge started is not announced."""
+        try:
+            tasks = load_board(self.path).get("tasks") or []
+        except (KanvasError, OSError, ValueError):
+            return
+        now = {}
+        for task in tasks:
+            work = task.get("work") if isinstance(task.get("work"), dict) else {}
+            run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+            if task.get("state") == "doing" and run.get("status") == "failed":
+                now[(task["id"], str(run.get("updated") or run.get("round") or ""))] = (task, run)
+        if self.stopped is not None:
+            for key in sorted(set(now) - self.stopped):
+                task, run = now[key]
+                text = (f"🔴 {task['id']} se ha parado\n{task.get('title', '')}\n\nQué ha pasado: "
+                        f"{str(run.get('summary') or 'el agente no ha dado motivo')[:1500]}\n\n"
+                        "Qué necesita: que la reintentes, la termines a mano y la pases a revisión, o la pauses. "
+                        "Se decide en el tablero.")
+                for user in sorted(self.users):
+                    self.reply(user, text)
+        self.stopped = set(now)
 
     def try_pair(self, message):
         """The owner sends the code Factory showed on the board: from then on this Telegram account is heard."""
@@ -3657,6 +3682,7 @@ class TelegramBridge:
     def run(self, once=False):
         """Listens until stopped. A dropped connection is retried."""
         while not self.stopping:
+            self.notify_stopped()
             try:
                 updates = self.api("getUpdates", {"offset": self.offset, "timeout": 0 if once else 25,
                                                   "allowed_updates": ["message", "callback_query"]}, timeout=35)

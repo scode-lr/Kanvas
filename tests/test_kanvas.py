@@ -1788,6 +1788,28 @@ class AutomationTests(TempBoard):
         api = self.FakeTelegram(updates)
         return kanvas.TelegramBridge(self.path, api, [self.OWNER], say=lambda m: None), api
 
+    def test_the_bot_tells_the_owner_once_when_a_run_stops_and_ignores_what_was_already_stopped(self):
+        self.inbox_board()
+
+        def stop(summary, updated):
+            def op(board):
+                task = kanvas.find_task(board, "DV-03")
+                task["state"] = "doing"
+                task["work"] = {"automation": {"status": "failed", "round": 1, "updated": updated, "summary": summary}}
+            kanvas.mutate(self.path, op)
+
+        stop("old failure", "2026-01-01T00:00:00Z")
+        bridge, api = self.bridge()
+        bridge.notify_stopped()
+        self.assertEqual(api.sent, [])
+        stop("Needs Cloudflare access", "2026-01-02T00:00:00Z")
+        bridge.notify_stopped()
+        bridge.notify_stopped()
+        self.assertEqual(len(api.sent), 1)
+        self.assertEqual(api.sent[0]["chat_id"], self.OWNER)
+        self.assertIn("DV-03", api.sent[0]["text"])
+        self.assertIn("Cloudflare", api.sent[0]["text"])
+
     def tg_message(self, text, user=None, chat_type="private", **extra):
         user = user or self.OWNER
         return {"update_id": 1, "message": {"from": {"id": user}, "chat": {"id": user, "type": chat_type}, "text": text, **extra}}
