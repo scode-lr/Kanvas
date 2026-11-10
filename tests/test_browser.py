@@ -671,6 +671,30 @@ class BrowserSmokeTests(unittest.TestCase):
         run = task["work"]["automation"]
         self.assertEqual((task["state"], run.get("status"), run["round"], run["cycle_start"]), ("doing", None, 3, 3))
 
+    def test_the_release_dialog_lists_the_tasks_in_develop_and_shows_the_cut_ones_waiting_for_promotion(self):
+        def work(board):
+            board["automation"] = {"repositories": [{"id": "front", "name": "Front", "path": self.dir}]}
+            run = {"status": "completed", "round": 1, "pull_requests": [{"id": "front", "name": "Front", "url": "https://github.com/a/b/pull/1"}]}
+            for task_id, state in (("BE-03", "develop"), ("BE-04", "done")):
+                task = kanvas.find_task(board, task_id)
+                task["state"] = state
+                task["definition"] = {"outcome": "o", "needs": "n", "acceptance": "a", "repositories": ["front"], "approved": True}
+                task["work"] = {"by": "human", "repositories": ["front"], "automation": dict(run)}
+                task["delivery"] = {"dev": {"by": "human", "at": kanvas.now_iso(), "evidence": "PR 1"}}
+            kanvas.find_task(board, "BE-04")["delivery"]["release"] = {"by": "human", "at": kanvas.now_iso(), "version": "1.0.5", "evidence": "https://github.com/a/b/pull/2"}
+        kanvas.mutate(self.path, work)
+        self.page.send("Page.navigate", url=self.url)
+        self.until("the board", "document.readyState === 'complete' && !!document.querySelector('#release')")
+        self.page.js("document.querySelector('#release').click()")
+        self.until("the release dialog", "!!document.querySelector('dialog .rel')")
+        text = self.page.js("document.querySelector('dialog .rel').innerText")
+        self.assertIn("BE-03", text)
+        self.assertIn("#1", text)
+        self.assertIn("release 1.0.5 waits for promotion", text.lower())
+        self.assertTrue(self.page.js("[...document.querySelectorAll('dialog button')].find((b) => b.textContent.includes('Promote to main')).disabled"))
+        self.assertTrue(self.page.js("[...document.querySelectorAll('dialog button')].find((b) => b.textContent.includes('Cut release')).disabled"))
+        self.assertEqual(self.page.logged(), [])
+
     def test_the_description_definition_and_plan_fold_with_one_click_and_the_pull_requests_sit_under_the_status(self):
         def work(board):
             task = kanvas.find_task(board, "BE-03")

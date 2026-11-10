@@ -2397,7 +2397,7 @@ def print_task(board, task):
         print(f"\nReview: agent={agent.get('status', 'pending')}, manual={manual.get('status', 'pending')}")
     if task.get("delivery"):
         print("\nDelivery:")
-        for stage in ("dev", "production"):
+        for stage in ("dev", "release", "production"):
             evidence = task["delivery"].get(stage)
             if evidence:
                 print(f"  {stage}: {evidence.get('evidence', '')}")
@@ -5155,6 +5155,43 @@ class BoardServer(ThreadingHTTPServer):
         except Exception as e:
             change(status="failed", working="", error=f"{type(e).__name__}: {e}")
 
+    def start_release_report(self, name, repository):
+        """Has the release manager read what dev has over the main branch, in the background; polled like any help."""
+        path = self.board_path(name)
+        if not shutil.which("claude"):
+            raise KanvasError("Claude Code (claude) is not installed or not on PATH; the release manager needs it")
+        board = load_board(path)
+        config = automation_config(board, path)
+        repo = (config["repositories"] if config else {}).get(repository)
+        if not repo:
+            raise KanvasError("Expected one of the repositories of the automation")
+        with self.assist_lock:
+            if sum(1 for j in self.assist.values() if j["status"] == "running") >= ASSIST_MAX_RUNNING:
+                raise AssistBusy(f"{ASSIST_MAX_RUNNING} agent conversations are already running; wait for one to finish")
+            job = {"id": os.urandom(8).hex(), "board": name, "kind": "release", "status": "running", "phase": "draft",
+                   "working": "release-manager", "messages": [], "result": None, "error": "", "cost": 0.0, "turns": 0}
+            self.assist[job["id"]] = job
+            for old in [k for k, j in self.assist.items() if j["status"] != "running"][:-ASSIST_KEEP]:
+                del self.assist[old]
+
+        def run():
+            def change(**fresh):
+                with self.assist_lock:
+                    job.update(fresh)
+            try:
+                _, root, settings = assist_context(path)
+                reply, cost, turns = assist_step("release-manager", release_prompt(load_board(path), repo), root, settings)
+                change(status="done", working="", result={"report": reply.strip()}, cost=cost, turns=turns)
+            except subprocess.TimeoutExpired:
+                change(status="failed", working="", error="The release manager took too long and was stopped")
+            except (KanvasError, OSError, ValueError) as e:
+                change(status="failed", working="", error=str(e))
+            except Exception as e:
+                change(status="failed", working="", error=f"{type(e).__name__}: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
+        return job
+
     def board_list(self):
         with self.boards_lock:
             boards = list(self.boards.items())
@@ -5395,6 +5432,97 @@ def assist_step(agent, prompt, root, settings):
         detail = (data.get("result") if isinstance(data, dict) else None) or proc.stderr.strip() or proc.stdout.strip()
         raise KanvasError(f"{agent} could not answer: {_clip(detail, 300) or 'no output'}")
     return str(data.get("result") or ""), float(data.get("total_cost_usd") or 0), int(data.get("num_turns") or 0)
+
+
+RELEASE_WORKFLOWS = {"cut": "release-cut.yml", "promote": "release-promote.yml"}
+
+
+def release_slugs(board):
+    """The GitHub repositories whose pull requests are on the board: the only ones a release may run in."""
+    found = set()
+    for task in board.get("tasks") or []:
+        work = task.get("work") if isinstance(task.get("work"), dict) else {}
+        run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+        for pull in run.get("pull_requests") or []:
+            match = re.match(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/\d+", str(pull.get("url") if isinstance(pull, dict) else ""))
+            if match:
+                found.add(match.group(1))
+    return found
+
+
+def release_action(path, request):
+    """Runs one step of a release in GitHub: `cut` makes release/X.Y.Z with the chosen pull requests, `promote` merges it
+    into the main branch and publishes, `status` tells whether its pull request exists and is merged."""
+    board, root, _ = assist_context(path)
+    action, repo = request.get("action"), str(request.get("repo") or "")
+    if repo not in release_slugs(board):
+        raise KanvasError("That repository has no pull requests on this board")
+    version = str(request.get("version") or "")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise KanvasError("The version must look like 1.0.5")
+    if action == "cut":
+        prs = [n for n in request.get("prs") or [] if isinstance(n, int) and not isinstance(n, bool) and n > 0]
+        notes = str(request.get("notes_ca") or "").replace("\r", "").strip()
+        if not prs:
+            raise KanvasError("Choose at least one pull request")
+        if not notes or len(notes) > 500:
+            raise KanvasError("The Catalan notes must have between 1 and 500 characters")
+        _gh(root, "workflow", "run", RELEASE_WORKFLOWS["cut"], "--repo", repo, "--ref", "main", "-f", f"version={version}",
+            "-f", "prs=" + ",".join(str(n) for n in prs), "-f", "notes_ca=" + notes.replace("\n", "\\n"))
+        return {"started": True}
+    if action == "promote":
+        if request.get("reviewed") is not True:
+            raise KanvasError("Confirm that you read the report and tested the release first")
+        _gh(root, "workflow", "run", RELEASE_WORKFLOWS["promote"], "--repo", repo, "--ref", "main", "-f", f"version={version}",
+            "-f", "reviewed=true")
+        return {"started": True}
+    if action == "status":
+        found = json.loads(_gh(root, "pr", "list", "--repo", repo, "--head", f"release/{version}", "--base", "main", "--state", "all",
+                               "--json", "number,url,state", "--limit", "1") or "[]")
+        return {"pr": found[0] if found else None}
+    raise KanvasError("Expected cut, promote or status")
+
+
+def release_prompt(board, repo):
+    """What the release manager reads: the tasks in Develop, and the commits and files dev has over the main branch."""
+    lines = []
+    for task in board.get("tasks") or []:
+        if task.get("state") != "develop":
+            continue
+        work = task.get("work") if isinstance(task.get("work"), dict) else {}
+        run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+        review = task.get("review") if isinstance(task.get("review"), dict) else {}
+        delivery = task.get("delivery") if isinstance(task.get("delivery"), dict) else {}
+        pulls = ", ".join(str(p.get("url")) for p in run.get("pull_requests") or [] if isinstance(p, dict))
+        notes = " | ".join(f"{n.get('by')}: {_clip(n.get('text'), 300)}" for n in (task.get("notes") or [])[-3:])
+        lines.append(f"- {task['id']} {task.get('title', '')}\n  pull requests: {pulls or 'none'}\n"
+                     f"  agent review: {(review.get('agent') or {}).get('status', 'pending')}\n"
+                     f"  dev merge: {_clip((delivery.get('dev') or {}).get('evidence'), 200)}\n  last notes: {notes}")
+    main = "main"
+    try:
+        head = _git(repo["path"], "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+        main = head.split("/", 1)[1] if "/" in head else head
+    except KanvasError:
+        pass
+    try:
+        log = _git(repo["path"], "log", "--oneline", f"origin/{main}..origin/dev")
+    except KanvasError as e:
+        log = f"(not available: {e})"
+    try:
+        stat = _git(repo["path"], "diff", "--stat", f"origin/{main}...origin/dev")
+    except KanvasError as e:
+        stat = f"(not available: {e})"
+    version = ""
+    try:
+        version = str(json.loads(read_text_file(os.path.join(repo["path"], "projects", "voltregacf.hub", "package.json"))).get("version") or "")
+    except (OSError, ValueError):
+        pass
+    return (f"Prepare the release report for the repository {repo['name']} (folder {repo['path']}). The main branch is {main}.\n"
+            f"Current Voltrega version in package.json: {version or 'unknown'}.\n"
+            "You can only read files; the git output you need is below, so do not try to run commands.\n"
+            "After the RELEASE line add a line `INCLUDE: <task ids to put in the release, comma separated>`.\n\n"
+            f"Tasks in Develop:\n{chr(10).join(lines) or '(none)'}\n\nCommits in dev and not in {main}:\n{_clip(log, 6000)}\n\n"
+            f"Files changed:\n{_clip(stat, 6000)}\n")
 
 
 def evidence_root(path):
@@ -5770,6 +5898,23 @@ class BoardHandler(BaseHTTPRequestHandler):
             except (KanvasError, ValueError, AttributeError) as e:
                 return self._error(400, str(e) or "Expected a JSON object")
             return self._send(202, json.dumps({"job": job["id"]}).encode("utf-8"))
+        if parts[1:] == ["api", "release"] and self.server.board_path(parts[0]) is not None:
+            if not self._from_this_computer():
+                return self._error(403, "Releases run only from the computer running Factory")
+            text = self._read_json()
+            if text is None:
+                return
+            try:
+                request = json.loads(text)
+                if request.get("action") == "report":
+                    job = self.server.start_release_report(parts[0], str(request.get("repository") or ""))
+                    return self._send(202, json.dumps({"job": job["id"]}).encode("utf-8"))
+                result = release_action(self.server.board_path(parts[0]), request)
+            except AssistBusy as e:
+                return self._error(429, str(e))
+            except (KanvasError, ValueError, AttributeError) as e:
+                return self._error(400, str(e) or "Expected a JSON object")
+            return self._send(200, json.dumps(result).encode("utf-8"))
         if parts != ["api", "boards"]:
             return self._error(404, "Not found")
         if not self._may_manage():

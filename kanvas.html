@@ -772,6 +772,11 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
 #inbox b { min-width: 17px; padding: 0 4px; border-radius: 9px; font-size: 11px; font-weight: 650; line-height: 17px; text-align: center; color: var(--accent-text); background: var(--accent); font-variant-numeric: tabular-nums; }
 #inbox:has(b) { color: var(--text); }
 #inbox.menu-target { background: var(--surface-2); border-color: var(--border-strong); }
+.rel { display: flex; flex-direction: column; gap: 12px; min-width: min(640px, 86vw); }
+.rel-task { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.rel-warn { color: var(--danger); font-size: 12px; }
+.rel-ok { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin: 6px 0; }
+.rel-report { white-space: pre-wrap; font: 12px var(--mono); max-height: 260px; overflow: auto; margin: 6px 0; }
 .ctx-menu.inbox-pop { width: min(400px, calc(100vw - 8px)); max-width: none; max-height: min(75vh, 600px); overflow-y: auto; }
 .inbox-body { display: flex; flex-direction: column; }
 .ib-head { padding: 8px 9px 4px; font-size: 11.5px; font-weight: 650; color: var(--faint); }
@@ -1025,6 +1030,7 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
     </div>
     <button id="display" data-icon="sliders" data-tip="Direction, card order, finished tasks and theme" aria-haspopup="dialog" aria-expanded="false" aria-label="Display options"><span class="lbl">Display</span></button>
     <button id="inbox" aria-haspopup="dialog" aria-expanded="false" hidden></button>
+    <button id="release" class="edit-only" data-icon="up" data-tip="Release: choose tasks, cut release/X.Y.Z and promote to main" aria-haspopup="dialog" aria-label="Release"><span class="lbl">Release</span></button>
   </div>
   <div class="tools edit-only">
     <button id="undo" class="ghost icon-btn" data-icon="undo" data-tip="Nothing to undo" data-key="Ctrl+Z" aria-label="Undo" disabled></button>
@@ -2812,6 +2818,16 @@ const ops = {
     delivery.dev = { by: "human", at, evidence };
     t.state = "develop";
     addNote(t, `Merged to dev: ${evidence}`, at);
+  },
+  releaseCut: (ids, version, evidence, at = nowIso()) => (b) => {
+    for (const id of ids) {
+      const t = mustFind(b, id);
+      if (t.state !== "develop") throw new Error(`${t.id} is not in Develop`);
+      const delivery = t.delivery ||= {};
+      delivery.release = { by: "human", at, version, evidence };
+      t.state = "done";
+      addNote(t, `Included in release ${version}: ${evidence}`, at);
+    }
   },
   promote: (id, evidence, at = nowIso()) => (b) => {
     const t = mustFind(b, id);
@@ -4733,6 +4749,162 @@ function haltSection(t, ro) {
     ro ? null : h("p", { class: "muted" }, "It needs you: retry it, finish it by hand and send it to review, or pause it, with the buttons of this task."));
 }
 
+// Release: the tasks merged to dev are chosen, cut into release/X.Y.Z and promoted to main by the workflows in GitHub.
+const releasePulls = (t, repo) => (t.work?.automation?.pull_requests || []).filter((p) => p.name === repo.name).map((p) => {
+  const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/.exec(p.url || "");
+  return m ? { slug: m[1], n: +m[2], url: p.url } : null;
+}).filter(Boolean);
+
+async function releaseCall(body) {
+  const r = await fetch("api/release", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || "The release step failed.");
+  return data;
+}
+
+function releaseDialog() {
+  const repos = board.automation?.repositories || [];
+  if (store.readOnly) return;
+  if (!repos.length) return toast("Release needs the repositories of the automation in this board", "error");
+  const state = { repo: (repos.find((r) => r.id === "front") || repos[0]).id, picked: new Set(), reviewed: false, report: "", busy: false };
+  const status = h("p", { class: "assist-status", role: "status" });
+  const body = h("div", { class: "rel" });
+  const version = h("input", { type: "text", placeholder: "1.0.5", "aria-label": "Version", size: 10 });
+  const notes = h("textarea", { rows: 6, placeholder: "Notes de la versió en català (màxim 500 caràcters)", "aria-label": "Catalan release notes" });
+  const counter = h("span", { class: "hint" });
+  let open = true;
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const say = (text, bad = false) => { status.className = `assist-status${bad ? " assist-error" : ""}`; status.textContent = text; };
+  const count = () => { counter.textContent = `${notes.value.length}/500`; };
+  notes.addEventListener("input", count);
+  version.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+  const repoOf = () => repos.find((r) => r.id === state.repo);
+  const inDev = () => board.tasks.filter((t) => t.state === "develop" && (t.definition?.repositories || t.work?.repositories || []).includes(state.repo) && releasePulls(t, repoOf()).length);
+  const guarded = async (work) => {
+    if (state.busy) return;
+    state.busy = true;
+    draw();
+    try { await work(); } catch (e) { say(e.message, true); }
+    state.busy = false;
+    if (open) draw();
+  };
+  const pollPr = async (slug, v, tries, every) => {
+    for (let i = 0; i < tries && open; i++) {
+      const { pr } = await releaseCall({ action: "status", repo: slug, version: v });
+      if (pr) return pr;
+      await wait(every);
+    }
+    return null;
+  };
+  const askReport = () => guarded(async () => {
+    say("The release manager is reading dev…");
+    const start = await fetch("api/release", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "report", repository: state.repo }) });
+    const started = await start.json().catch(() => ({}));
+    if (!start.ok) throw new Error(started.error || "The release manager could not start.");
+    for (;;) {
+      await wait(1500);
+      if (!open) return;
+      const poll = await fetch(`api/assist/${started.job}`, { cache: "no-store" });
+      const job = await poll.json().catch(() => ({}));
+      if (!poll.ok) throw new Error(job.error || "The conversation was lost.");
+      if (job.status === "running") continue;
+      if (job.status === "failed") throw new Error(job.error || "The release manager failed.");
+      state.report = String(job.result?.report || "");
+      break;
+    }
+    const v = /^RELEASE:.*?->\s*(\d+\.\d+\.\d+)/m.exec(state.report), inc = /^INCLUDE:\s*(.+)$/m.exec(state.report), n = /^NOTES_CA:\s*\n([\s\S]*)$/m.exec(state.report);
+    if (v) version.value = v[1];
+    if (inc) { const ids = new Set(inDev().map((t) => t.id)); state.picked = new Set(inc[1].split(/[\s,]+/).map((x) => get(x)?.id).filter((id) => id && ids.has(id))); }
+    if (n) { notes.value = n[1].replace(/```/g, "").trim().slice(0, 500); count(); }
+    say("Read the report, check the chosen tasks and the notes, then cut the release.");
+  });
+  const cut = () => guarded(async () => {
+    const v = version.value.trim(), text = notes.value.trim();
+    const tasks = [...state.picked].map(get).filter(Boolean).sort((a, b) => Date.parse(a.delivery?.dev?.at || 0) - Date.parse(b.delivery?.dev?.at || 0));
+    if (!/^\d+\.\d+\.\d+$/.test(v)) throw new Error("The version must look like 1.0.5.");
+    if (!tasks.length) throw new Error("Choose at least one task.");
+    if (!text || text.length > 500) throw new Error("The Catalan notes need 1 to 500 characters.");
+    const pulls = tasks.flatMap((t) => releasePulls(t, repoOf()));
+    const slug = pulls[0].slug;
+    say(`Cutting release/${v} in GitHub…`);
+    await releaseCall({ action: "cut", repo: slug, version: v, prs: pulls.map((p) => p.n), notes_ca: text });
+    say("Cut started. Waiting for the release pull request…");
+    const pr = await pollPr(slug, v, 40, 6000);
+    if (!pr) throw new Error("The pull request does not exist yet. See GitHub Actions; the tasks stay in Develop.");
+    undoable((b) => tasks.forEach((t) => ops.releaseCut([t.id], v, pr.url)(b)), `Cut release ${v}`);
+    state.picked = new Set();
+    say(`Release ${v} cut: ${pr.url}. The CI is running on it. Test it against the dev environment, then promote.`);
+  });
+  const slugFor = (tasks) => {
+    const slug = releasePulls(tasks[0], repoOf())[0]?.slug;
+    if (!slug) throw new Error("Pick the repository of this release first.");
+    return slug;
+  };
+  const record = (v, tasks, pr) => {
+    const evidence = `Release ${v} merged to main (${pr.url}). The version bump, tag and store builds follow from the release workflow; promote Internal testing and TestFlight by hand.`;
+    undoable((b) => tasks.forEach((t) => ops.promote(t.id, evidence)(b)), `Promoted release ${v} to production`);
+  };
+  const promote = (v, tasks) => guarded(async () => {
+    const slug = slugFor(tasks);
+    say(`Promoting release ${v}…`);
+    await releaseCall({ action: "promote", repo: slug, version: v, reviewed: true });
+    say("Promotion started. The CI must be green before the merge; this can take a few minutes.");
+    for (let i = 0; i < 50 && open; i++) {
+      await wait(8000);
+      const { pr } = await releaseCall({ action: "status", repo: slug, version: v });
+      if (pr?.state === "MERGED") { record(v, tasks, pr); say(`Release ${v} is in main. The stores are building.`); return; }
+    }
+    throw new Error("Not merged yet. Reopen Release and press Check merged later.");
+  });
+  const checkMerged = (v, tasks) => guarded(async () => {
+    const slug = slugFor(tasks);
+    const { pr } = await releaseCall({ action: "status", repo: slug, version: v });
+    if (pr?.state === "MERGED") { record(v, tasks, pr); say(`Release ${v} is in main.`); return; }
+    say(pr ? `The release pull request is ${pr.state.toLowerCase()}: ${pr.url}` : "There is no release pull request for that version.");
+  });
+  const draw = () => {
+    const repo = repoOf(), list = inDev();
+    const waiting = board.tasks.filter((t) => t.state === "done" && t.delivery?.release && !t.delivery.production);
+    const versions = [...new Set(waiting.map((t) => t.delivery.release.version))];
+    const off = state.busy;
+    body.replaceChildren(...compact(
+      repos.length > 1 ? h("label", { class: "field" }, "Repository",
+        h("select", { disabled: off, onchange: (e) => { state.repo = e.target.value; state.picked = new Set(); draw(); } },
+          ...repos.map((r) => h("option", { value: r.id, selected: r.id === state.repo }, r.name || r.id)))) : null,
+      ...versions.map((v) => {
+        const tasks = waiting.filter((t) => t.delivery.release.version === v);
+        return h("section", { class: "p-sec" },
+          h("div", { class: "section-head" }, `Release ${v} waits for promotion`, h("span", { class: "count" }, `${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}`)),
+          ...tasks.map((t) => h("div", { class: "rel-task" }, h("span", { class: "cid" }, t.id), h("span", {}, t.title))),
+          h("p", { class: "muted" }, tasks[0].delivery.release.evidence),
+          h("label", { class: "rel-ok" }, h("input", { type: "checkbox", disabled: off, checked: state.reviewed, onchange: (e) => { state.reviewed = e.target.checked; draw(); } }),
+            " I read the release manager's report and tested the release against the dev environment"),
+          h("div", { class: "row-end" },
+            h("button", { type: "button", disabled: off, onclick: () => checkMerged(v, tasks) }, "Check merged"),
+            h("button", { type: "button", class: "primary", disabled: off || !state.reviewed, onclick: () => promote(v, tasks) }, icon("up"), "Promote to main")));
+      }),
+      h("section", { class: "p-sec" },
+        h("div", { class: "section-head" }, "New release", h("span", { class: "count" }, `${list.length} in Develop`)),
+        h("div", { class: "wiz-actions" }, h("button", { type: "button", disabled: off || !list.length, onclick: askReport }, icon("spark"), "Ask the release manager")),
+        state.report ? h("details", { class: "assist-msg" }, h("summary", {}, "Release manager report"), h("pre", { class: "rel-report" }, state.report)) : null,
+        list.length ? list.map((t) => {
+          const review = t.review?.agent?.status || "pending", warn = compact(review !== "approved" ? `agent review ${review}` : null,
+            /pending at merge time/.test(t.delivery?.dev?.evidence || "") ? "merged before the agent review ended" : null);
+          return h("label", { class: "rel-task" },
+            h("input", { type: "checkbox", disabled: off, checked: state.picked.has(t.id), onchange: (e) => { e.target.checked ? state.picked.add(t.id) : state.picked.delete(t.id); draw(); } }),
+            h("span", {}, h("span", { class: "cid" }, t.id), " ", t.title, " ", h("span", { class: "hint" }, releasePulls(t, repo).map((p) => `#${p.n}`).join(" ")),
+              warn.length ? h("span", { class: "rel-warn" }, ` ${warn.join(", ")}`) : null));
+        }) : h("p", { class: "muted" }, `No task in Develop has pull requests in ${repo.name || repo.id}.`),
+        h("label", { class: "field" }, "Version", version),
+        h("label", { class: "field" }, "Notes in Catalan", notes, counter),
+        h("div", { class: "row-end" }, h("button", { type: "button", class: "primary", disabled: off || !state.picked.size, onclick: cut }, icon("up"), "Cut release"))),
+    ));
+  };
+  count();
+  draw();
+  modal("Release", [body, status], { ok: "Close", cancel: null }).then(() => { open = false; });
+}
+
 function renderPanel() {
   const panel = $("#panel");
   const t = ui.selected && get(ui.selected);
@@ -4898,6 +5070,7 @@ function fillPanel(panel, t) {
   if (t.delivery) workflow.push(h("section", { class: "p-sec" }, h("div", { class: "section-head" }, "Delivery evidence"),
     h("div", { class: "md" },
       t.delivery.dev ? h("p", {}, h("b", {}, "Dev: "), t.delivery.dev.evidence) : null,
+      t.delivery.release ? h("p", {}, h("b", {}, "Release: "), `${t.delivery.release.version} · ${t.delivery.release.evidence}`) : null,
       t.delivery.production ? h("p", {}, h("b", {}, "Production: "), t.delivery.production.evidence) : null)));
   if (["doing", "review", "done", "production"].includes(vs)) workflow.push(evidenceSection(t.id));
 
@@ -6423,6 +6596,7 @@ function setupChrome() {
   }
   $("#display").onclick = (e) => dropdown(e.currentTarget, displayMenu(), { alignRight: true, cls: "dpop", role: "dialog", label: "Display options" });
   $("#hide-done").onclick = toggleDone;
+  $("#release").onclick = () => releaseDialog();
   $("#inbox").onclick = (e) => dropdown(e.currentTarget, inboxMenu(), { alignRight: true, cls: "inbox-pop", role: "dialog", label: "Inbox" });
   $("#group-filter").onclick = (e) => dropdown(e.currentTarget, groupFilterMenu(), { role: "dialog", label: "Filter by group" });
   $("#filter").onclick = (e) => dropdown(e.currentTarget, filterMenu(), { role: "dialog", label: "Filters" });

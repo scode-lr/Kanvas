@@ -1810,6 +1810,49 @@ class AutomationTests(TempBoard):
         self.assertIn("DV-03", api.sent[0]["text"])
         self.assertIn("Cloudflare", api.sent[0]["text"])
 
+    def release_board(self):
+        self.inbox_board()
+
+        def op(board):
+            task = kanvas.find_task(board, "DV-03")
+            task["state"] = "develop"
+            task["work"] = {"automation": {"status": "completed", "pull_requests": [{"name": "Front", "url": "https://github.com/acme/front/pull/7"}]}}
+        kanvas.mutate(self.path, op)
+
+    def test_release_steps_refuse_what_is_not_on_the_board_before_calling_github(self):
+        self.release_board()
+        good = {"action": "cut", "repo": "acme/front", "version": "1.0.5", "prs": [7], "notes_ca": "Novetats"}
+        with mock.patch.object(kanvas, "_gh") as gh:
+            for change in ({"repo": "evil/repo"}, {"version": "1.0"}, {"prs": []}, {"prs": ["7; rm"]}, {"notes_ca": ""}, {"notes_ca": "x" * 501},
+                           {"action": "promote"}, {"action": "promote", "reviewed": "yes"}, {"action": "merge"}):
+                with self.assertRaises(kanvas.KanvasError, msg=str(change)):
+                    kanvas.release_action(self.path, {**good, **change})
+            gh.assert_not_called()
+
+    def test_a_release_cut_and_promotion_run_the_workflows_of_the_chosen_repository(self):
+        self.release_board()
+        with mock.patch.object(kanvas, "_gh", return_value="") as gh:
+            kanvas.release_action(self.path, {"action": "cut", "repo": "acme/front", "version": "1.0.5", "prs": [7, 9], "notes_ca": "Una\nDues"})
+            args = gh.call_args[0][1:]
+            self.assertEqual(args[:5], ("workflow", "run", "release-cut.yml", "--repo", "acme/front"))
+            self.assertIn("version=1.0.5", args)
+            self.assertIn("prs=7,9", args)
+            self.assertIn("notes_ca=Una\\nDues", args)
+            kanvas.release_action(self.path, {"action": "promote", "repo": "acme/front", "version": "1.0.5", "reviewed": True})
+            self.assertEqual(gh.call_args[0][3], "release-promote.yml")
+        with mock.patch.object(kanvas, "_gh", return_value='[{"number": 70, "url": "u", "state": "MERGED"}]'):
+            self.assertEqual(kanvas.release_action(self.path, {"action": "status", "repo": "acme/front", "version": "1.0.5"})["pr"]["number"], 70)
+
+    def test_the_release_manager_reads_the_tasks_in_develop_and_what_dev_has_over_main(self):
+        self.release_board()
+        repo = {"name": "Front", "path": self.dir}
+        with mock.patch.object(kanvas, "_git", side_effect=["origin/main", "abc fix dates", " a.ts | 2 +-"]):
+            prompt = kanvas.release_prompt(self.board(), repo)
+        self.assertIn("DV-03", prompt)
+        self.assertIn("pull/7", prompt)
+        self.assertIn("abc fix dates", prompt)
+
+
     def tg_message(self, text, user=None, chat_type="private", **extra):
         user = user or self.OWNER
         return {"update_id": 1, "message": {"from": {"id": user}, "chat": {"id": user, "type": chat_type}, "text": text, **extra}}
