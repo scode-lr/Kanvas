@@ -1107,6 +1107,8 @@ def agent_roles(value):
         for key in ("timeout_minutes", "idle_minutes"):
             if role.get(key) is not None:
                 role[key] = _positive_int(role[key], None, f"automation.agents.{name}.{key}")
+        if role.get("mcp_config") is not None and not isinstance(role["mcp_config"], str):
+            raise KanvasError(f"automation.agents.{name}.mcp_config must be a path to an MCP config file, relative to the project root")
         for key in ("allowed_tools", "disallowed_tools"):
             if key in given:
                 role[key] = _tool_list(given[key], ())
@@ -1156,7 +1158,11 @@ def design_settings(value):
     repositories = value.get("repositories", ["front"])
     if not isinstance(repositories, list) or not all(isinstance(x, str) for x in repositories):
         raise KanvasError("automation.design.repositories must be a list of repository ids")
-    return {"enabled": _flag(value.get("enabled"), True, "automation.design.enabled"), "repositories": repositories}
+    figma = value.get("figma")
+    if figma is not None and not isinstance(figma, str):
+        raise KanvasError("automation.design.figma must be the URL of a Figma file")
+    return {"enabled": _flag(value.get("enabled"), True, "automation.design.enabled"), "repositories": repositories,
+            "figma": figma or ""}
 
 
 def ci_settings(value):
@@ -1208,9 +1214,12 @@ def claude_command(config, worktrees, role=None):
         command += ["--max-budget-usd", str(pick("max_budget_usd"))]
     allowed = role["allowed_tools"] if "allowed_tools" in role else config["allowed_tools"]
     disallowed = role["disallowed_tools"] if "disallowed_tools" in role else config["disallowed_tools"]
+    if role.get("mcp_config"):
+        # A role may load the MCP servers of one file (the designer loads Figma); --strict-mcp-config keeps out all others.
+        command += ["--mcp-config", os.path.join(config["root"], str(role["mcp_config"]))]
     if config.get("lean", True):
         command += ["--strict-mcp-config", "--setting-sources", "project,local"]
-        tools = list(dict.fromkeys(t.split("(")[0] for t in allowed))
+        tools = list(dict.fromkeys(t.split("(")[0] for t in allowed if not t.startswith("mcp__")))
         if tools:
             command += ["--tools", ",".join(tools)]
     if allowed:
@@ -1995,6 +2004,26 @@ def design_applies(task, config):
     return bool(set(task_repository_ids(task)) & set(config["design"]["repositories"]))
 
 
+def design_choice_pending(task):
+    """YOLO wrote the plan but the human has not yet said whether the task needs a design: nothing runs until they do."""
+    work = task.get("work") if isinstance(task.get("work"), dict) else {}
+    run = work.get("automation") if isinstance(work.get("automation"), dict) else {}
+    return (task.get("state") == "doing" and not run.get("status") and work.get("design_choice") == "pending"
+            and not isinstance(work.get("needs_design"), bool))
+
+
+def set_design_choice(path, task_id, needed):
+    """The human's answer to "does this task need a design?" after YOLO planned it."""
+    def op(board):
+        t = find_task(board, task_id)
+        if not design_choice_pending(t):
+            raise KanvasError(f"{t['id']} is not waiting for the design decision")
+        t["work"]["needs_design"] = bool(needed)
+        t["work"].pop("design_choice", None)
+        add_note(t, "Design required: the designer will propose it." if needed else "No design needed: the implementation starts.", "human")
+    mutate(path, op)
+
+
 def design_prompt(task, config, previous, feedback):
     definition = task.get("definition") if isinstance(task.get("definition"), dict) else {}
     work = task.get("work") if isinstance(task.get("work"), dict) else {}
@@ -2002,6 +2031,9 @@ def design_prompt(task, config, previous, feedback):
                       if i in config["design"]["repositories"])
     again = (f"\nYour previous proposal:\n{_clip(previous, 6000)}\n\nThe human asked for these changes; address every one:\n"
              f"{feedback or '(no written feedback)'}\n" if previous else "")
+    figma = definition.get("figma") or config["design"].get("figma")
+    figma_line = (f"Figma file: {figma}. Figma is mandatory, the budget allows it: (1) before designing, call create_session with its file key and then search_design_system / get_design_context to read its design system and screens; "
+                  f"(2) when the proposal is settled, call use_figma to draw it on a new page titled {task['id']} in that file, and put the link of the page in the proposal. Do not skip either step and do not ask the human whether to draw it.\n" if figma else "")
     return f"""You are the UI/UX designer for Factory task {task['id']}: {task['title']}. Nobody has written code for it yet and you do not write any: you propose the design and a human approves it before an implementer builds it.
 
 Application repositories (read only):
@@ -2012,7 +2044,7 @@ Needs and constraints: {definition.get('needs') or '(not supplied)'}
 Acceptance criteria: {definition.get('acceptance') or '(not supplied)'}
 Non-goals: {definition.get('non_goals') or '(none)'}
 Technical plan: {_clip(work.get('plan'), 3000) or '(not supplied)'}
-{again}
+{figma_line}{again}
 Do not invent a visual language. Read the CLAUDE.md of the application, its design decisions (the adr folder), the shared styles and components, and one or two existing screens that resemble this one, then design with what exists. Design the three screen sizes the app is used on: mobile (a phone, the main one), tablet (an iPad, in portrait and landscape) and web (a desktop browser). Mobile first; say what changes on each of the others.
 
 Answer in the language the task is written in, in markdown, under 700 words, with these sections:
@@ -2792,7 +2824,10 @@ def cmd_design(args):
     path = board_path(args)
     board = load_board(path)
     task = find_task(board, args.id)
-    if args.approve:
+    if args.needed or args.not_needed:
+        set_design_choice(path, task["id"], bool(args.needed))
+        print(f"{task['id']}: " + ("the designer will propose a design" if args.needed else "no design; the implementation starts"))
+    elif args.approve:
         set_design(path, task["id"], True)
         print(f"Design approved for {task['id']}; the implementation starts")
     elif args.changes is not None or args.again:
@@ -4687,6 +4722,8 @@ class AutomationDispatcher:
             if (task.get("state") != "doing" or not work.get("plan") or not task_repository_ids(task)
                     or (run.get("status") and not sent_back)):
                 continue
+            if design_choice_pending(task):
+                continue
             if design_applies(task, config):
                 design = design_of(task)
                 if design.get("status") in (None, "", DESIGN_CHANGES):
@@ -4821,6 +4858,10 @@ class AutomationDispatcher:
                     t["work"] = {"by": "factory (YOLO)", "at": at, "plan": plan, "repositories": list(definition.get("repositories") or [])}
                     t.pop("review", None)
                     t["state"] = "doing"
+                    # The human decides whether the task needs a design; YOLO never does.
+                    design_config = automation_config(board, path)["design"]
+                    if design_config["enabled"] and set(task_repository_ids(t)) & set(design_config["repositories"]):
+                        t["work"]["design_choice"] = "pending"
                     add_note(t, plan + (f"\n\nOpen questions it settled with its best option: {settled}" if settled else ""), "factory")
                     return t
                 mutate(path, start)
@@ -6481,6 +6522,8 @@ def build_parser():
     p.add_argument("id")
     p = add("design", cmd_design, "show, approve or ask for changes to the UI/UX design a front task needs before it is built")
     p.add_argument("id")
+    p.add_argument("--needed", action="store_true", help="answer a YOLO task: it needs a design")
+    p.add_argument("--not-needed", action="store_true", help="answer a YOLO task: it needs no design")
     p.add_argument("--approve", action="store_true", help="approve the proposal so the implementation can start")
     p.add_argument("--changes", metavar="TEXT", help="ask the designer for these changes")
     p.add_argument("--again", action="store_true", help="have the designer try again (after a failure)")

@@ -5999,6 +5999,29 @@ class DesignCheckTests(unittest.TestCase):
         self.assertFalse(kanvas.design_applies(self.task(), self.config))
         self.assertTrue(kanvas.design_applies(self.task(repositories=["front"]), self.config))
 
+    def test_yolo_waits_for_the_human_to_decide_the_design(self):
+        task = self.task(repositories=["front"])
+        task["work"]["design_choice"] = "pending"
+        self.assertTrue(kanvas.design_choice_pending(task))
+        task["work"]["needs_design"] = False
+        self.assertFalse(kanvas.design_choice_pending(task))
+        self.assertFalse(kanvas.design_applies(task, self.config))
+
+    def test_the_answer_of_the_human_to_the_design_choice(self):
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "kanvas.json")
+        task = self.task(repositories=["front"])
+        task["title"], task["notes"], task["deps"] = "t", [], []
+        task["work"]["design_choice"] = "pending"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"title": "T", "groups": [], "tasks": [task]}, f)
+        kanvas.set_design_choice(path, "X-1", True)
+        saved = kanvas.load_board(path)["tasks"][0]["work"]
+        self.assertTrue(saved["needs_design"])
+        self.assertNotIn("design_choice", saved)
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.set_design_choice(path, "X-1", False)
+
     def test_the_answers_of_the_owner_reach_the_plan_prompt(self):
         board = {"title": "T", "groups": [], "tasks": []}
         task = {"id": "X-1", "title": "t", "state": "todo"}

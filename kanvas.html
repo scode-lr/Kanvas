@@ -2795,6 +2795,14 @@ const ops = {
     t.work.design = approve ? { ...design, status: "approved", by: "human", at, feedback: "", history } : { ...design, status: "changes_requested", feedback, at, history };
     addNote(t, approve ? "Design approved." : feedback ? `Design changes requested: ${feedback}` : "Design requested again.", at);
   },
+  // YOLO planned the task but never decides the design: the human says whether it needs one.
+  designChoice: (id, needed, at = nowIso()) => (b) => {
+    const t = mustFind(b, id), w = t.work || {};
+    if (t.state !== "doing" || w.design_choice !== "pending" || typeof w.needs_design === "boolean") throw new Error(`${t.id} is not waiting for the design decision`);
+    w.needs_design = needed;
+    delete w.design_choice;
+    addNote(t, needed ? "Design required: the designer will propose it." : "No design needed: the implementation starts.", at);
+  },
   // The one thing a human may do to a task an agent is working on. The runner that owns the process sees the request and ends it.
   stop: (id, at = nowIso()) => (b) => {
     const t = b.tasks.find((x) => same(x.id, id));
@@ -2969,7 +2977,7 @@ const PLANT_NEEDS = { question: "Asks you a question", failed: "The run failed",
 function plantNeeds(t) {
   if (openQuestion(t)) return "question";
   if (t.state === "doing" && t.work?.automation?.status === "failed") return "failed";
-  if (t.state === "doing" && t.work?.design?.status === "pending") return "design";
+  if (t.state === "doing" && (t.work?.design?.status === "pending" || (t.work?.design_choice === "pending" && typeof t.work.needs_design !== "boolean"))) return "design";
   if (t.state === "review" && t.review?.agent?.status === "approved" && t.review?.manual?.status !== "approved") return "review";
   if (t.state === "proposed" && t.inbox?.ready && t.inbox?.status !== "approved") return "idea";
   return "";
@@ -5041,6 +5049,14 @@ function fillPanel(panel, t) {
       t.work.automation ? h("p", {}, h("b", {}, "Automation: "), (t.work.automation.status || "unknown") + (t.work.automation.round > 1 ? ` (round ${t.work.automation.round})` : ""),
         t.work.automation.summary ? ` · ${t.work.automation.summary}` : "") : null)));
   let designTop = null;
+  if (t.state === "doing" && t.work?.design_choice === "pending" && typeof t.work.needs_design !== "boolean") {
+    designTop = h("section", { class: "p-sec design-card waiting" },
+      h("div", { class: "section-head" }, "Does this task need a design?", h("span", { class: "count" }, "waiting for you")),
+      h("p", { class: "muted" }, "YOLO wrote the plan but does not decide this. Nothing runs until you answer."),
+      !ro ? h("div", { class: "row-end" },
+        h("button", { onclick: () => undoable(ops.designChoice(t.id, false), `No design for ${t.id}`) }, "No design needed"),
+        h("button", { class: "primary", onclick: () => undoable(ops.designChoice(t.id, true), `Design required for ${t.id}`) }, icon("check"), "Needs design")) : null);
+  }
   if (t.work?.design) {
     const design = t.work.design, waiting = design.status === "pending";
     const label = { pending: "waiting for you", approved: "approved", changes_requested: "changes requested", failed: "failed" }[design.status] || design.status;
