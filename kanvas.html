@@ -689,6 +689,18 @@ body.picking .card { cursor: pointer; }
 .multi-bar .count b { font-variant-numeric: tabular-nums; }
 body.multi .zoombar { display: none; }
 .card.pick-off, .kcard.pick-off { opacity: .3; cursor: not-allowed !important; }
+.chatpanel { position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100vw); z-index: 60; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border-strong); box-shadow: -8px 0 28px rgba(0,0,0,.18); }
+.chatpanel[hidden] { display: none; }
+.chat-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.chat-head select { flex: 1; min-width: 0; }
+.chat-log { flex: 1; overflow-y: auto; padding: 12px; font: 13px/1.5 var(--mono); background: var(--surface-2); display: flex; flex-direction: column; gap: 10px; }
+.chat-msg { white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-msg .who { display: block; font-weight: 700; font-size: 11.5px; color: var(--accent); }
+.chat-msg.me .who { color: var(--muted); }
+.chat-msg.err { color: #c0392b; }
+.chat-msg.wait { color: var(--faint); }
+.chat-form { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
+.chat-form textarea { flex: 1; resize: none; font: 13px/1.4 var(--mono); }
 .dlg-actions { display: flex; flex-direction: row-reverse; gap: 8px; margin-top: 4px; }
 .group-rows { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
 .group-row { display: grid; grid-template-columns: 14px 1fr 64px auto; gap: 8px; align-items: center; }
@@ -1030,6 +1042,7 @@ dialog.dlg[open]:has(> form > .help) { display: flex; flex-direction: column; }
     </div>
     <button id="display" data-icon="sliders" data-tip="Direction, card order, finished tasks and theme" aria-haspopup="dialog" aria-expanded="false" aria-label="Display options"><span class="lbl">Display</span></button>
     <button id="inbox" aria-haspopup="dialog" aria-expanded="false" hidden></button>
+    <button id="chat" class="edit-only" data-icon="chat" data-tip="Talk with an agent, as in a terminal" aria-haspopup="dialog" aria-label="Chat"><span class="lbl">Chat</span></button>
     <button id="release" class="edit-only" data-icon="up" data-tip="Release: choose tasks, cut release/X.Y.Z and promote to main" aria-haspopup="dialog" aria-label="Release"><span class="lbl">Release</span></button>
   </div>
   <div class="tools edit-only">
@@ -1142,6 +1155,7 @@ const ICONS = {
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17h.01"/>',
   download: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
   up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  chat: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12.5h5"/>',
   down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>',
@@ -4757,6 +4771,64 @@ function haltSection(t, ro) {
     ro ? null : h("p", { class: "muted" }, "It needs you: retry it, finish it by hand and send it to review, or pause it, with the buttons of this task."));
 }
 
+// Chat: a docked terminal-like panel to talk with one agent, or with "auto" so a router picks who answers.
+const CHAT_AGENTS = ["product-owner", "architect", "senior-dev", "release-manager", "triage", "commercial", "reviewer"];
+const chat = { panel: null, log: [], sessions: {}, agent: "auto", busy: false };
+
+function chatPanel() {
+  if (chat.panel) { chat.panel.hidden = !chat.panel.hidden; if (!chat.panel.hidden) chat.panel.querySelector("textarea").focus(); return; }
+  const out = h("div", { class: "chat-log", role: "log", "aria-live": "polite" });
+  const input = h("textarea", { rows: 2, placeholder: "Write to the agent. Enter sends, Shift+Enter adds a line.", "aria-label": "Message" });
+  const picker = h("select", { "aria-label": "Agent" }, h("option", { value: "auto" }, "Auto: the router picks who answers"),
+    ...CHAT_AGENTS.map((a) => h("option", { value: a }, a)));
+  const send = h("button", { class: "primary", type: "submit" }, "Send");
+  const add = (cls, who, text) => {
+    const m = h("div", { class: `chat-msg ${cls}` }, h("span", { class: "who" }, who), text);
+    out.append(m); out.scrollTop = out.scrollHeight; return m;
+  };
+  const say = async () => {
+    const message = input.value.trim();
+    if (!message || chat.busy) return;
+    input.value = "";
+    chat.busy = true; send.disabled = true;
+    add("me", "you", message);
+    const wait = add("wait", chat.agent === "auto" ? "router" : chat.agent, "thinking…");
+    const history = chat.log.slice(-8);
+    try {
+      const start = await fetch("api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: chat.agent, message, sessions: chat.sessions, history }) });
+      const started = await start.json().catch(() => ({}));
+      if (!start.ok) throw new Error(started.error || "The chat could not start.");
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1200));
+        const poll = await fetch(`api/assist/${started.job}`, { cache: "no-store" });
+        const job = await poll.json().catch(() => ({}));
+        if (!poll.ok) throw new Error(job.error || "The conversation was lost.");
+        if (job.working) wait.firstChild.textContent = job.working;
+        if (job.status === "running") continue;
+        if (job.status === "failed") throw new Error(job.error || "The agent failed.");
+        const { agent, reply, session } = job.result;
+        if (session) chat.sessions[agent] = session;
+        chat.log.push({ who: "you", text: message }, { who: agent, text: reply });
+        wait.remove(); add("", agent, reply);
+        break;
+      }
+    } catch (e) {
+      wait.remove(); add("err", "error", e.message);
+    }
+    chat.busy = false; send.disabled = false; input.focus();
+  };
+  picker.addEventListener("change", () => { chat.agent = picker.value; });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); say(); } });
+  const close = h("button", { class: "ghost icon-btn", type: "button", "aria-label": "Close chat", onclick: () => { chat.panel.hidden = true; } }, "×");
+  chat.panel = h("aside", { class: "chatpanel", "aria-label": "Chat with an agent" },
+    h("div", { class: "chat-head" }, picker, close), out,
+    h("form", { class: "chat-form", onsubmit: (e) => { e.preventDefault(); say(); } }, input, send));
+  document.body.append(chat.panel);
+  add("wait", "factory", "Pick an agent or leave Auto. Agents here only read the project; they never change files or the board.");
+  input.focus();
+}
+
 // Release: the tasks merged to dev are chosen, cut into release/X.Y.Z and promoted to main by the workflows in GitHub.
 const releasePulls = (t, repo) => (t.work?.automation?.pull_requests || []).filter((p) => p.name === repo.name).map((p) => {
   const m = /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/.exec(p.url || "");
@@ -6613,6 +6685,7 @@ function setupChrome() {
   $("#display").onclick = (e) => dropdown(e.currentTarget, displayMenu(), { alignRight: true, cls: "dpop", role: "dialog", label: "Display options" });
   $("#hide-done").onclick = toggleDone;
   $("#release").onclick = () => releaseDialog();
+  $("#chat").onclick = () => chatPanel();
   $("#inbox").onclick = (e) => dropdown(e.currentTarget, inboxMenu(), { alignRight: true, cls: "inbox-pop", role: "dialog", label: "Inbox" });
   $("#group-filter").onclick = (e) => dropdown(e.currentTarget, groupFilterMenu(), { role: "dialog", label: "Filter by group" });
   $("#filter").onclick = (e) => dropdown(e.currentTarget, filterMenu(), { role: "dialog", label: "Filters" });

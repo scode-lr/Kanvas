@@ -1852,6 +1852,29 @@ class AutomationTests(TempBoard):
         self.assertIn("pull/7", prompt)
         self.assertIn("abc fix dates", prompt)
 
+    def test_the_chat_routes_a_message_keeps_each_agents_session_and_stays_read_only(self):
+        calls = []
+
+        def fake(command, prompt, root):
+            calls.append((command, prompt))
+            if "--model" in command:
+                return {"result": "I would pick architect."}
+            return {"result": "Use a queue.", "session_id": "sess-12345678", "total_cost_usd": 0.01, "num_turns": 2}
+
+        with mock.patch.object(kanvas, "chat_run", side_effect=fake):
+            self.assertEqual(kanvas.chat_route("how should we store this?", self.dir), "architect")
+            reply, session, _, turns = kanvas.chat_step("architect", "go on", "sess-00000000", [], self.dir, kanvas.assist_settings(None))
+            kanvas.chat_step("senior-dev", "and the code?", None, [{"who": "architect", "text": "Use a queue."}], self.dir,
+                             kanvas.assist_settings(None))
+        self.assertEqual((reply, session, turns), ("Use a queue.", "sess-12345678", 2))
+        resumed, handed = calls[1][0], calls[2]
+        self.assertEqual(resumed[resumed.index("--resume") + 1], "sess-00000000")
+        self.assertEqual(resumed[resumed.index("--tools") + 1], "Read,Glob,Grep")
+        self.assertIn("architect: Use a queue.", handed[1])
+        self.assertNotIn("--resume", handed[0])
+        with mock.patch.object(kanvas, "chat_run", side_effect=kanvas.KanvasError("down")):
+            self.assertEqual(kanvas.chat_route("hello", self.dir), "triage")
+
 
     def tg_message(self, text, user=None, chat_type="private", **extra):
         user = user or self.OWNER

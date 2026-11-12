@@ -5233,6 +5233,47 @@ class BoardServer(ThreadingHTTPServer):
         threading.Thread(target=run, daemon=True).start()
         return job
 
+    def start_chat(self, name, agent, message, sessions, history):
+        """One chat turn in the background, polled like any help. `agent` is a name or "auto"; `sessions` maps each agent to
+        the conversation it already has with the owner."""
+        path = self.board_path(name)
+        if not shutil.which("claude"):
+            raise KanvasError("Claude Code (claude) is not installed or not on PATH; the chat needs it")
+        message = _clip(message, 6000)
+        if not message:
+            raise KanvasError("Write a message first")
+        if agent != "auto" and agent not in CHAT_AGENTS:
+            raise KanvasError("Expected auto or one of: " + ", ".join(CHAT_AGENTS))
+        with self.assist_lock:
+            if sum(1 for j in self.assist.values() if j["status"] == "running") >= ASSIST_MAX_RUNNING:
+                raise AssistBusy(f"{ASSIST_MAX_RUNNING} agent conversations are already running; wait for one to finish")
+            job = {"id": os.urandom(8).hex(), "board": name, "kind": "chat", "status": "running", "phase": "draft",
+                   "working": agent if agent != "auto" else "router", "messages": [], "result": None, "error": "", "cost": 0.0, "turns": 0}
+            self.assist[job["id"]] = job
+            for old in [k for k, j in self.assist.items() if j["status"] != "running"][:-ASSIST_KEEP]:
+                del self.assist[old]
+
+        def run():
+            def change(**fresh):
+                with self.assist_lock:
+                    job.update(fresh)
+            try:
+                _, root, settings = assist_context(path)
+                who = agent if agent != "auto" else chat_route(message, root)
+                change(working=who)
+                reply, session, cost, turns = chat_step(who, message, sessions.get(who), history, root, settings)
+                change(status="done", working="", cost=cost, turns=turns,
+                       result={"agent": who, "reply": reply.strip() or "(no text)", "session": session})
+            except subprocess.TimeoutExpired:
+                change(status="failed", working="", error="The agent took too long and was stopped")
+            except (KanvasError, OSError, ValueError) as e:
+                change(status="failed", working="", error=str(e))
+            except Exception as e:
+                change(status="failed", working="", error=f"{type(e).__name__}: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
+        return job
+
     def board_list(self):
         with self.boards_lock:
             boards = list(self.boards.items())
@@ -5473,6 +5514,75 @@ def assist_step(agent, prompt, root, settings):
         detail = (data.get("result") if isinstance(data, dict) else None) or proc.stderr.strip() or proc.stdout.strip()
         raise KanvasError(f"{agent} could not answer: {_clip(detail, 300) or 'no output'}")
     return str(data.get("result") or ""), float(data.get("total_cost_usd") or 0), int(data.get("num_turns") or 0)
+
+
+# The chat window: the owner talks to one agent as in a terminal, or lets a router pick who answers. Read only, like every help.
+CHAT_AGENTS = {"product-owner": "what to build, why and when; shapes tasks and priorities",
+               "architect": "how to build it: structure, data, API contract, security, rollout",
+               "senior-dev": "the code: how it works, debugging, reviews",
+               "release-manager": "releases: what ships, risks, version, notes",
+               "triage": "classify a request and read the board",
+               "commercial": "answers to a client: viable, effort, cost",
+               "reviewer": "reads a change against its criteria"}
+CHAT_TIMEOUT = 300
+
+
+def chat_run(command, prompt, root):
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    proc = subprocess.run(command, input=prompt, text=True, encoding="utf-8", errors="replace", capture_output=True,
+                          cwd=root, env=agent_environment(), timeout=CHAT_TIMEOUT, creationflags=flags)
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        data = None
+    if isinstance(data, list):
+        data = next((e for e in reversed(data) if isinstance(e, dict) and e.get("type") == "result"), None)
+    if not isinstance(data, dict) or proc.returncode or data.get("is_error"):
+        detail = (data.get("result") if isinstance(data, dict) else None) or proc.stderr.strip() or proc.stdout.strip()
+        raise KanvasError(f"The agent could not answer: {_clip(detail, 300) or 'no output'}")
+    return data
+
+
+def chat_route(message, root):
+    """Which agent should answer: a cheap call that reads only the message and answers one name."""
+    menu = "\n".join(f"- {name}: {about}" for name, about in CHAT_AGENTS.items())
+    prompt = (f"Pick the one agent that should answer this message from the owner of a software project.\n{menu}\n\n"
+              f"Message:\n{_clip(message, 1500)}\n\nAnswer with only the agent name.")
+    command = [shutil.which("claude") or "claude", "-p", "--output-format", "json", "--model", "haiku", "--no-session-persistence",
+               "--strict-mcp-config", "--setting-sources", "project,local", "--tools", "", "--max-turns", "1"]
+    try:
+        said = str(chat_run(command, prompt, root).get("result") or "")
+    except (KanvasError, subprocess.TimeoutExpired):
+        return "triage"
+    return next((name for name in CHAT_AGENTS if name in said.lower()), "triage")
+
+
+def chat_step(agent, message, session, history, root, settings):
+    """One turn with an agent. The agent keeps its own conversation through `--resume`; when the owner has just moved to
+    another agent, `history` brings it up to date with what was said."""
+    command = [shutil.which("claude") or "claude", "-p", "--output-format", "json", "--agent", agent, "--permission-mode", "acceptEdits",
+               "--strict-mcp-config", "--setting-sources", "project,local", "--tools", ",".join(ASSIST_TOOLS),
+               "--max-turns", str(settings["max_turns"])]
+    if session:
+        command += ["--resume", session]
+    if settings["max_budget_usd"]:
+        command += ["--max-budget-usd", str(settings["max_budget_usd"])]
+    command += ["--allowedTools", *ASSIST_TOOLS]
+    prompt = message
+    if history and not session:
+        said = "\n".join(f"{m['who']}: {_clip(m['text'], 800)}" for m in history)
+        prompt = f"The owner was talking with other agents of the team. What was said so far:\n{said}\n\nThe owner now says:\n{message}"
+    data = chat_run(command, prompt, root)
+    return (str(data.get("result") or ""), str(data.get("session_id") or ""), float(data.get("total_cost_usd") or 0),
+            int(data.get("num_turns") or 0))
+
+
+def clean_history(value):
+    out = []
+    for m in (value if isinstance(value, list) else [])[-8:]:
+        if isinstance(m, dict) and isinstance(m.get("text"), str) and isinstance(m.get("who"), str):
+            out.append({"who": _clip(m["who"], 40), "text": _clip(m["text"], 800)})
+    return out
 
 
 RELEASE_WORKFLOWS = {"cut": "release-cut.yml", "promote": "release-promote.yml"}
@@ -5934,6 +6044,23 @@ class BoardHandler(BaseHTTPRequestHandler):
                 fields = {str(k): _clip(v) for k, v in (request.get("fields") or {}).items() if isinstance(v, str)}
                 job = self.server.start_assist(parts[0], request.get("kind"), request.get("id"), fields,
                                                request.get("phase") or "draft", clean_answers(request.get("answers")))
+            except AssistBusy as e:
+                return self._error(429, str(e))
+            except (KanvasError, ValueError, AttributeError) as e:
+                return self._error(400, str(e) or "Expected a JSON object")
+            return self._send(202, json.dumps({"job": job["id"]}).encode("utf-8"))
+        if parts[1:] == ["api", "chat"] and self.server.board_path(parts[0]) is not None:
+            if not self._from_this_computer():
+                return self._error(403, "The chat answers only requests from the computer running Factory")
+            text = self._read_json()
+            if text is None:
+                return
+            try:
+                request = json.loads(text)
+                sessions = {k: v for k, v in (request.get("sessions") or {}).items()
+                            if isinstance(k, str) and isinstance(v, str) and re.fullmatch(r"[\w-]{8,64}", v)}
+                job = self.server.start_chat(parts[0], str(request.get("agent") or "auto"), request.get("message"), sessions,
+                                             clean_history(request.get("history")))
             except AssistBusy as e:
                 return self._error(429, str(e))
             except (KanvasError, ValueError, AttributeError) as e:
