@@ -5233,7 +5233,7 @@ class BoardServer(ThreadingHTTPServer):
         threading.Thread(target=run, daemon=True).start()
         return job
 
-    def start_chat(self, name, agent, message, sessions, history):
+    def start_chat(self, name, agent, message, sessions, history, act=False):
         """One chat turn in the background, polled like any help. `agent` is a name or "auto"; `sessions` maps each agent to
         the conversation it already has with the owner."""
         path = self.board_path(name)
@@ -5261,7 +5261,7 @@ class BoardServer(ThreadingHTTPServer):
                 _, root, settings = assist_context(path)
                 who = agent if agent != "auto" else chat_route(message, root)
                 change(working=who)
-                reply, session, cost, turns = chat_step(who, message, sessions.get(who), history, root, settings)
+                reply, session, cost, turns = chat_step(who, message, sessions.get(who), history, root, settings, act)
                 change(status="done", working="", cost=cost, turns=turns,
                        result={"agent": who, "reply": reply.strip() or "(no text)", "session": session})
             except subprocess.TimeoutExpired:
@@ -5524,7 +5524,7 @@ CHAT_AGENTS = {"product-owner": "what to build, why and when; shapes tasks and p
                "triage": "classify a request and read the board",
                "commercial": "answers to a client: viable, effort, cost",
                "reviewer": "reads a change against its criteria"}
-CHAT_TIMEOUT = 300
+CHAT_TIMEOUT = 600
 
 
 def chat_run(command, prompt, root):
@@ -5557,17 +5557,27 @@ def chat_route(message, root):
     return next((name for name in CHAT_AGENTS if name in said.lower()), "triage")
 
 
-def chat_step(agent, message, session, history, root, settings):
+CHAT_ACT_TOOLS = ASSIST_TOOLS + ("Edit", "Write", "Bash")
+# Even when the owner lets the agents act, publishing stays with the owner: the project rules ask for an explicit request.
+CHAT_NEVER = ("Bash(git push:*)", "Bash(git commit:*)", "Bash(git merge:*)", "Bash(git reset:*)", "Bash(git rebase:*)",
+              "Bash(git checkout:*)", "Bash(git clean:*)", "Bash(rm:*)", "Bash(del:*)", "Bash(Remove-Item:*)")
+
+
+def chat_step(agent, message, session, history, root, settings, act=False):
     """One turn with an agent. The agent keeps its own conversation through `--resume`; when the owner has just moved to
-    another agent, `history` brings it up to date with what was said."""
+    another agent, `history` brings it up to date with what was said. With `act` it may also edit files and run commands,
+    but never commit, push, merge or delete."""
+    tools = CHAT_ACT_TOOLS if act else ASSIST_TOOLS
     command = [shutil.which("claude") or "claude", "-p", "--output-format", "json", "--agent", agent, "--permission-mode", "acceptEdits",
-               "--strict-mcp-config", "--setting-sources", "project,local", "--tools", ",".join(ASSIST_TOOLS),
-               "--max-turns", str(settings["max_turns"])]
+               "--strict-mcp-config", "--setting-sources", "project,local", "--tools", ",".join(tools),
+               "--max-turns", str(settings["max_turns"] * (3 if act else 1))]
     if session:
         command += ["--resume", session]
     if settings["max_budget_usd"]:
         command += ["--max-budget-usd", str(settings["max_budget_usd"])]
-    command += ["--allowedTools", *ASSIST_TOOLS]
+    command += ["--allowedTools", *tools]
+    if act:
+        command += ["--disallowedTools", *CHAT_NEVER]
     prompt = message
     if history and not session:
         said = "\n".join(f"{m['who']}: {_clip(m['text'], 800)}" for m in history)
@@ -6060,7 +6070,7 @@ class BoardHandler(BaseHTTPRequestHandler):
                 sessions = {k: v for k, v in (request.get("sessions") or {}).items()
                             if isinstance(k, str) and isinstance(v, str) and re.fullmatch(r"[\w-]{8,64}", v)}
                 job = self.server.start_chat(parts[0], str(request.get("agent") or "auto"), request.get("message"), sessions,
-                                             clean_history(request.get("history")))
+                                             clean_history(request.get("history")), request.get("act") is True)
             except AssistBusy as e:
                 return self._error(429, str(e))
             except (KanvasError, ValueError, AttributeError) as e:

@@ -1874,6 +1874,11 @@ class AutomationTests(TempBoard):
         self.assertNotIn("--resume", handed[0])
         with mock.patch.object(kanvas, "chat_run", side_effect=kanvas.KanvasError("down")):
             self.assertEqual(kanvas.chat_route("hello", self.dir), "triage")
+        with mock.patch.object(kanvas, "chat_run", side_effect=fake):
+            kanvas.chat_step("senior-dev", "fix it", None, [], self.dir, kanvas.assist_settings(None), act=True)
+        acting = calls[-1][0]
+        self.assertEqual(acting[acting.index("--tools") + 1], "Read,Glob,Grep,Edit,Write,Bash")
+        self.assertIn("Bash(git push:*)", acting)
 
 
     def tg_message(self, text, user=None, chat_type="private", **extra):

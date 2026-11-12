@@ -4773,7 +4773,7 @@ function haltSection(t, ro) {
 
 // Chat: a docked terminal-like panel to talk with one agent, or with "auto" so a router picks who answers.
 const CHAT_AGENTS = ["product-owner", "architect", "senior-dev", "release-manager", "triage", "commercial", "reviewer"];
-const chat = { panel: null, log: [], sessions: {}, agent: "auto", busy: false };
+const chat = { panel: null, log: [], sessions: {}, agent: "auto", busy: false, act: true };
 
 function chatPanel() {
   if (chat.panel) { chat.panel.hidden = !chat.panel.hidden; if (!chat.panel.hidden) chat.panel.querySelector("textarea").focus(); return; }
@@ -4782,6 +4782,9 @@ function chatPanel() {
   const picker = h("select", { "aria-label": "Agent" }, h("option", { value: "auto" }, "Auto: the router picks who answers"),
     ...CHAT_AGENTS.map((a) => h("option", { value: a }, a)));
   const send = h("button", { class: "primary", type: "submit" }, "Send");
+  const actBox = h("input", { type: "checkbox", checked: "", "aria-label": "Allow changes" });
+  actBox.addEventListener("change", () => { chat.act = actBox.checked; });
+  const actLabel = h("label", { class: "check", title: "Edit files and run commands. Never commit, push, merge or delete." }, actBox, "Can act");
   const add = (cls, who, text) => {
     const m = h("div", { class: `chat-msg ${cls}` }, h("span", { class: "who" }, who), text);
     out.append(m); out.scrollTop = out.scrollHeight; return m;
@@ -4796,7 +4799,7 @@ function chatPanel() {
     const history = chat.log.slice(-8);
     try {
       const start = await fetch("api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ agent: chat.agent, message, sessions: chat.sessions, history }) });
+        body: JSON.stringify({ agent: chat.agent, message, sessions: chat.sessions, history, act: chat.act }) });
       const started = await start.json().catch(() => ({}));
       if (!start.ok) throw new Error(started.error || "The chat could not start.");
       for (;;) {
@@ -4822,10 +4825,10 @@ function chatPanel() {
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); say(); } });
   const close = h("button", { class: "ghost icon-btn", type: "button", "aria-label": "Close chat", onclick: () => { chat.panel.hidden = true; } }, "×");
   chat.panel = h("aside", { class: "chatpanel", "aria-label": "Chat with an agent" },
-    h("div", { class: "chat-head" }, picker, close), out,
+    h("div", { class: "chat-head" }, picker, actLabel, close), out,
     h("form", { class: "chat-form", onsubmit: (e) => { e.preventDefault(); say(); } }, input, send));
   document.body.append(chat.panel);
-  add("wait", "factory", "Pick an agent or leave Auto. Agents here only read the project; they never change files or the board.");
+  add("wait", "factory", "Pick an agent or leave Auto. With “Can act” they edit files and run commands; they never commit, push, merge or delete. The board changes only through the kanvas CLI.");
   input.focus();
 }
 
