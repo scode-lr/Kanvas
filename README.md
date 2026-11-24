@@ -331,7 +331,7 @@ When a task reaches Review, Factory has an agent review it before you read it, a
 }
 ```
 
-States are `proposed`, `todo`, `doing`, `review`, `done` and `production`; blocked is computed. Optional `definition`, `work`, `review` and `delivery` objects contain the gate evidence. `"yolo": true` selects the task and its dependencies for autonomous attention: Factory writes their plans by itself, but the definition, design, review and delivery gates stay with the human. The CLI and browser preserve unknown fields and write the same canonical formatting, so diffs show only real changes. See [`examples/drone.json`](examples/drone.json) for a complete board.
+States are `proposed`, `todo`, `doing`, `review`, `done`, `production` and `discarded` (a proposed or to-do task nobody will build, closed with `discard`; it no longer blocks its dependents); blocked is computed. Optional `definition`, `work`, `review` and `delivery` objects contain the gate evidence. `"yolo": true` selects the task and its dependencies for autonomous attention: Factory writes their plans by itself, but the definition, design, review and delivery gates stay with the human. The CLI and browser preserve unknown fields and write the same canonical formatting, so diffs show only real changes. See [`examples/drone.json`](examples/drone.json) for a complete board.
 
 ## Migrating from Kanvas 0.x (Obsidian)
 

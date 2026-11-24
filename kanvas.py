@@ -38,6 +38,9 @@ from datetime import datetime, timezone
 from html import escape
 from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# The server runs without a console (pythonw), so every console program it starts (git, gh, taskkill...) would open a window.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 VERSION = "0.6.0"
@@ -48,7 +51,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HTML_FILE = os.path.join(HERE, "kanvas.html")
 SNAPSHOT_TAG = '<script id="kanvas-snapshot" type="application/json"></script>'
 
-STATES = ("proposed", "todo", "doing", "review", "develop", "done", "production")
+STATES = ("proposed", "todo", "doing", "review", "develop", "done", "production", "discarded")
 ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
 PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9]{0,5}$")
 UNGROUPED_PREFIX = "G"
@@ -388,8 +391,10 @@ def group_label(board, gid):
 
 
 def is_complete(task):
-    """A dependency is complete once merged to dev, whether or not it is in production."""
-    return bool(task) and task.get("state") in ("develop", "done", "production")
+    """A dependency is complete once merged to dev, whether or not it is in production.
+
+    A discarded task is closed without being built: it no longer holds back what depended on it."""
+    return bool(task) and task.get("state") in ("develop", "done", "production", "discarded")
 
 
 def unmet_deps(task, tasks):
@@ -404,7 +409,7 @@ def unmet_deps(task, tasks):
 
 def yolo_active(task):
     """A YOLO mark counts until its task goes to review: the chain is finished then."""
-    return bool(task.get("yolo")) and task.get("state") not in ("review", "develop", "done", "production")
+    return bool(task.get("yolo")) and task.get("state") not in ("review", "develop", "done", "production", "discarded")
 
 
 def yolo_cover(board):
@@ -724,7 +729,7 @@ def git_snapshot(path, required=False):
     def git(*parts):
         proc = subprocess.run(
             ["git", "-C", path, *parts], capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
         )
         return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
 
@@ -862,7 +867,7 @@ def check_task_branch(branch, repo):
 
 def _git(path, *args, env=None):
     proc = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", env=env)
+                          encoding="utf-8", errors="replace", env=env, creationflags=NO_WINDOW)
     if proc.returncode:
         raise KanvasError(proc.stderr.strip() or proc.stdout.strip() or f"git {' '.join(args)} failed")
     return proc.stdout.strip()
@@ -1107,13 +1112,200 @@ def agent_roles(value):
         for key in ("timeout_minutes", "idle_minutes"):
             if role.get(key) is not None:
                 role[key] = _positive_int(role[key], None, f"automation.agents.{name}.{key}")
-        if role.get("mcp_config") is not None and not isinstance(role["mcp_config"], str):
-            raise KanvasError(f"automation.agents.{name}.mcp_config must be a path to an MCP config file, relative to the project root")
+        if role.get("mcp_config") is not None and not _mcp_files_valid(role["mcp_config"]):
+            raise KanvasError(f"automation.agents.{name}.mcp_config must be a path, or a list of paths, to MCP config files, relative to the project root")
         for key in ("allowed_tools", "disallowed_tools"):
             if key in given:
                 role[key] = _tool_list(given[key], ())
         roles[name] = role
     return roles
+
+
+def _mcp_files_valid(value):
+    return isinstance(value, str) or (isinstance(value, list) and all(isinstance(v, str) and v for v in value))
+
+
+def role_mcp_files(role):
+    """The MCP config files a role loads: `mcp_config` is one path or a list of paths."""
+    value = role.get("mcp_config")
+    if isinstance(value, str):
+        return [value] if value else []
+    return [v for v in value or [] if isinstance(v, str) and v]
+
+
+def _mcp_project_root(path):
+    board = load_board(path)
+    config = board.get("automation") if isinstance(board.get("automation"), dict) else {}
+    return os.path.abspath(os.path.join(os.path.dirname(path), config.get("project_root") or "."))
+
+
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _mcp_server_state(server, check):
+    """What a configured MCP server points to, and, when `check` is true, whether that can be reached right now."""
+    if not isinstance(server, dict):
+        return {"type": "unknown", "target": "", "state": "invalid"}
+    url = server.get("url")
+    command = server.get("command")
+    info = {"type": str(server.get("type") or ("http" if url else "stdio")), "target": str(url or command or ""), "state": "unchecked"}
+    if not check:
+        return info
+    if url:
+        headers = server.get("headers") if isinstance(server.get("headers"), dict) else {}
+        missing = sorted({v for value in headers.values() for v in _ENV_REF.findall(str(value)) if v not in os.environ})
+        if missing:
+            info["state"] = "missing_env"
+            info["env"] = missing
+            return info
+        sent = {str(k): _ENV_REF.sub(lambda m: os.environ[m.group(1)], str(v)) for k, v in headers.items()}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(str(url), method="GET", headers=sent), timeout=4):
+                info["state"] = "reachable"
+        except urllib.error.HTTPError as e:
+            if e.code not in (401, 403):
+                info["state"] = "reachable"
+            elif any(k.lower() == "authorization" for k in sent):
+                info["state"] = "unauthorized"  # the key it was given was refused
+            else:
+                info["state"] = "oauth"  # asks for a sign-in: only a browser can give it, not an unattended agent
+        except Exception:
+            info["state"] = "unreachable"
+    elif command:
+        info["state"] = "reachable" if shutil.which(str(command)) else "unreachable"
+    return info
+
+
+def mcp_connectors(root, check=False):
+    """The MCP config files of a project (`.mcp.json`, `.mcp.<name>.json`) and the servers each one loads."""
+    files = []
+    for name in sorted(os.listdir(root)):
+        if not (name == ".mcp.json" or (name.startswith(".mcp.") and name.endswith(".json"))):
+            continue
+        entry = {"file": name, "servers": [], "error": ""}
+        try:
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                servers = json.load(f).get("mcpServers") or {}
+            if not isinstance(servers, dict):
+                raise ValueError("mcpServers must be an object")
+            entry["servers"] = [{"name": key, **_mcp_server_state(value, check)} for key, value in servers.items()]
+        except (OSError, ValueError, AttributeError) as e:
+            entry["error"] = str(e) or "The file is not valid JSON"
+        files.append(entry)
+    return files
+
+
+CONNECTOR_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+CONNECTOR_ENV = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def add_connector(path, spec):
+    """Create `.mcp.<name>.json` with one server. Keys never go in the file: a key is the name of an environment
+    variable, written as `${NAME}` in the `Authorization` header. An existing file is never overwritten."""
+    if not isinstance(spec, dict):
+        raise KanvasError("Expected a JSON object")
+    name = str(spec.get("name") or "").strip().lower()
+    if not CONNECTOR_NAME.match(name):
+        raise KanvasError("The name must be 1 to 40 characters: lowercase letters, digits, - and _")
+    kind = str(spec.get("type") or "http")
+    if kind == "http":
+        url = str(spec.get("url") or "").strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise KanvasError("The URL must start with http:// or https://")
+        server = {"type": "http", "url": url}
+        env = str(spec.get("env") or "").strip()
+        if env:
+            if not CONNECTOR_ENV.match(env):
+                raise KanvasError("The key must be the name of an environment variable, such as NEON_API_KEY, not the key itself")
+            server["headers"] = {"Authorization": "Bearer ${" + env + "}"}
+    elif kind == "stdio":
+        command = str(spec.get("command") or "").strip()
+        if not command:
+            raise KanvasError("A command is needed")
+        args = spec.get("args") or []
+        if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+            raise KanvasError("The arguments must be a list of text")
+        server = {"command": command, "args": args}
+    else:
+        raise KanvasError("The type must be http or stdio")
+    root = _mcp_project_root(path)
+    target = os.path.join(root, f".mcp.{name}.json")
+    try:
+        with open(target, "x", encoding="utf-8", newline="\n") as f:
+            json.dump({"mcpServers": {name: server}}, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+    except FileExistsError:
+        raise KanvasError(f".mcp.{name}.json already exists")
+    return connectors_overview(path)
+
+
+def connectors_overview(path, check=False):
+    """Connector files, and for each agent role the files it loads. A role whose file is missing cannot start."""
+    root = _mcp_project_root(path)
+    files = mcp_connectors(root, check)
+    by_file = {f["file"]: f for f in files}
+    board = load_board(path)
+    config = board.get("automation") if isinstance(board.get("automation"), dict) else {}
+    roles = []
+    for name, role in agent_roles(config.get("agents")).items():
+        assigned = role_mcp_files(role)
+        problems = []
+        for file in assigned:
+            entry = by_file.get(file)
+            if entry is None:
+                problems.append(f"{file} does not exist in the project folder")
+            elif entry["error"]:
+                problems.append(f"{file}: {entry['error']}")
+            elif any(s["state"] == "unreachable" for s in entry["servers"]):
+                problems.append(f"A server of {file} does not answer")
+            elif any(s["state"] == "oauth" for s in entry["servers"]):
+                problems.append(f"{file} needs a sign-in that an unattended agent cannot give")
+            elif any(s["state"] in ("unauthorized", "missing_env") for s in entry["servers"]):
+                problems.append(f"{file} has no valid key")
+        roles.append({"role": name, "file": assigned[0] if len(assigned) == 1 else "", "files": assigned, "problem": "; ".join(problems)})
+    return {"files": files, "roles": roles}
+
+
+def set_role_connector_files(path, role, files):
+    """Make `role` load exactly the MCP config `files` (none when empty). Only files that exist can be chosen."""
+    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+        raise KanvasError("files must be a list of file names")
+    files = list(dict.fromkeys(f for f in files if f))
+    known = {f["file"] for f in mcp_connectors(_mcp_project_root(path))}
+    for file in files:
+        if file not in known:
+            raise KanvasError(f"{file} is not an MCP config file of this project")
+
+    def apply(board):
+        config = board.setdefault("automation", {})
+        if not isinstance(config, dict):
+            raise KanvasError("automation must be an object")
+        if role not in agent_roles(config.get("agents")):
+            raise KanvasError(f"No agent role called {role}")
+        agents = config.setdefault("agents", {})
+        entry = agents.setdefault(role, {})
+        if files:
+            entry["mcp_config"] = files[0] if len(files) == 1 else files
+        else:
+            entry.pop("mcp_config", None)
+            if not entry and role not in DEFAULT_AGENTS:
+                agents.pop(role, None)
+    mutate(path, apply)
+    return connectors_overview(path)
+
+
+def set_role_connectors(path, role, file):
+    """Make `role` load the MCP servers of `file`, or none when `file` is empty. Only files that exist can be chosen."""
+    return set_role_connector_files(path, role, [file] if file else [])
+
+
+def check_role_connectors(config, role):
+    """Fail before a role starts when an MCP file it needs is missing, instead of starting without it."""
+    for name in role_mcp_files(role):
+        if not os.path.isfile(os.path.join(config["root"], name)):
+            raise KanvasError(f"The connector file {name} of this role does not exist in the project folder; "
+                              "assign another one in Connectors or restore the file")
 
 
 def review_settings(value):
@@ -1214,9 +1406,10 @@ def claude_command(config, worktrees, role=None):
         command += ["--max-budget-usd", str(pick("max_budget_usd"))]
     allowed = role["allowed_tools"] if "allowed_tools" in role else config["allowed_tools"]
     disallowed = role["disallowed_tools"] if "disallowed_tools" in role else config["disallowed_tools"]
-    if role.get("mcp_config"):
-        # A role may load the MCP servers of one file (the designer loads Figma); --strict-mcp-config keeps out all others.
-        command += ["--mcp-config", os.path.join(config["root"], str(role["mcp_config"]))]
+    check_role_connectors(config, role)
+    for name in role_mcp_files(role):
+        # A role loads the MCP servers of its files (the designer loads Figma); --strict-mcp-config keeps out all others.
+        command += ["--mcp-config", os.path.join(config["root"], name)]
     if config.get("lean", True):
         command += ["--strict-mcp-config", "--setting-sources", "project,local"]
         tools = list(dict.fromkeys(t.split("(")[0] for t in allowed if not t.startswith("mcp__")))
@@ -1249,7 +1442,7 @@ def kill_tree(proc):
     """Ends the agent and everything it started, such as a dev server that would otherwise keep running."""
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, creationflags=NO_WINDOW)
         else:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (OSError, subprocess.SubprocessError):
@@ -1347,7 +1540,7 @@ def take_shots(browser, target, folder, wait=4):
                        "--disable-extensions", f"--user-data-dir={profile}", f"--window-size={width},{height}",
                        f"--virtual-time-budget={int(wait * 1000)}", f"--screenshot={out}", url]
             try:
-                proc = subprocess.run(command, capture_output=True, text=True, timeout=90, encoding="utf-8", errors="replace")
+                proc = subprocess.run(command, capture_output=True, text=True, timeout=90, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
             except subprocess.TimeoutExpired:
                 raise KanvasError(f"The browser did not finish the {name} screenshot of {target} in 90 seconds")
         if not os.path.isfile(out) or not os.path.getsize(out):
@@ -1486,7 +1679,7 @@ def _gh(path, *args):
     if not exe:
         raise KanvasError("The GitHub CLI (gh) is not installed or not on PATH; Factory needs it to open pull requests")
     proc = subprocess.run([exe, *args], cwd=path, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          env=publisher_environment()[0])
+                          env=publisher_environment()[0], creationflags=NO_WINDOW)
     if proc.returncode:
         raise KanvasError("gh " + " ".join(args[:2]) + ": " + (proc.stderr.strip() or proc.stdout.strip() or "failed"))
     return proc.stdout.strip()
@@ -2384,7 +2577,7 @@ def print_task(board, task):
     via = cover.get(task["id"].upper())
     if via and task["state"] == "proposed":
         print(f"YOLO:   joins the chain of {via} once a human approves it")
-    elif via and task["state"] not in ("review", "develop", "done", "production"):
+    elif via and task["state"] not in ("review", "develop", "done", "production", "discarded"):
         if via == task["id"]:
             print("YOLO:   set on this task; all workflow gates still apply")
         else:
@@ -2456,6 +2649,7 @@ STATE_HINTS = {
     "develop": "it is merged to dev",
     "done": "it is done",
     "production": "it is in production",
+    "discarded": "it was discarded",
     "blocked": "it is blocked",
 }
 
@@ -2532,7 +2726,7 @@ def cmd_status(args):
     board = load_board(path)
     tasks = task_map(board)
     cover = yolo_cover(board)
-    buckets = {k: [] for k in ("doing", "review", "todo", "blocked", "proposed", "done", "production")}
+    buckets = {k: [] for k in ("doing", "review", "todo", "blocked", "proposed", "done", "production", "discarded")}
     for t in board["tasks"]:
         buckets.setdefault(view_state(t, tasks), []).append(t)
     total = len(board["tasks"])
@@ -2792,6 +2986,26 @@ def cmd_pause(args):
     print(f"Paused {t['id']} (doing -> todo)")
 
 
+def cmd_discard(args):
+    """Close a task that will not be built (proposed or to do -> discarded), keeping the reason."""
+    path = board_path(args)
+    note = read_input(args.message, args.stdin, args.file, "reason")
+    if not note:
+        raise KanvasError("Say why it is discarded: -m \"reason\"")
+
+    def op(board):
+        t = find_task(board, args.id)
+        if t["state"] not in ("proposed", "todo"):
+            raise KanvasError(f"{t['id']} is {view_state(t, task_map(board))}; only a proposed or to-do task can be discarded")
+        was = t["state"]
+        t["state"] = "discarded"
+        add_note(t, f"Discarded: {note}", actor(args))
+        return t, was
+
+    t, was = mutate(path, op)
+    print(f"Discarded {t['id']} ({was} -> discarded)")
+
+
 def cmd_retry(args):
     path = board_path(args)
 
@@ -2958,7 +3172,7 @@ def task_detail(t, tasks):
 MCP_TOOLS = [
     {"name": "kanvas_status", "description": "Overview of the board: how many tasks are in each state, and what is in progress, in review or waiting for the human.",
      "inputSchema": {"type": "object", "properties": {}}},
-    {"name": "kanvas_list", "description": "List tasks, optionally only those in a state (proposed, todo, blocked, doing, review, done, production) or in a group.",
+    {"name": "kanvas_list", "description": "List tasks, optionally only those in a state (proposed, todo, blocked, doing, review, done, production, discarded) or in a group.",
      "inputSchema": {"type": "object", "properties": {"filter": {"type": "string", "description": "A state or a group name or id"}}}},
     {"name": "kanvas_show", "description": "Everything about one task: description, product definition, plan, run, pull requests, review gates and recent notes.",
      "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}},
@@ -3169,7 +3383,7 @@ def inbox_thread(task):
 def inbox_prompt(board, task, config):
     groups = "\n".join(f"- {g['id']}: {g['name']}" for g in board["groups"]) or "(none)"
     open_tasks = "\n".join(f"- {t['id']} [{t['state']}] {t['title']}" for t in board["tasks"]
-                           if t["state"] not in ("develop", "done", "production") and t["id"] != task["id"])[:6000] or "(none)"
+                           if t["state"] not in ("develop", "done", "production", "discarded") and t["id"] != task["id"])[:6000] or "(none)"
     repos = ", ".join(f"{k}: {v['name']}" for k, v in config["repositories"].items() if k != CURATOR_REPOSITORY) or "none"
     roles = ", ".join(r for r in config["agents"] if r not in ("reviewer", "reviewer-strong", "curator", "designer", "po"))
     brain = config["repositories"].get(CURATOR_REPOSITORY, {}).get("path")
@@ -3847,6 +4061,28 @@ def usage_runs(board, config):
             "seconds": round((result.get("duration_ms") or 0) / 1000),
         })
     return rows
+
+
+def cmd_connectors(args):
+    path = board_path(args)
+    if args.role:
+        file = "" if args.file in ("none", "-") else args.file
+        data = set_role_connectors(path, args.role, file)
+    else:
+        data = connectors_overview(path, args.check)
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+    print("Connector files")
+    for entry in data["files"]:
+        print(f"  {entry['file']}" + (f"  ERROR: {entry['error']}" if entry["error"] else ""))
+        for s in entry["servers"]:
+            print(f"    {s['name']}  {s['type']}  {s['target']}  [{s['state']}]")
+    if not data["files"]:
+        print("  (none: add a .mcp.<name>.json file to the project folder)")
+    print("Roles")
+    for r in data["roles"]:
+        print(f"  {r['role']:<16} {r['file'] or 'no MCP (lean start)'}" + (f"  PROBLEM: {r['problem']}" if r["problem"] else ""))
 
 
 def cmd_usage(args):
@@ -4641,6 +4877,168 @@ def page(title, body):
             f"<body>{body}</body></html>").encode("utf-8")
 
 
+CONNECTORS_PAGE = r"""<!doctype html>
+<html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connectors · Factory</title>
+<style>
+:root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; --line: #8884; --accent: #6366f1; --ok: #16a34a; --warn: #d97706; --bad: #dc2626; }
+body { max-width: 1100px; margin: 32px auto; padding: 0 20px; }
+header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+h1 { font-size: 22px; margin: 0; }
+a { color: var(--accent); }
+.muted { opacity: .65; }
+.bar { display: flex; gap: 8px; margin: 18px 0; flex-wrap: wrap; align-items: center; }
+button { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid var(--line); padding: 10px 8px; text-align: left; vertical-align: top; }
+th.role, td.role { text-align: center; width: 110px; }
+th.role small { display: block; font-weight: normal; }
+td.role input { width: 18px; height: 18px; cursor: pointer; }
+.file { font-weight: 600; }
+.server { margin-top: 6px; }
+.target { font-family: ui-monospace, monospace; font-size: 12px; opacity: .7; word-break: break-all; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; border: 1px solid currentColor; }
+.badge.ok { color: var(--ok); } .badge.warn { color: var(--warn); } .badge.bad { color: var(--bad); } .badge.none { opacity: .6; }
+.hint { font-size: 12px; opacity: .75; margin-top: 2px; }
+.problem { color: var(--bad); font-size: 12px; font-weight: normal; }
+form { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin: 0 0 18px; display: grid; gap: 10px; max-width: 560px; }
+label { display: grid; gap: 3px; }
+input[type=text], select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; }
+#status { min-height: 1.5em; }
+#status.error { color: var(--bad); }
+</style>
+<body>
+<header>
+  <h1>Connectors</h1>
+  <a href="./">&larr; Back to the board</a>
+  <span class="muted">MCP servers and the agents that load them. Tick a box to give that agent the connector.</span>
+</header>
+<div class="bar">
+  <button id="check" type="button">Check connections</button>
+  <button id="add" type="button" class="primary">Add connector</button>
+  <span id="status" role="status"></span>
+</div>
+<form id="form" hidden>
+  <label>Name <input id="f-name" type="text" placeholder="neon" maxlength="40" autocomplete="off"></label>
+  <label>Type <select id="f-type"><option value="http">Remote server (URL)</option><option value="stdio">Local command</option></select></label>
+  <div id="f-http" style="display:grid;gap:10px">
+    <label>URL <input id="f-url" type="text" placeholder="https://mcp.example.com/mcp" autocomplete="off"></label>
+    <label>Key, as the name of an environment variable (optional) <input id="f-env" type="text" placeholder="NEON_API_KEY" autocomplete="off"></label>
+    <span class="hint">The key itself is never saved. The file only says which variable holds it, and the computer running Factory must have that variable set. Leave it empty for a server that signs in with OAuth.</span>
+  </div>
+  <div id="f-stdio" style="display:none;gap:10px">
+    <label>Command <input id="f-cmd" type="text" placeholder="npx" autocomplete="off"></label>
+    <label>Arguments, separated by spaces <input id="f-args" type="text" placeholder="-y @scope/package" autocomplete="off"></label>
+  </div>
+  <div><button id="f-save" type="button" class="primary">Create</button> <button id="f-cancel" type="button">Cancel</button></div>
+</form>
+<div id="table"></div>
+<script>
+const LABELS = {
+  unchecked: ["Not checked", "none", ""],
+  reachable: ["Connected", "ok", ""],
+  unreachable: ["Not reachable", "bad", "The server does not answer, or the command is not installed on this computer."],
+  oauth: ["Needs OAuth", "warn", "It asks for a sign-in. Do it once in Claude Code with /mcp. An unattended agent, as on a VPS, cannot: use a server with a key instead."],
+  unauthorized: ["Key refused", "bad", "The server rejected the key it was given."],
+  missing_env: ["Key not set", "bad", "Set the environment variable on the computer that runs Factory."],
+  invalid: ["Invalid", "bad", "The entry of the file is not a valid server."],
+};
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...kids) => {
+  const n = Object.assign(document.createElement(tag), props);
+  for (const k of kids.flat()) if (k != null) n.append(k);
+  return n;
+};
+let data = null, checked = false, busy = false;
+
+async function call(url, options) {
+  const r = await fetch(url, options);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || "The request failed.");
+  return body;
+}
+function say(text, error) { $("status").textContent = text || ""; $("status").className = error ? "error" : ""; }
+function post(payload) {
+  return call("api/connectors", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+}
+async function load(check) {
+  busy = true; draw();
+  say(check ? "Checking the servers…" : "");
+  try { data = await call("api/connectors" + (check ? "?check=1" : "")); checked = !!check; say(""); }
+  catch (e) { say(e.message, true); }
+  busy = false; draw();
+}
+async function toggle(role, file, on) {
+  const current = data.roles.find((r) => r.role === role).files;
+  const files = on ? [...current, file] : current.filter((f) => f !== file);
+  busy = true; draw();
+  try { data = await post({ action: "assign", role, files }); say(`${role} loads ${files.length ? files.join(", ") : "no connectors"}.`); }
+  catch (e) { say(e.message, true); }
+  busy = false; draw();
+}
+function badge(s) {
+  const [label, kind, hint] = LABELS[s.state] || [s.state, "none", ""];
+  const names = s.env && s.env.length ? ` (${s.env.join(", ")})` : "";
+  return [el("span", { className: "badge " + kind, textContent: label + names }), hint && checked ? el("div", { className: "hint", textContent: hint }) : null];
+}
+function draw() {
+  const box = $("table");
+  box.replaceChildren();
+  if (!data) { box.append(el("p", { className: "muted", textContent: "Loading…" })); return; }
+  $("check").disabled = busy;
+  $("check").textContent = checked ? "Check again" : "Check connections";
+  if (!data.files.length) {
+    box.append(el("p", { className: "muted", textContent: "No .mcp.<name>.json file in the project folder yet. Use Add connector." }));
+    return;
+  }
+  const head = el("tr", {}, el("th", { textContent: "Connector" }),
+    data.roles.map((r) => el("th", { className: "role" }, r.role, r.problem ? el("small", { className: "problem", textContent: r.problem }) : null)));
+  const rows = data.files.map((f) => el("tr", {},
+    el("td", {}, el("div", { className: "file", textContent: f.file }),
+      f.error ? el("div", { className: "problem", textContent: f.error }) : null,
+      f.servers.map((s) => el("div", { className: "server" },
+        el("b", { textContent: s.name }), " ", el("span", { className: "muted", textContent: s.type }), " ", badge(s),
+        el("div", { className: "target", textContent: s.target })))),
+    data.roles.map((r) => {
+      const box = el("input", { type: "checkbox", checked: r.files.includes(f.file), disabled: busy || !!f.error, ariaLabel: `${r.role} loads ${f.file}` });
+      box.onchange = () => toggle(r.role, f.file, box.checked);
+      return el("td", { className: "role" }, box);
+    })));
+  box.append(el("table", {}, el("thead", {}, head), el("tbody", {}, rows)),
+    el("p", { className: "muted", textContent: "An agent with no box ticked starts lean, without MCP servers. One whose file is missing or broken does not start." }));
+}
+$("check").onclick = () => load(true);
+$("add").onclick = () => { $("form").hidden = false; $("f-name").focus(); };
+$("f-cancel").onclick = () => { $("form").hidden = true; };
+$("f-type").onchange = () => {
+  const http = $("f-type").value === "http";
+  $("f-http").style.display = http ? "grid" : "none";
+  $("f-stdio").style.display = http ? "none" : "grid";
+};
+$("f-save").onclick = async () => {
+  const http = $("f-type").value === "http";
+  const spec = http
+    ? { type: "http", url: $("f-url").value, env: $("f-env").value }
+    : { type: "stdio", command: $("f-cmd").value, args: $("f-args").value.split(/\s+/).filter(Boolean) };
+  spec.name = $("f-name").value;
+  try {
+    data = await post({ action: "add", ...spec });
+    say(`.mcp.${spec.name.trim().toLowerCase()}.json created. Tick the agents that should load it.`);
+    $("form").hidden = true;
+    for (const id of ["f-name", "f-url", "f-env", "f-cmd", "f-args"]) $(id).value = "";
+    draw();
+  } catch (e) { say(e.message, true); }
+};
+load(false);
+</script>
+</body></html>
+"""
+
+
 LOCAL_NAMES = frozenset({"localhost", "127.0.0.1", "[::1]"})
 DEFAULT_PORT = 8765
 
@@ -5233,9 +5631,9 @@ class BoardServer(ThreadingHTTPServer):
         threading.Thread(target=run, daemon=True).start()
         return job
 
-    def start_chat(self, name, agent, message, sessions, history, act=False):
-        """One chat turn in the background, polled like any help. `agent` is a name or "auto"; `sessions` maps each agent to
-        the conversation it already has with the owner."""
+    def start_chat(self, name, chat_id, agent, message, act=False):
+        """One turn of a saved conversation in the background, polled like any help. `agent` is a name or "auto"; the
+        conversation keeps what was said, the session of each agent and the conversations attached as context."""
         path = self.board_path(name)
         if not shutil.which("claude"):
             raise KanvasError("Claude Code (claude) is not installed or not on PATH; the chat needs it")
@@ -5247,7 +5645,15 @@ class BoardServer(ThreadingHTTPServer):
         with self.assist_lock:
             if sum(1 for j in self.assist.values() if j["status"] == "running") >= ASSIST_MAX_RUNNING:
                 raise AssistBusy(f"{ASSIST_MAX_RUNNING} agent conversations are already running; wait for one to finish")
-            job = {"id": os.urandom(8).hex(), "board": name, "kind": "chat", "status": "running", "phase": "draft",
+            with chat_lock:
+                chat = chat_load(path, chat_id) if chat_id else chat_new(path, message)
+                if chat["messages"] == [] and chat["title"] == "New conversation":
+                    chat["title"] = _clip(message, 60)
+                earlier = [{"who": m["who"], "text": m["text"]} for m in chat["messages"][-8:]]
+                chat["messages"].append({"who": "you", "text": message, "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                chat["agent"] = agent
+                chat_save(path, chat)
+            job = {"id": os.urandom(8).hex(), "board": name, "chat": chat["id"], "kind": "chat", "status": "running", "phase": "draft",
                    "working": agent if agent != "auto" else "router", "messages": [], "result": None, "error": "", "cost": 0.0, "turns": 0}
             self.assist[job["id"]] = job
             for old in [k for k, j in self.assist.items() if j["status"] != "running"][:-ASSIST_KEEP]:
@@ -5261,9 +5667,20 @@ class BoardServer(ThreadingHTTPServer):
                 _, root, settings = assist_context(path)
                 who = agent if agent != "auto" else chat_route(message, root)
                 change(working=who)
-                reply, session, cost, turns = chat_step(who, message, sessions.get(who), history, root, settings, act)
+                with chat_lock:
+                    fresh = chat_load(path, chat["id"])
+                    context = chat_context_text(path, fresh, who)
+                reply, session, cost, turns = chat_step(who, message, fresh["sessions"].get(who), earlier, root, settings, act, context)
+                reply = reply.strip() or "(no text)"
+                with chat_lock:
+                    fresh = chat_load(path, chat["id"])
+                    if session:
+                        fresh["sessions"][who] = session
+                    fresh["sent"] = sorted(set(fresh["sent"]) | {f"{who}:{c}" for c in fresh["context"]})
+                    fresh["messages"].append({"who": who, "text": reply, "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                    chat_save(path, fresh)
                 change(status="done", working="", cost=cost, turns=turns,
-                       result={"agent": who, "reply": reply.strip() or "(no text)", "session": session})
+                       result={"agent": who, "reply": reply, "chat": chat["id"]})
             except subprocess.TimeoutExpired:
                 change(status="failed", working="", error="The agent took too long and was stopped")
             except (KanvasError, OSError, ValueError) as e:
@@ -5422,7 +5839,7 @@ def assist_prompt(kind, step, board, task, fields, root, repositories, roles, ea
     heard = "".join(f"- {a['q'] or a['id']}\n  Answer: {a['a']}\n" for a in answers)
     if kind == "task":
         groups = "\n".join(f"- {g['id']}: {g['name']}" for g in board["groups"]) or "(none)"
-        open_tasks = [t for t in board["tasks"] if t["state"] not in ("develop", "done", "production")]
+        open_tasks = [t for t in board["tasks"] if t["state"] not in ("develop", "done", "production", "discarded")]
         listed = "\n".join(f"- {t['id']} [{t['state']}] {t['title']}" for t in open_tasks[:80]) or "(none)"
         return head + (
             f"The owner is creating a task and has written:\nTitle: {fields.get('title') or '(empty)'}\n"
@@ -5563,7 +5980,7 @@ CHAT_NEVER = ("Bash(git push:*)", "Bash(git commit:*)", "Bash(git merge:*)", "Ba
               "Bash(git checkout:*)", "Bash(git clean:*)", "Bash(rm:*)", "Bash(del:*)", "Bash(Remove-Item:*)")
 
 
-def chat_step(agent, message, session, history, root, settings, act=False):
+def chat_step(agent, message, session, history, root, settings, act=False, context=""):
     """One turn with an agent. The agent keeps its own conversation through `--resume`; when the owner has just moved to
     another agent, `history` brings it up to date with what was said. With `act` it may also edit files and run commands,
     but never commit, push, merge or delete."""
@@ -5582,17 +5999,120 @@ def chat_step(agent, message, session, history, root, settings, act=False):
     if history and not session:
         said = "\n".join(f"{m['who']}: {_clip(m['text'], 800)}" for m in history)
         prompt = f"The owner was talking with other agents of the team. What was said so far:\n{said}\n\nThe owner now says:\n{message}"
+    if context:
+        prompt = f"Earlier conversations the owner attached as context:\n{context}\n\n{prompt}"
     data = chat_run(command, prompt, root)
     return (str(data.get("result") or ""), str(data.get("session_id") or ""), float(data.get("total_cost_usd") or 0),
             int(data.get("num_turns") or 0))
 
 
-def clean_history(value):
+# Conversations live on the server, one JSON file each under `.kanvas/chats` of the project folder, so they survive a reload,
+# open from any browser of this computer and can be attached to a new conversation as context.
+CHAT_ID = re.compile(r"[0-9a-f]{16}")
+CHAT_MESSAGES = 400
+CHAT_CONTEXT_CHARS = 6000
+chat_lock = threading.RLock()
+
+
+def chats_folder(path):
+    _, root, _ = assist_context(path)
+    return os.path.join(root, ".kanvas", "chats")
+
+
+def _chat_file(path, chat_id):
+    if not isinstance(chat_id, str) or not CHAT_ID.fullmatch(chat_id):
+        raise KanvasError("Unknown conversation")
+    return os.path.join(chats_folder(path), chat_id + ".json")
+
+
+def chat_load(path, chat_id):
+    try:
+        with open(_chat_file(path, chat_id), "rb") as f:
+            data = json.loads(f.read().decode("utf-8"))
+    except (OSError, ValueError):
+        raise KanvasError("Unknown conversation")
+    if not isinstance(data, dict):
+        raise KanvasError("Unknown conversation")
+    data.setdefault("messages", [])
+    data.setdefault("sessions", {})
+    data.setdefault("context", [])
+    data.setdefault("sent", [])
+    return data
+
+
+def chat_save(path, chat):
+    target = _chat_file(path, chat["id"])
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    chat["messages"] = chat["messages"][-CHAT_MESSAGES:]
+    chat["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    temp = target + ".tmp"
+    with open(temp, "wb") as f:
+        f.write(json.dumps(chat, ensure_ascii=False, indent=1).encode("utf-8"))
+    os.replace(temp, target)
+
+
+def chat_new(path, title=""):
+    chat = {"id": os.urandom(8).hex(), "title": _clip(title, 60) or "New conversation", "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "agent": "auto", "sessions": {}, "context": [], "sent": [], "messages": []}
+    with chat_lock:
+        chat_save(path, chat)
+    return chat
+
+
+def chat_list(path):
     out = []
-    for m in (value if isinstance(value, list) else [])[-8:]:
-        if isinstance(m, dict) and isinstance(m.get("text"), str) and isinstance(m.get("who"), str):
-            out.append({"who": _clip(m["who"], 40), "text": _clip(m["text"], 800)})
-    return out
+    folder = chats_folder(path)
+    for name in os.listdir(folder) if os.path.isdir(folder) else []:
+        if not name.endswith(".json") or not CHAT_ID.fullmatch(name[:-5]):
+            continue
+        try:
+            chat = chat_load(path, name[:-5])
+        except KanvasError:
+            continue
+        out.append({"id": chat["id"], "title": chat.get("title") or "Conversation", "updated": chat.get("updated", ""),
+                    "messages": len(chat["messages"]), "agent": chat.get("agent", "auto")})
+    return sorted(out, key=lambda c: c["updated"], reverse=True)
+
+
+def chat_edit(path, request):
+    """new, rename, delete, or set the conversations attached as context of one."""
+    action = request.get("action")
+    if action == "new":
+        return chat_new(path, request.get("title") or "")
+    with chat_lock:
+        chat = chat_load(path, request.get("id"))
+        if action == "delete":
+            os.remove(_chat_file(path, chat["id"]))
+            return {}
+        if action == "rename":
+            chat["title"] = _clip(request.get("title"), 60) or chat["title"]
+        elif action == "context":
+            others = {c["id"] for c in chat_list(path)} - {chat["id"]}
+            wanted = [i for i in request.get("context") or [] if isinstance(i, str) and i in others]
+            chat["context"] = list(dict.fromkeys(wanted))
+        elif action == "agent":
+            if request.get("agent") != "auto" and request.get("agent") not in CHAT_AGENTS:
+                raise KanvasError("Expected auto or one of: " + ", ".join(CHAT_AGENTS))
+            chat["agent"] = request.get("agent")
+        else:
+            raise KanvasError("Expected new, rename, delete, context or agent")
+        chat_save(path, chat)
+        return chat
+
+
+def chat_context_text(path, chat, who):
+    """What the attached conversations said, for the agent that has not read it yet."""
+    parts = []
+    for other in chat["context"]:
+        if f"{who}:{other}" in chat["sent"]:
+            continue
+        try:
+            found = chat_load(path, other)
+        except KanvasError:
+            continue
+        said = "\n".join(f"{m['who']}: {_clip(m['text'], 1200)}" for m in found["messages"][-14:])
+        parts.append(f"Conversation \"{found.get('title')}\":\n{said}")
+    return _clip("\n\n".join(parts), CHAT_CONTEXT_CHARS * 2)
 
 
 RELEASE_WORKFLOWS = {"cut": "release-cut.yml", "promote": "release-promote.yml"}
@@ -5870,6 +6390,18 @@ class BoardHandler(BaseHTTPRequestHandler):
             return self._redirect(f"/{quote(name)}/")
         if rest == ["api", "phone"]:
             return self._phone(name)
+        if rest == ["connectors"]:
+            if not self._from_this_computer():
+                return self._error(403, "Connectors are shown only to the computer running Factory")
+            return self._send(200, CONNECTORS_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+        if rest == ["api", "connectors"]:
+            if not self._from_this_computer():
+                return self._error(403, "Connectors are shown only to the computer running Factory")
+            check = parse_qs(urlparse(self.path).query).get("check", [""])[0] == "1"
+            try:
+                return self._send(200, json.dumps(connectors_overview(path, check), ensure_ascii=False).encode("utf-8"))
+            except (KanvasError, OSError) as e:
+                return self._error(400, str(e))
         if rest in ([""], ["index.html"]):
             try:
                 with open(HTML_FILE, "rb") as f:
@@ -5923,6 +6455,15 @@ class BoardHandler(BaseHTTPRequestHandler):
             if not isinstance(mockup, str) or not mockup:
                 return self._error(404, "Not found")
             return self._send(200, mockup.encode("utf-8"), "text/html; charset=utf-8", MOCKUP_HEADERS)
+        if rest[:2] == ["api", "chats"] and len(rest) in (2, 3):
+            if not self._from_this_computer():
+                return self._error(403, "The chat answers only requests from the computer running Factory")
+            try:
+                path = self.server.board_path(name)
+                found = chat_list(path) if len(rest) == 2 else chat_load(path, rest[2])
+            except KanvasError as e:
+                return self._error(404, str(e))
+            return self._send(200, json.dumps(found, ensure_ascii=False).encode("utf-8"))
         if len(rest) == 3 and rest[:2] == ["api", "assist"]:
             job = self.server.assist_status(name, rest[2])
             if job is None:
@@ -6067,15 +6608,43 @@ class BoardHandler(BaseHTTPRequestHandler):
                 return
             try:
                 request = json.loads(text)
-                sessions = {k: v for k, v in (request.get("sessions") or {}).items()
-                            if isinstance(k, str) and isinstance(v, str) and re.fullmatch(r"[\w-]{8,64}", v)}
-                job = self.server.start_chat(parts[0], str(request.get("agent") or "auto"), request.get("message"), sessions,
-                                             clean_history(request.get("history")), request.get("act") is True)
+                job = self.server.start_chat(parts[0], request.get("chat") or None, str(request.get("agent") or "auto"),
+                                             request.get("message"), request.get("act") is True)
             except AssistBusy as e:
                 return self._error(429, str(e))
             except (KanvasError, ValueError, AttributeError) as e:
                 return self._error(400, str(e) or "Expected a JSON object")
-            return self._send(202, json.dumps({"job": job["id"]}).encode("utf-8"))
+            return self._send(202, json.dumps({"job": job["id"], "chat": job["chat"]}).encode("utf-8"))
+        if parts[1:] == ["api", "chats"] and self.server.board_path(parts[0]) is not None:
+            if not self._from_this_computer():
+                return self._error(403, "The chat answers only requests from the computer running Factory")
+            text = self._read_json()
+            if text is None:
+                return
+            try:
+                result = chat_edit(self.server.board_path(parts[0]), json.loads(text))
+            except (KanvasError, ValueError, AttributeError) as e:
+                return self._error(400, str(e) or "Expected a JSON object")
+            return self._send(200, json.dumps(result, ensure_ascii=False).encode("utf-8"))
+        if parts[1:] == ["api", "connectors"] and self.server.board_path(parts[0]) is not None:
+            if not self._from_this_computer():
+                return self._error(403, "Connectors change only from the computer running Factory")
+            text = self._read_json()
+            if text is None:
+                return
+            try:
+                request = json.loads(text)
+                if request.get("action") == "add":
+                    result = add_connector(self.server.board_path(parts[0]), request)
+                elif request.get("action") == "assign":
+                    result = set_role_connector_files(self.server.board_path(parts[0]), str(request.get("role") or ""),
+                                                      request.get("files"))
+                else:
+                    result = set_role_connectors(self.server.board_path(parts[0]), str(request.get("role") or ""),
+                                                 str(request.get("file") or ""))
+            except (KanvasError, ValueError, AttributeError, OSError) as e:
+                return self._error(400, str(e) or "Expected a JSON object")
+            return self._send(200, json.dumps(result, ensure_ascii=False).encode("utf-8"))
         if parts[1:] == ["api", "release"] and self.server.board_path(parts[0]) is not None:
             if not self._from_this_computer():
                 return self._error(403, "Releases run only from the computer running Factory")
@@ -6258,7 +6827,7 @@ def tailscale_self():
         raise KanvasError("Tailscale is not installed here. Get it from https://tailscale.com/download, "
                           "sign in on this computer and on your phone, then run this again.")
     try:
-        proc = subprocess.run([exe, "status", "--json"], capture_output=True, timeout=15)
+        proc = subprocess.run([exe, "status", "--json"], capture_output=True, timeout=15, creationflags=NO_WINDOW)
         status = json.loads(proc.stdout.decode("utf-8", "replace"))
     except (OSError, subprocess.TimeoutExpired, ValueError):
         raise KanvasError("Tailscale did not say this computer's address. Is it running? Try `tailscale status`.")
@@ -6409,7 +6978,7 @@ def service_command():
 def run_quiet(cmd):
     """Run a system command; return (exit code, its output)."""
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=30)
+        proc = subprocess.run(cmd, capture_output=True, timeout=30, creationflags=NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
     return proc.returncode, (proc.stdout + proc.stderr).decode("utf-8", "replace").strip()
@@ -6565,6 +7134,7 @@ def cmd_service(args):
 
 EPILOG = """\
 workflow:  proposed -> todo -> doing -> review -> develop -> done -> production
+  (a proposed or to-do task nobody will build is closed as discarded)
   Product definition (PO/TL) gates todo; a technical plan (Architect/Senior)
   gates doing. Independent agent and manual reviews gate the dev merge (develop),
   and main/deployment evidence gates production.
@@ -6610,7 +7180,7 @@ def build_parser():
 
     add("status", cmd_status, "board overview (default command)")
     p = add("list", cmd_list, "list tasks, optionally filtered by state or group")
-    p.add_argument("filter", nargs="?", help="proposed, todo/ready, blocked, doing, review, develop, done, production, or a group")
+    p.add_argument("filter", nargs="?", help="proposed, todo/ready, blocked, doing, review, develop, done, production, discarded, or a group")
     p = add("show", cmd_show, "task details, dependencies and notes")
     p.add_argument("id")
     add("ready", cmd_ready, "tasks that can be started now")
@@ -6638,6 +7208,10 @@ def build_parser():
     p.add_argument("id")
     p.add_argument("-m", "--message", help="optional note on why")
     text_sources(p, "note")
+    p = add("discard", cmd_discard, "close a proposed or to-do task that will not be built (proposed/todo -> discarded)")
+    p.add_argument("id")
+    p.add_argument("-m", "--message", help="why it is discarded (required)")
+    text_sources(p, "reason")
     p = add("retry", cmd_retry, "retry failed automation in its existing isolated worktree")
     p.add_argument("id")
     p = add("inbox", cmd_inbox, "send an idea or an incident to the product owner, who turns it into a task; with no text, list the inbox")
@@ -6666,6 +7240,12 @@ def build_parser():
     p.add_argument("--again", action="store_true", help="have the designer try again (after a failure)")
     p = add("review", cmd_review, "have the reviewer agent review a task in review now, and record its verdict")
     p.add_argument("id")
+    p = add("connectors", cmd_connectors, "list the MCP connector files and which one each agent role loads; "
+            "`connectors ROLE FILE` assigns one (FILE `none` for a lean start)")
+    p.add_argument("role", nargs="?")
+    p.add_argument("file", nargs="?", default="none")
+    p.add_argument("--check", action="store_true", help="also try to reach each server")
+    p.add_argument("--json", action="store_true", help="print the result as JSON")
     p = add("usage", cmd_usage, "turns, cost and tokens of every automated run, per task, agent role and model")
     p.add_argument("--json", action="store_true", help="print the rows as JSON")
     p = add("note", cmd_note, "append a note to a task (keeps the description intact)")

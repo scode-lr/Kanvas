@@ -4,6 +4,7 @@ import argparse
 import atexit
 import contextlib
 import http.client
+import http.server
 import io
 import json
 import os
@@ -1251,6 +1252,19 @@ class WorkflowTests(TempBoard):
         self.assertEqual(t["state"], "todo")
         self.assertEqual([n["text"] for n in t["notes"]], ["Plan: write the parser first", "Waiting for an API key"])
 
+    def test_discard_closes_a_task_nobody_will_build_and_frees_its_dependents(self):
+        self.assertIn("reason", self.fails("discard", "DV-02"))
+        self.assertIn("only a proposed or to-do", self.fails("discard", "DV-01", "-m", "no"))
+        self.run_cli("discard", "DV-02", "-m", "Replaced by DV-04")
+        t = self.get("DV-02")
+        self.assertEqual(t["state"], "discarded")
+        self.assertEqual(t["notes"][-1]["text"], "Discarded: Replaced by DV-04")
+        self.assertIn("DV-03", self.run_cli("ready")[1])
+        self.run_cli("discard", "DV-04", "-m", "Not needed")
+        self.assertEqual(self.get("DV-04")["state"], "discarded")
+        self.assertIn("only a proposed or to-do", self.fails("discard", "DV-02", "-m", "again"))
+        self.run_cli("check")
+
     def test_author_comes_from_as_or_environment(self):
         self.run_cli("note", "DV-02", "from env", env={"KANVAS_AGENT": "codex"})
         self.run_cli("note", "DV-02", "--as", "gemini", "after an option")
@@ -1876,6 +1890,26 @@ class AutomationTests(TempBoard):
             self.assertEqual(kanvas.chat_route("hello", self.dir), "triage")
         with mock.patch.object(kanvas, "chat_run", side_effect=fake):
             kanvas.chat_step("senior-dev", "fix it", None, [], self.dir, kanvas.assist_settings(None), act=True)
+        path = self.path
+        first = kanvas.chat_new(path, "Queue design")
+        second = kanvas.chat_new(path, "")
+        kanvas.chat_edit(path, {"action": "rename", "id": second["id"], "title": "Release talk"})
+        self.assertEqual({c["title"] for c in kanvas.chat_list(path)}, {"Queue design", "Release talk"})
+        saved = kanvas.chat_load(path, first["id"])
+        saved["messages"] = [{"who": "you", "text": "Use a queue?"}, {"who": "architect", "text": "Yes, a queue."}]
+        kanvas.chat_save(path, saved)
+        kanvas.chat_edit(path, {"action": "context", "id": second["id"], "context": [first["id"], second["id"], "nope"]})
+        attached = kanvas.chat_load(path, second["id"])
+        self.assertEqual(attached["context"], [first["id"]])
+        text = kanvas.chat_context_text(path, attached, "architect")
+        self.assertIn("architect: Yes, a queue.", text)
+        attached["sent"] = [f"architect:{first['id']}"]
+        self.assertEqual(kanvas.chat_context_text(path, attached, "architect"), "")
+        self.assertIn("Queue design", kanvas.chat_context_text(path, attached, "senior-dev"))
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.chat_load(path, "../../etc/passwd")
+        kanvas.chat_edit(path, {"action": "delete", "id": first["id"]})
+        self.assertEqual([c["id"] for c in kanvas.chat_list(path)], [second["id"]])
         acting = calls[-1][0]
         self.assertEqual(acting[acting.index("--tools") + 1], "Read,Glob,Grep,Edit,Write,Bash")
         self.assertIn("Bash(git push:*)", acting)
@@ -4856,6 +4890,7 @@ class ServerTests(TempBoard):
             self.skipTest("no test port with two free ports below it")
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         other = self.other_project()
         env = dict(os.environ, KANVAS_AGENT="")
@@ -5372,6 +5407,7 @@ class ServiceTests(unittest.TestCase):
         else:
             self.skipTest("no test port with two free ports below it")
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         return port
@@ -6057,6 +6093,118 @@ class DesignCheckTests(unittest.TestCase):
                                       [{"id": "q1", "q": "Which clubs first?", "a": "Only Voltrega"}])
         self.assertIn("Which clubs first?", prompt)
         self.assertIn("Only Voltrega", prompt)
+
+
+class ConnectorTests(TempBoard):
+    def write_mcp(self, name, servers):
+        with open(os.path.join(self.dir, name), "w", encoding="utf-8") as f:
+            json.dump({"mcpServers": servers}, f)
+
+    def test_connector_files_and_their_servers_are_listed(self):
+        self.write_mcp(".mcp.figma.json", {"figma": {"type": "http", "url": "https://example.invalid/mcp"}})
+        self.write_mcp(".mcp.json", {"tool": {"command": "kanvas-no-such-command"}})
+        data = kanvas.connectors_overview(self.path)
+        self.assertEqual([f["file"] for f in data["files"]], [".mcp.figma.json", ".mcp.json"])
+        self.assertEqual(data["files"][0]["servers"][0]["target"], "https://example.invalid/mcp")
+        self.assertEqual(data["files"][0]["servers"][0]["state"], "unchecked")
+        self.assertTrue(all(r["file"] == "" and r["problem"] == "" for r in data["roles"]))
+
+    def test_a_server_that_cannot_be_reached_is_reported_when_checked(self):
+        self.write_mcp(".mcp.json", {"tool": {"command": "kanvas-no-such-command"}})
+        data = kanvas.connectors_overview(self.path, check=True)
+        self.assertEqual(data["files"][0]["servers"][0]["state"], "unreachable")
+
+    def test_assigning_a_file_to_a_role_is_saved_and_can_be_undone(self):
+        self.write_mcp(".mcp.figma.json", {"figma": {"type": "http", "url": "https://example.invalid/mcp"}})
+        data = kanvas.set_role_connectors(self.path, "designer", ".mcp.figma.json")
+        self.assertEqual(next(r for r in data["roles"] if r["role"] == "designer")["file"], ".mcp.figma.json")
+        self.assertEqual(kanvas.load_board(self.path)["automation"]["agents"]["designer"]["mcp_config"], ".mcp.figma.json")
+        kanvas.set_role_connectors(self.path, "designer", "")
+        self.assertNotIn("mcp_config", kanvas.load_board(self.path)["automation"]["agents"].get("designer", {}))
+
+    def test_only_existing_files_and_known_roles_can_be_assigned(self):
+        self.write_mcp(".mcp.figma.json", {})
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.set_role_connectors(self.path, "designer", ".mcp.missing.json")
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.set_role_connectors(self.path, "nobody", ".mcp.figma.json")
+
+    def test_a_role_whose_file_is_missing_reports_the_problem_and_does_not_start(self):
+        board = kanvas.load_board(self.path)
+        board["automation"] = {"agents": {"designer": {"mcp_config": ".mcp.gone.json"}}}
+        write_board(self.path, board)
+        data = kanvas.connectors_overview(self.path)
+        self.assertIn("does not exist", next(r for r in data["roles"] if r["role"] == "designer")["problem"])
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.check_role_connectors({"root": self.dir}, {"mcp_config": ".mcp.gone.json"})
+        kanvas.check_role_connectors({"root": self.dir}, {})
+
+    def test_a_connector_is_created_without_saving_the_key(self):
+        data = kanvas.add_connector(self.path, {"name": "Neon", "type": "http", "url": "https://example.invalid/mcp", "env": "NEON_API_KEY"})
+        with open(os.path.join(self.dir, ".mcp.neon.json"), encoding="utf-8") as f:
+            server = json.load(f)["mcpServers"]["neon"]
+        self.assertEqual(server["headers"], {"Authorization": "Bearer ${NEON_API_KEY}"})
+        self.assertIn(".mcp.neon.json", [f["file"] for f in data["files"]])
+
+    def test_a_connector_rejects_bad_input_and_never_overwrites(self):
+        base = {"name": "neon", "type": "http", "url": "https://example.invalid/mcp"}
+        for bad in ({**base, "name": "../x"}, {**base, "url": "file:///etc/passwd"}, {**base, "env": "sk-abc 123"},
+                    {**base, "type": "ftp"}, {"name": "a", "type": "stdio", "command": ""}):
+            with self.assertRaises(kanvas.KanvasError):
+                kanvas.add_connector(self.path, bad)
+        kanvas.add_connector(self.path, base)
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.add_connector(self.path, base)
+
+    def test_a_local_command_connector_is_created(self):
+        kanvas.add_connector(self.path, {"name": "tool", "type": "stdio", "command": "npx", "args": ["-y", "pkg"]})
+        with open(os.path.join(self.dir, ".mcp.tool.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["mcpServers"]["tool"], {"command": "npx", "args": ["-y", "pkg"]})
+
+    def test_a_missing_key_is_reported_when_checked(self):
+        self.write_mcp(".mcp.k.json", {"k": {"type": "http", "url": "https://example.invalid/mcp",
+                                            "headers": {"Authorization": "Bearer ${KANVAS_TEST_UNSET_KEY}"}}})
+        state = kanvas.connectors_overview(self.path, check=True)["files"][0]["servers"][0]
+        self.assertEqual((state["state"], state["env"]), ("missing_env", ["KANVAS_TEST_UNSET_KEY"]))
+
+    def test_a_role_can_load_several_connectors(self):
+        self.write_mcp(".mcp.a.json", {"a": {"command": "x"}})
+        self.write_mcp(".mcp.b.json", {"b": {"command": "y"}})
+        data = kanvas.set_role_connector_files(self.path, "designer", [".mcp.a.json", ".mcp.b.json"])
+        role = next(r for r in data["roles"] if r["role"] == "designer")
+        self.assertEqual(role["files"], [".mcp.a.json", ".mcp.b.json"])
+        self.assertEqual(kanvas.load_board(self.path)["automation"]["agents"]["designer"]["mcp_config"], [".mcp.a.json", ".mcp.b.json"])
+        data = kanvas.set_role_connector_files(self.path, "designer", [".mcp.b.json"])
+        self.assertEqual(kanvas.load_board(self.path)["automation"]["agents"]["designer"]["mcp_config"], ".mcp.b.json")
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.set_role_connector_files(self.path, "designer", [".mcp.gone.json"])
+        with self.assertRaises(kanvas.KanvasError):
+            kanvas.check_role_connectors({"root": self.dir}, {"mcp_config": [".mcp.a.json", ".mcp.gone.json"]})
+
+    def test_a_server_that_asks_for_a_sign_in_is_reported_as_oauth(self):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(401)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/mcp"
+        self.write_mcp(".mcp.o.json", {"o": {"type": "http", "url": url}})
+        self.write_mcp(".mcp.k.json", {"k": {"type": "http", "url": url, "headers": {"Authorization": "Bearer abc"}}})
+        files = {f["file"]: f["servers"][0]["state"] for f in kanvas.connectors_overview(self.path, check=True)["files"]}
+        self.assertEqual(files, {".mcp.k.json": "unauthorized", ".mcp.o.json": "oauth"})
+
+    def test_the_cli_lists_and_assigns(self):
+        self.write_mcp(".mcp.figma.json", {"figma": {"type": "http", "url": "https://example.invalid/mcp"}})
+        self.run_cli("connectors", "designer", ".mcp.figma.json")
+        out = self.run_cli("connectors")[1]
+        self.assertIn(".mcp.figma.json", out)
+        self.assertRegex(out, r"designer\s+\.mcp\.figma\.json")
 
 
 if __name__ == "__main__":

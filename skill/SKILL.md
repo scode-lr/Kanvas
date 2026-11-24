@@ -29,6 +29,7 @@ proposed -> todo -> doing -> review -> done -> production
 | review | you (`finish`) | Awaiting independent agent review and manual review |
 | done | the human | Both reviews passed and the change is merged to `dev` |
 | production | the human | Merged to `main`/`master`, deployed and evidenced |
+| discarded | the human or you (`discard ID -m "why"`) | A proposed or to-do task nobody will build; kept as a record, and it no longer holds back what depended on it |
 
 The product Grill me records outcome, needs/constraints, acceptance criteria and non-goals. Before Doing, `start` requires an architecture/senior construction plan and accepts repeatable `--worktree PATH`; it snapshots worktree, branch, commit and dirty state. `finish` always opens both review gates. A different agent identity must run `agent-review --approve`; the human completes manual review and records dev/production evidence in the board.
 
